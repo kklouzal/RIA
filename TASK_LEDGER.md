@@ -148,7 +148,7 @@ Implementation branch: `codex/ria-implementation`, based on planning commit `e2a
 - [x] Complete the independent reviews and reconcile every concrete finding. Reports are in `planning/model-implementation-review.md`, `planning/protocol-implementation-review.md`, and `planning/preparation-and-qualification-review.md`.
 - [x] Check mandatory software paths and operational handoff against the complete specification; distinguish absent implementation from deferred physical evidence. The prior complete-software claim is withdrawn in the README and current handoff/verification/review reports.
 - [ ] Implement and verify all confirmed in-scope corrections, with adversarial offline regressions where useful.
-- [ ] Freeze final inputs, run appropriate independent checks, publish any corrected sources/images and record actual results.
+- [x] Freeze final inputs, run appropriate independent checks, publish corrected sources/images and record actual results.
 - The existing prohibition on model downloads, live inference and target GPU/physical probes remains in force. No stronger numerical, performance or physical qualification claim follows from this review.
 
 ### Review checkpoint and correction of prior completion claim
@@ -165,3 +165,10 @@ Implementation branch: `codex/ria-implementation`, based on planning commit `e2a
 - `locks/verification/implementation-review.json` records actual source/log identities and explicit `complete_software_implementation=false`/`final_release_qualified=false`. No weights, GPU queries/kernels, live model, target probes or physical soak were executed.
 - [ ] Implement specification7.3 expert-grouped prompt prefill with bounded per-row state, multirow client callbacks, original-slot scatter and independent sequential/grouped source-contract checks.
 - [ ] Implement complete semantic540-cell matrix and fault/gate producers/validators. Preserve each already available partial producer; generic numeric reports grant no physical/gate coverage. `tools/qualify_ria.py readiness` exits1 and records the exact missing obligations.
+
+### Review publication checkpoint
+
+- Corrected sources are committed and pushed as `f37d418ed146283a98004e02925621c82573b9e9` on `codex/ria-implementation`. [Hosted run37188961273](https://github.com/kklouzal/RIA/actions/runs/37188961273) passed all three jobs: offline verification, CPU container and CUDA container. Downloaded results confirm 413 Python tests, 35 static checks with 26 zero-finding Clang analyses, ASan/UBSan/leaks, all three Clang18 ThreadSanitizer fixtures and unchanged schema regeneration. All 3714 tracked source identities matched the tested snapshot before this documentation-only checkpoint.
+- Anonymous registry metadata independently verifies Linux amd64 CPU index `sha256:cf66c38d4e989a1dec32522e7a51bf96c634d0087dc1bd9d749762a05975d1a5` and CUDA index `sha256:6784b247343d4313aa616164d53c17b36a9dd5e3b0666ba498bde142e2e31308`, exact manifest/config hashes, source revision labels, runtime UID10001 and SBOM/SLSA descriptors. No filesystem or attestation layers were pulled and no image was executed.
+- `locks/verification/implementation-review-publication.json` preserves actual job URLs, immutable image identities, 92 downloaded evidence hashes and the tested source snapshot. The original publication record remains historical evidence for the pre-review implementation. Current handoff instructions now use the corrected images.
+- The second-review defects and generated-inventory work are verified and published. The broader complete-implementation requirement remains open for expert-grouped prompt prefill and the complete semantic matrix/fault/gate producers. No model/GPU/target/soak execution or performance superiority is claimed; both software completeness and final release qualification remain false.

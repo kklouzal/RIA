@@ -17,21 +17,23 @@ does not establish GPU numerical correctness.
 
 Use source branch `codex/ria-implementation` and read the
 [independent review](ria-implementation-review.md) before hardware handoff.
-The corrected sources have passed the local frozen offline gates; grouped
+The corrected sources have passed the local and hosted frozen offline gates; grouped
 prefill and full semantic physical qualification producers are still missing.
 
-The following publication is the historical pre-review baseline, with defects
-identified by the audit. It is not the corrected implementation. Its commit is
-`c987a34618efe6ccc4aca5fed26e3db0aac863be`; later verification-document commits
-leave those runtime sources unchanged. The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37181861323)
-passed and published these Linux amd64 images:
+The corrected implementation commit is
+`f37d418ed146283a98004e02925621c82573b9e9`; later documentation-only commits
+leave those runtime sources unchanged. The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37188961273)
+passed all three jobs and published these Linux amd64 images:
 
 ```text
-ghcr.io/kklouzal/ria-cpu@sha256:7dfd92857d8ba35ade385c0bce08fa9f81254381898ab9cd0365d99c6803374a
-ghcr.io/kklouzal/ria-cuda@sha256:aa1db3b05d561198d4d62ec76f74fa94c3c3bff3e2396c9472f3a9b4ef93dcf5
+ghcr.io/kklouzal/ria-cpu@sha256:cf66c38d4e989a1dec32522e7a51bf96c634d0087dc1bd9d749762a05975d1a5
+ghcr.io/kklouzal/ria-cuda@sha256:6784b247343d4313aa616164d53c17b36a9dd5e3b0666ba498bde142e2e31308
 ```
 
-Their SBOM/provenance descriptors and anonymous manifest access were verified.
+Their immutable index/manifest/config hashes, source revision, UID10001,
+SBOM/provenance descriptors and anonymous manifest access were verified without
+downloading filesystem layers. The [publication record](../locks/verification/implementation-review-publication.json)
+binds the source, jobs, images and downloaded verification logs.
 They are build-verified images and remain unqualified for model/physical release.
 
 Read the [unchanged specification](ria-specification.md) and

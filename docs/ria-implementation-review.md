@@ -14,8 +14,8 @@ also checked the native allocation equations and operational handoff.
 
 | Finding | Contract and correction | Regression evidence |
 | --- | --- | --- |
-| mHC premix crossed token boundaries | Source forward starts with the identity premix at every token; preserve cached attention/history while resetting that premix | Actual two-token graph command recorder, poisoned previous premix, independent pinned-source oracle |
-| Sparse attention changed BF16 tile boundaries | Preserve source masked window slots and64-slot exponent rounding groups | Independent packed-value mathematical case and actual graph schedule recorder |
+| mHC premix crossed token boundaries | Source forward starts with the identity premix at every token; preserve cached attention/history while resetting that premix | Actual 130-position graph command recorder, poisoned previous premix, independent pinned-source oracle |
+| Sparse attention changed BF16 tile boundaries | Preserve source masked window slots and 64-slot exponent rounding groups | Independent packed-value mathematical case and actual graph schedule recorder |
 | Authenticated pair setup could stall indefinitely | Bound idle pre-Bind and missing bulk association | Real loopback mTLS fixtures without a model |
 | Disconnected work could drain forever | Keep a finite retirement deadline until executor completion; terminate without releasing live ownership on expiry | Actual admitted synthetic work, both-channel loss and hung-worker child fixtures |
 | Completed work could outlive a binding | Fence retained requests and validate original epoch/session before publication | Retained-completion/new-binding and credit fixtures |
@@ -33,6 +33,12 @@ launches a CUDA kernel, runs live model inference or probes target hardware.
 CUDA compilation and instruction inspection are separate from numerical
 execution. Final check results are recorded in the
 [offline verification report](ria-offline-verification.md).
+
+Corrected source commit `f37d418ed146283a98004e02925621c82573b9e9` passed
+[all three hosted jobs](https://github.com/kklouzal/RIA/actions/runs/37188961273).
+The [publication checkpoint](../locks/verification/implementation-review-publication.json)
+records independently checked source/log identities and actual amd64 GHCR image
+digests. These build and offline results do not resolve the following gaps.
 
 Two remaining implementation gaps prevent a complete-software claim:
 

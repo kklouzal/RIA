@@ -15,6 +15,17 @@ were found in every CUDA executable and PTX was absent. Available donor CPU
 regressions passed. Exact commands, source identities and complete log hashes
 are recorded in [the review checkpoint](../locks/verification/implementation-review.json).
 
+The [corrected hosted amd64 run](https://github.com/kklouzal/RIA/actions/runs/37188961273)
+passed all three jobs for commit `f37d418ed146283a98004e02925621c82573b9e9`:
+the 413 Python tests, 35 static checks, 26 zero-finding Clang analyses,
+ASan/UBSan/leaks, all three Clang18 ThreadSanitizer fixtures, unchanged schema
+regeneration, and both native container builds. Downloaded evidence hashes and
+all 3714 tracked source files matched before the documentation-only checkpoint.
+Anonymous registry metadata verified the immutable amd64 image/config identities,
+source revision, runtime UID and SBOM/SLSA descriptors. No image filesystem layers
+were pulled or executed. The [review publication record](../locks/verification/implementation-review-publication.json)
+retains those results; the [handoff](ria-handoff.md) lists the corrected images.
+
 These checks do not establish complete implementation. Grouped prompt prefill
 and complete semantic physical matrix/fault/gate producers remain missing
 software. [The review report](ria-implementation-review.md) and
