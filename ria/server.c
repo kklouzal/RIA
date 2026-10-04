@@ -10,8 +10,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
-#include <openssl/err.h>
-#include <openssl/ssl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -62,7 +60,7 @@ struct server {
   bool stopping,draining,ready,sticky,quiescent,startup_done,startup_ok; uint64_t drain_deadline;
   uint64_t binding_deadline, retirement_deadline; bool binding_retiring;
   uint64_t minimum_frame, minimum_bulk, minimum_expert_charge;
-  ria_error worker_error; uint8_t peer_digest[32];
+  ria_error worker_error;
   void *network_arena; uint64_t network_bytes;
   /* Admin state is owned until the bounded admin thread has joined. */
   ria_admin *admin;
@@ -390,13 +388,13 @@ static bool bind_frame(server *s,unsigned ch,ria_header *h,const uint8_t *p,uint
     if (ok) ok=queue_reply(s,0,h,(uint8_t *)json,length,0,false,false,start+requested.operation_timeout_ms,e);
     else free(json);
   } else if (ok) {
-    uint8_t capability[32],logical[32],operator_id[32],peer[32];
+    uint8_t capability[32],logical[32],operator_id[32];
     ok=ria_json_digest_field(&d,ria_json_get(&d,0,"bulk_capability"),capability,e) &&
        ria_json_digest_field(&d,ria_json_get(&d,0,"logical_model_digest"),logical,e) &&
        ria_json_digest_field(&d,ria_json_get(&d,0,"operator_contract_digest"),operator_id,e) &&
        !memcmp(logical,s->store.logical_model_digest,32) && !memcmp(operator_id,s->store.operator_contract_digest,32) &&
-       ria_transport_peer_digest(&s->channels[1].transport,peer,e) &&
-       ria_binding_bulk(&s->binding,capability,CRYPTO_memcmp(peer,s->peer_digest,32)==0,e);
+       ria_transport_same_peer(&s->channels[0].transport,&s->channels[1].transport,e) &&
+       ria_binding_bulk(&s->binding,capability,true,e);
     OPENSSL_cleanse(capability,sizeof(capability));
     if (ok) {
       const char *json="{\"bound\":true}"; uint8_t *copy=malloc(strlen(json));
@@ -532,23 +530,17 @@ static bool dispatch(server *s,unsigned ch,ria_header *h,uint8_t *p,uint64_t sta
   /* A pre-admission refusal has no pending slot and returns no server credit. */
   return error_reply(s,ch,h,status,accepted,retire,deadline,e);
 }
-/* Incremental TLS I/O: one owner, fixed read buffers and bounded reply slots.
- * SSL retry arguments stay stable until that operation makes progress. */
-static bool ssl_step(channel *c,bool writing,void *buffer,size_t length,size_t *done,ria_error *e) {
-  size_t amount=0;
-  ERR_clear_error();
-  int rc=writing ? SSL_write_ex(c->transport.ssl,buffer,length,&amount) : SSL_read_ex(c->transport.ssl,buffer,length,&amount);
-  if (rc==1) {
-    if (!amount || amount>length) { c->transport.unusable=true; return ria_fail(e,RIA_INTERNAL_ERROR,"TLS made invalid progress"); }
+/* Incremental selected transport: one owner, fixed buffers/bounded replies.
+ * TLS retry arguments stay stable until that operation makes progress. */
+static bool channel_step(channel *c,bool writing,void *buffer,size_t length,size_t *done,ria_error *e) {
+  size_t amount=0; short event=0;
+  if (!ria_transport_step(&c->transport,writing,buffer,length,&amount,&event,e)) return false;
+  if (amount) {
     if (writing) c->write_retry=false;
     *done+=amount; return true;
   }
-  int code=SSL_get_error(c->transport.ssl,rc); short event=code==SSL_ERROR_WANT_WRITE ? POLLOUT : POLLIN;
-  if (code==SSL_ERROR_WANT_READ || code==SSL_ERROR_WANT_WRITE) {
-    if (writing) { c->write_event=event; c->write_retry=true; } else c->read_event=event; return true;
-  }
-  c->transport.unusable=true;
-  return ria_fail(e,RIA_NOT_READY,"authenticated channel disconnected/failed");
+  if (writing) { c->write_event=event; c->write_retry=true; } else c->read_event=event;
+  return true;
 }
 static bool channel_read(server *s,unsigned id,ria_error *e) {
   channel *c=&s->channels[id]; uint64_t now=ria_monotonic_ms();
@@ -557,7 +549,7 @@ static bool channel_read(server *s,unsigned id,ria_error *e) {
   for (unsigned steps=0;steps<8;steps++) {
     size_t before=c->received;
     if (!c->decoded) {
-      if (!ssl_step(c,false,c->header+c->received,64-c->received,&c->received,e)) return false;
+      if (!channel_step(c,false,c->header+c->received,64-c->received,&c->received,e)) return false;
       if (!before && c->received) {
         c->operation_deadline=end_after(s->binding.limits.operation_timeout_ms);
         c->frame_deadline=end_after(s->binding.limits.frame_io_timeout_ms);
@@ -570,7 +562,7 @@ static bool channel_read(server *s,unsigned id,ria_error *e) {
     size_t payload_received=c->received-64;
     if (payload_received<c->frame.payload_length) {
       size_t total=c->received;
-      if (!ssl_step(c,false,c->input+payload_received,(size_t)c->frame.payload_length-payload_received,&total,e)) return false;
+      if (!channel_step(c,false,c->input+payload_received,(size_t)c->frame.payload_length-payload_received,&total,e)) return false;
       c->received=total;
       if (c->received==64+payload_received) return true;
     }
@@ -579,7 +571,7 @@ static bool channel_read(server *s,unsigned id,ria_error *e) {
       if (!dispatch(s,id,&c->frame,c->input,started,e)) return false;
       c->received=0; c->decoded=false;
       if (s->binding_retiring) return true;
-      if (!SSL_pending(c->transport.ssl)) return true;
+      if (!ria_transport_pending(&c->transport)) return true;
     }
   }
   return true;
@@ -594,10 +586,10 @@ static bool channel_write(server *s,unsigned id,ria_error *e) {
   }
   if (now>=r->write_deadline) return ria_fail(e,RIA_DEADLINE_EXCEEDED,"reply deadline includes queue and socket publication");
   if (r->cursor<64) {
-    if (!ssl_step(c,true,r->encoded+r->cursor,64-r->cursor,&r->cursor,e) || r->cursor<64) return !e->code;
+    if (!channel_step(c,true,r->encoded+r->cursor,64-r->cursor,&r->cursor,e) || r->cursor<64) return !e->code;
   }
   if (r->cursor<64+r->header.payload_length) {
-    if (!ssl_step(c,true,r->payload+r->cursor-64,(size_t)(64+r->header.payload_length-r->cursor),&r->cursor,e)) return false;
+    if (!channel_step(c,true,r->payload+r->cursor-64,(size_t)(64+r->header.payload_length-r->cursor),&r->cursor,e)) return false;
     if (r->cursor<64+r->header.payload_length) return true;
   }
   bool retire=r->retire;
@@ -653,7 +645,6 @@ static bool accept_channel(server *s,unsigned id,ria_error *e) {
   pthread_mutex_lock(&s->mutex); s->quiescent=false; pthread_mutex_unlock(&s->mutex);
   if (!ria_transport_accept(&c->transport,&s->tls,fd,e)) { close(fd); return false; }
   c->read_event=POLLIN; c->write_event=POLLOUT; c->received=0; c->decoded=false;
-  if (!id && !ria_transport_peer_digest(&c->transport,s->peer_digest,e)) return false;
   return true;
 }
 static bool admin_health(void *context,bool *ready,bool *active,ria_error *e) {
@@ -848,7 +839,7 @@ static bool event_loop(server *s,ria_error *e) {
       bool retried=c->write_retry;
       if (ok && retried && (events&c->write_event)) ok=channel_write(s,i,e);
       if (ok && c->transport.fd>=0 && !s->binding_retiring && !c->write_retry &&
-          ((events&c->read_event) || SSL_pending(c->transport.ssl))) ok=channel_read(s,i,e);
+          ((events&c->read_event) || ria_transport_pending(&c->transport))) ok=channel_read(s,i,e);
       pthread_mutex_lock(&s->mutex); bool stopped=s->sticky || s->draining; pthread_mutex_unlock(&s->mutex);
       if (stopped) ok=false;
       if (ok && !retried && c->transport.fd>=0 && c->output_count && (events&c->write_event)) ok=channel_write(s,i,e);

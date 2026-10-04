@@ -859,9 +859,9 @@ static void test_tls_configuration(void) {
   ria_tls a = {0}, b = {0};
   ria_error e = {0};
   ria_tls_config sc = {ca_path,       server_path, key_path,
-                       "client.test", true,        1000},
+                       "client.test", true,        1000, false},
                  cc = {ca_path,       client_path, key_path,
-                       "server.test", false,       1000};
+                       "server.test", false,       1000, false};
   char fifo_path[256], encrypted_path[256];
   CHECK(snprintf(fifo_path, sizeof fifo_path, "%s/key.fifo", directory) > 0);
   CHECK(snprintf(encrypted_path, sizeof encrypted_path, "%s/encrypted.pem",

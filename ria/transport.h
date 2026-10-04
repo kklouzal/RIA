@@ -10,17 +10,21 @@ typedef struct {
       *expected_peer_name;
   bool server;
   uint64_t handshake_timeout_ms;
+  /* Explicit trusted-network TCP; never inferred from absent credentials. */
+  bool plaintext;
 } ria_tls_config;
 typedef struct {
   void *context;
   bool server;
   char expected_peer_name[256];
   uint64_t handshake_timeout_ms;
+  bool plaintext;
 } ria_tls;
 typedef struct {
   void *ssl;
   int fd;
   bool owns_fd, unusable;
+  bool plaintext;
 } ria_transport;
 /* Connections have one serialized I/O/cleanup owner; concurrent SSL use is
  * prohibited. A published TLS context remains immutable until destruction.
@@ -38,14 +42,23 @@ void ria_tls_destroy(ria_tls *tls);
 bool ria_transport_connect(ria_transport *transport, ria_tls *tls,
                            const struct sockaddr *address, socklen_t length,
                            uint64_t connect_timeout_ms, ria_error *error);
-/* Adopt fd on success; caller retains ownership on failure. mTLS/SAN checked
- * here. */
+/* Adopt fd on success; caller retains ownership on failure. mTLS/SAN is
+ * checked unless the caller explicitly selected trusted-network TCP. */
 bool ria_transport_accept(ria_transport *transport, ria_tls *tls, int fd,
                           ria_error *error);
 bool ria_transport_read(ria_transport *transport, void *buffer, size_t length,
                         uint64_t deadline_ms, ria_error *error);
 bool ria_transport_write(ria_transport *transport, const void *buffer,
                          size_t length, uint64_t deadline_ms, ria_error *error);
+/* One nonblocking operation under the connection's serialized I/O owner.
+ * Success returns positive amount (wait_event=0), or amount=0 and the poll
+ * event needed for progress. TLS retry arguments stay unchanged until
+ * progress. Failure retires the connection; no retry/fallback. */
+bool ria_transport_step(ria_transport *transport, bool writing, void *buffer,
+                        size_t length, size_t *amount, short *wait_event,
+                        ria_error *error);
+/* Only TLS can retain decrypted bytes independently of socket readability. */
+bool ria_transport_pending(const ria_transport *transport);
 /* First byte uses operation deadline; a started frame also uses
  * frame_io_timeout_ms. */
 bool ria_transport_frame(ria_transport *transport,
@@ -58,6 +71,12 @@ bool ria_transport_send(ria_transport *transport, const ria_header *header,
                         ria_error *error);
 bool ria_transport_peer_digest(const ria_transport *transport,
                                uint8_t digest[32], ria_error *error);
+/* TLS compares verified leaf fingerprints. Trusted-network TCP compares
+ * numeric peer IPs (including IPv6 scope), ignoring ephemeral ports. This
+ * routing/session check is not authentication; capability and model/layout
+ * grants remain independently required. */
+bool ria_transport_same_peer(const ria_transport *control,
+                             const ria_transport *bulk, ria_error *error);
 /* Any I/O failure retires the connection. Close consumes SSL/fd ownership;
  * close_notify is best effort and is skipped after an abandoned/fatal I/O. */
 void ria_transport_close(ria_transport *transport);

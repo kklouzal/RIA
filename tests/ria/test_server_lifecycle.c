@@ -1,14 +1,24 @@
 #define _GNU_SOURCE
 /* Exercise the production network owner without weights or executor startup.
- * The poll observer is enabled only for deterministic expired-snapshot cases;
- * all socket/TLS lifecycle cases call the real operating-system poll. */
+ * The poll observer injects expired snapshots and deterministic reply
+ * backpressure; other socket/transport cases call the actual OS poll. */
+#include <poll.h>
+static int fixture_poll(struct pollfd *,nfds_t,int);
 #define poll fixture_poll
 #include "ria/server.c"
 #undef poll
-extern int poll(struct pollfd *,nfds_t,int);
-static struct { bool enabled; unsigned calls,closed; } poll_observer;
-int fixture_poll(struct pollfd *fds,nfds_t count,int timeout) {
-  if (!poll_observer.enabled) return poll(fds,count,timeout);
+static struct { bool enabled,credit_barrier; unsigned calls,closed;server *owner; } poll_observer;
+static int fixture_poll(struct pollfd *fds,nfds_t count,int timeout) {
+  if (!poll_observer.enabled) {
+    /* Simulate a stalled control writer until five Health frames are parsed.
+     * TCP has no record boundary, so coalescing alone cannot force all five
+     * admissions to precede terminal publication and credit return. */
+    server *s=poll_observer.owner;
+    if (poll_observer.credit_barrier && s && s->binding.bulk_bound && s->binding.last_request[0]<6)
+      for (nfds_t i=0;i<count;i++) if (fds[i].fd==s->channels[0].transport.fd)
+        fds[i].events=(short)(fds[i].events&~POLLOUT);
+    return poll(fds,count,timeout);
+  }
   poll_observer.calls++;
   for (nfds_t i=0;i<count;i++) if (fds[i].fd>=0 &&
       fcntl(fds[i].fd,F_GETFD)==-1 && errno==EBADF) poll_observer.closed++;
@@ -16,6 +26,7 @@ int fixture_poll(struct pollfd *fds,nfds_t count,int timeout) {
   errno=EIO;return -1;
 }
 #include <arpa/inet.h>
+#include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 #include <sys/stat.h>
@@ -66,13 +77,23 @@ static void credentials_create(credentials *c) {
   X509 *ca=cert(key,NULL,"fixture root",1),*a=cert(key,ca,"server.test",2),*b=cert(key,ca,"client.test",3);
   write_pem(c->paths[0],NULL,ca); write_pem(c->paths[1],key,NULL);
   write_pem(c->paths[2],NULL,a); write_pem(c->paths[3],NULL,b);
-  ria_tls_config sc={c->paths[0],c->paths[2],c->paths[1],"client.test",true,150},
-    cc={c->paths[0],c->paths[3],c->paths[1],"server.test",false,1000}; ria_error e={0};
+  ria_tls_config sc={.ca_file=c->paths[0],.certificate_file=c->paths[2],.private_key_file=c->paths[1],
+      .expected_peer_name="client.test",.server=true,.handshake_timeout_ms=150},
+    cc={.ca_file=c->paths[0],.certificate_file=c->paths[3],.private_key_file=c->paths[1],
+      .expected_peer_name="server.test",.handshake_timeout_ms=1000}; ria_error e={0};
   CHECK(ria_tls_create(&c->tls,&sc,&e) && ria_tls_create(&c->client,&cc,&e));
   X509_free(ca); X509_free(a); X509_free(b); EVP_PKEY_free(key);
 }
+static void credentials_plaintext(credentials *c) {
+  ria_tls_config server_config={.server=true,.handshake_timeout_ms=150,.plaintext=true},
+    client_config={.handshake_timeout_ms=1000,.plaintext=true};ria_error e={0};
+  CHECK(ria_tls_create(&c->tls,&server_config,&e) && ria_tls_create(&c->client,&client_config,&e));
+  CHECK(!c->tls.context && !c->client.context);
+}
 static void credentials_free(credentials *c) {
+  bool plaintext=c->tls.plaintext;
   ria_tls_destroy(&c->tls); ria_tls_destroy(&c->client);
+  if (plaintext) return;
   for (unsigned i=0;i<4;i++) CHECK(unlink(c->paths[i])==0);
   CHECK(rmdir(c->directory)==0);
 }
@@ -91,7 +112,8 @@ static server *fixture(credentials *c,struct sockaddr_in a[2]) {
   CHECK(pthread_sigmask(SIG_BLOCK,&mask,NULL)==0);
   s->signals=signalfd(-1,&mask,SFD_CLOEXEC|SFD_NONBLOCK); CHECK(s->signals>=0);
   for (unsigned i=0;i<2;i++) { s->listeners[i]=listener(&a[i]); s->channels[i].transport.fd=-1; }
-  s->tls=c->tls; s->service.tls.expected_peer_name="client.test";
+  s->tls=c->tls;s->service.tls.plaintext=c->tls.plaintext;
+  s->service.tls.expected_peer_name=c->tls.plaintext ? NULL : "client.test";
   s->service.tls.handshake_timeout_ms=150; s->service.expert.drain_timeout_ms=120;
   s->service.limits=(ria_limits){65536,4096,1,1,1,33554432,200,100,100};
   s->service.executor="cpu"; s->ready=true; s->quiescent=true;
@@ -101,11 +123,12 @@ static server *fixture(credentials *c,struct sockaddr_in a[2]) {
   s->channels[0].input=s->network_arena; s->channels[1].input=(uint8_t *)s->network_arena+65536;
   s->store.manifest=doc("{\"layout_digest\":\"" DIGEST "\"}");
   memset(s->store.logical_model_digest,0xaa,32); memset(s->store.operator_contract_digest,0xaa,32);
-  s->service.grants=doc("{\"grants\":[{\"expected_peer_name\":\"client.test\","
+  char grants[2048];int grant_length=snprintf(grants,sizeof grants,"{\"grants\":[{\"expected_peer_name\":%s,"
     "\"logical_model_digest\":\"" DIGEST "\",\"operator_contract_digest\":\"" DIGEST "\","
     "\"encoding_digest\":\"" DIGEST "\",\"client_layout_digest\":\"" DIGEST "\","
     "\"placement_plan_digest\":\"" DIGEST "\",\"server_layout_digest\":\"" DIGEST "\","
-    "\"profile\":\"bf16\",\"server_executor\":\"cpu\"}]}");
+    "\"profile\":\"bf16\",\"server_executor\":\"cpu\"}]}",c->tls.plaintext ? "null" : "\"client.test\"");
+  CHECK(grant_length>0 && (size_t)grant_length<sizeof grants);s->service.grants=doc(grants);
   ria_error e={0}; CHECK(server_minimum(s,&e));
   ria_binding_init(&s->binding,&s->service.limits); return s;
 }
@@ -252,13 +275,17 @@ static void test_bind_failure(credentials *c,bool malformed) {
   expect_closed(&t); CHECK(reap(true,1000)==0); fixture_free(s);
 }
 static void test_control_credit_refusal(credentials *c) {
-  struct sockaddr_in a[2]; server *s=fixture(c,a); launch(s);
+  struct sockaddr_in a[2]; server *s=fixture(c,a);
+  poll_observer.credit_barrier=true;poll_observer.owner=s;launch(s);
+  /* Child exclusively owns the backpressure observer and borrowed server. */
+  poll_observer.credit_barrier=false;poll_observer.owner=NULL;
   ria_transport pair[2]; ria_header h,response; ria_error e={0}; bound_pair(c,a,pair,&h);
   uint8_t batch[5*66]; h.kind=RIA_HEALTH; h.payload_length=2;
   for (unsigned i=0;i<5;i++) {
     h.request_id=2+i; CHECK(ria_header_encode(&h,batch+i*66,&e)); memcpy(batch+i*66+64,"{}",2);
   }
-  /* One TLS write exposes every request to the real parser before publication. */
+  /* Actual socket data reaches the production parser; the writer barrier
+   * keeps its first four admitted controls live while the fifth is refused. */
   CHECK(ria_transport_write(&pair[0],batch,sizeof(batch),ria_monotonic_ms()+1000,&e));
   for (unsigned i=0;i<5;i++) {
     uint8_t *p=NULL; ria_json_doc d={0};
@@ -293,7 +320,9 @@ static void client_configuration(credentials *c,const server *s,const struct soc
   memset(client,0,sizeof(*client)); client->role="client"; client->server_executor="cpu";client->prefill_rows=64;
   client->control_address=control; client->bulk_address=bulk; client->connect_timeout_ms=1000;
   client->limits=s->service.limits;
-  client->tls=(ria_tls_config){c->paths[0],c->paths[3],c->paths[1],"server.test",false,1000};
+  client->tls=c->client.plaintext ? (ria_tls_config){.handshake_timeout_ms=1000,.plaintext=true} :
+    (ria_tls_config){.ca_file=c->paths[0],.certificate_file=c->paths[3],.private_key_file=c->paths[1],
+      .expected_peer_name="server.test",.handshake_timeout_ms=1000};
   memset(store,0,sizeof(*store)); strcpy(store->role,"client"); strcpy(store->profile,"bf16");
   memset(store->logical_model_digest,0xaa,32); memset(store->operator_contract_digest,0xaa,32); memset(store->encoding_digest,0xaa,32);
   memcpy(client->logical_model_digest,store->logical_model_digest,32); memcpy(client->operator_contract_digest,store->operator_contract_digest,32);
@@ -596,7 +625,7 @@ static void test_fatal_ssl_marks_unusable(credentials *c) {
     if (ok) {
       struct pollfd p={fd,POLLIN,0}; ok=poll(&p,1,1000)>0;
       uint8_t byte; size_t received=0;
-      if (ok) ok=!ssl_step(&ch,false,&byte,1,&received,&e) && ch.transport.unusable;
+      if (ok) ok=!channel_step(&ch,false,&byte,1,&received,&e) && ch.transport.unusable;
     }
     if (ch.transport.ssl) ria_transport_close(&ch.transport); else if (fd>=0) close(fd);
     _exit(ok?0:1);
@@ -611,7 +640,7 @@ static void test_ssl_error_queue(credentials *c) {
     bool ok=fd>=0 && ria_transport_accept(&ch.transport,&c->tls,fd,&e);
     if (ok) {
       uint8_t byte; size_t received=0; ERR_raise(ERR_LIB_USER,7);
-      ok=ssl_step(&ch,false,&byte,1,&received,&e) && !received && ch.read_event==POLLIN;
+      ok=channel_step(&ch,false,&byte,1,&received,&e) && !received && ch.read_event==POLLIN;
     }
     if (ch.transport.ssl) ria_transport_close(&ch.transport); else if (fd>=0) close(fd);
     _exit(ok?0:1);
@@ -655,7 +684,15 @@ int main(void) {
   test_callback_batch_groups(&c,64,65536,false,false);
   test_callback_batch_groups(&c,64,131072,true,false);
   test_callback_batch_groups(&c,64,65536,false,true);
-  credentials_free(&c); alarm(0);
-  puts("RIA production server lifecycle: setup/frame/reply deadlines and poll snapshot lifetime, idle/rebind ownership, channel loss/drain, TLS retry/fatal rules, typed refusals, response caps, negotiated slot/row groups and atomic publication, operation/error/chunk Bind minima passed");
+  credentials_free(&c);
+  credentials plaintext={0};credentials_plaintext(&plaintext);
+  test_initial_silence(&plaintext,false);test_initial_silence(&plaintext,true);test_bound_idle(&plaintext);
+  test_started_header_deadline(&plaintext);test_bind_failure(&plaintext,false);test_bind_failure(&plaintext,true);
+  test_admitted_connection_loss(&plaintext,0);test_admitted_connection_loss(&plaintext,1);
+  test_control_credit_refusal(&plaintext);test_remote_bind_rejection(&plaintext,false);test_remote_bind_rejection(&plaintext,true);
+  test_callback_batch_groups(&plaintext,64,65536,false,false);
+  for (unsigned kind=0;kind<4;kind++) test_bind_minimum(&plaintext,kind);
+  credentials_free(&plaintext);alarm(0);
+  puts("RIA production server lifecycle: default TLS and certificate-free TCP Bind/bulk/idle/close, setup/frame/reply deadlines, channel loss/drain, TLS retry/fatal rules, typed refusals, response caps, negotiated groups and atomic publication, exact model grants and Bind minima passed");
   return 0;
 }

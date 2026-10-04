@@ -99,8 +99,10 @@ or operator identity. Placement membership is separately frozen as sorted
 
 ## Host baseline, bootstrap and probe
 
+Certificates are optional. The simplest trusted-network configuration is exactly `tls: {"enabled": false}` in both role requests and transport bootstrap inputs, with `expected_peer_name: null` in expert grants. It uses unencrypted TCP without cryptographic peer authentication; numeric control/bulk IP pairing, one-use session capability and exact model grants remain enforced. No CA/leaf/key or peer fingerprint is required. Existing certificate configurations keep mutual TLS; `enabled: true` is optional. No credential omission or TLS error triggers fallback. Client API bearer authentication remains required in either mode. Mode changes invalidate environment/probe/registration/calibration/deployment evidence. See the [README](../README.md#network-and-credentials) for complete provisioning steps.
+
 The deployment request conforms to `schema/deployment-request.json`. Supply
-actual image digest/build information, private addresses, TLS credentials,
+actual image digest/build information, private addresses, selected transport policy,
 source-lock/model/operator identities, explicit caps/context, CPU mask,
 finite cgroup/memlock limits and the reviewed seccomp profile. A CPU expert
 image has no NVIDIA dependency; a CUDA role locks one physical GPU UUID.
@@ -149,9 +151,7 @@ host reports. Render each bootstrap package:
   --request /absolute/path/client-request.json --output-dir /absolute/path/client-bootstrap
 ```
 
-Provision the prepared models, bootstrap configuration and public certificate
-files readable by runtime UID 10001, private keys readable only by their
-authorized owner/group, and reports writable by UID 10001. General atomic
+Provision the prepared models and bootstrap configuration readable by runtime UID 10001, and reports writable by that UID. TLS mode additionally needs public certificate files readable by UID 10001 and private keys readable only by their authorized owner/group. Trusted-network mode needs no PEMs; the client API token remains required. General atomic
 host-tool files default to mode 0644; staged deployment directories are 0700
 and explicitly private checkpoints use 0600. Set private report directories and
 the intended runtime ownership/group access before launch. The
@@ -224,8 +224,7 @@ Their hard limits explicitly set owner host/device/pinned bytes, full child RSS,
 startup, complete elapsed and per-case latency. Use target-shaped experts,
 at least two measured repetitions, explicit warmup and seed, and the policy's
 exact relative floor. Register each role's actual environment/build digest.
-The transport bootstrap bodies freeze numeric addresses, deadlines, credential
-paths and the actual peer certificate DER SHA256. Their credits reserve at
+The transport bootstrap bodies freeze numeric addresses, deadlines and the same selected mode on both roles. TLS bodies additionally freeze credential paths and the actual peer certificate DER SHA256; trusted-network bodies use exactly `tls: {"enabled": false}`. Raw reports record `tls_enabled` and a null peer certificate digest in trusted-network mode, with its numeric-peer pairing check rather than a claimed mTLS check. Their credits reserve at
 least 131328 control, 33160 expert, 432 row and 1024 bulk bytes, total at most 64 MiB.
 `max_frame_bytes` and credits are canonical decimal strings.
 

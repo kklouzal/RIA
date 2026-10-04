@@ -10,7 +10,7 @@ machine can have adequate hardware and still lack required test software.
 from .identity import seal
 from .qualification_schema import MATRIX_AXES
 
-SPECIFICATION_SHA256 = "14224cdb33476944111e14f69a5679f0597c192a44d67b48f048910f326f3f6e"
+SPECIFICATION_SHA256 = "1720ef37b3bf1f561501293823973ef1475f65979d351804f45562fff5ce5767"
 
 # A gate validator must derive these obligations from specific raw observations
 # and independent oracles. Renaming a metric, adding pass booleans, or authenticating
@@ -72,13 +72,13 @@ GATE_OBLIGATIONS = {
     "G14": ("Framing/request association", "18.7 additional contract tests", (
         "exact_lengths_csr_rows_slots_experts_unique_ranges_dtype_layout_digest_epoch_nan",
         "duplicate_missing_out_of_order_replies_no_attacker_size_allocation",
-        "no_credit_no_buffer_progress_partial_tls_operation_frame_write_deadlines")),
+        "no_credit_no_buffer_progress_partial_selected_transport_operation_frame_write_deadlines")),
     "G15": ("Binding/bulk/cancellation", "18.6;18.7 additional contract tests", (
         "zero_to_bound_fresh_epoch_namespaces_one_use_grants_failed_reconnect",
         "cancel_before_dispatch_in_workers_after_result_racing_ack_terminal",
         "one_terminal_one_credit_dirty_leases_no_late_dma_or_prefetch_publication")),
-    "G16": ("Two-host authentication/network", "18.8;22.9;22.11", (
-        "physical_two_hosts_san_client_auth_wrong_expired_credentials",
+    "G16": ("Two-host transport/network", "18.8;22.9;22.11", (
+        "physical_two_hosts_selected_transport_policy_tls_san_auth_or_explicit_trusted_network",
         "bulk_binding_unauthorized_host_real_firewall_denial",
         "broken_pipe_stalled_receiver_bounded_timeouts_no_weight_miss_traffic")),
     "G17": ("Admission/rendering", "15.2;15.3;18.7 additional contract tests;22.10", (
@@ -247,7 +247,7 @@ def qualification_readiness():
         "partial_producers": [
             {"command": "tools/qualify_ria.py run-fixture", "scope": "initial_fixture",
              "observes": ["target_shaped_experts", "graph_state_cases", "transfers",
-                          "paired_mtls_transport_cases", "complete_child_rss_and_deadline"],
+                          "paired_selected_mode_transport_cases", "complete_child_rss_and_deadline"],
              "missing": ["full_target_model", "full_gate_cases", "all_matrix_cells"]},
             {"command": "tools/run_ria_release.py --execute", "scope": "http_replay",
              "observes": ["text_reasoning_tools_images_continuation", "native_token_timings",

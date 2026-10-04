@@ -21,7 +21,7 @@ The updated sources passed local and hosted frozen offline gates.
 [Expert-grouped prefill](ria-prompt-prefill.md) is implemented; full semantic
 physical qualification producers remain missing.
 
-The latest corrected implementation commit is
+The preceding published implementation commit is
 `3614e21aad6465c1af41a2fbeccad2991a6243d2`; later documentation-only commits leave its
 runtime sources unchanged. Read the [full implementation once-over](ria-once-over.md).
 The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37215164710) passed all
@@ -37,10 +37,11 @@ descriptors and anonymous manifest access were verified without downloading file
 or attestation layers. The [publication
 record](../locks/verification/once-over-publication.json) binds the source, jobs, images
 and downloaded verification logs. Attestation contents/signatures were not verified.
-These images contain grouped prompt prefill and the latest artifact/startup/lifecycle
-corrections. They are build-verified and remain unqualified for model/physical release.
+These preceding images contain grouped prompt prefill and artifact/startup/lifecycle
+corrections but support mutual TLS only. Optional trusted-network TCP requires the
+new source build; verified replacement pins follow its successful publication. They are build-verified and remain unqualified for model/physical release.
 
-Read the [unchanged specification](ria-specification.md) and
+Read the [updated specification](ria-specification.md) and
 [implementation plan](../IMPLEMENTATION_PLAN.md). The user's canonical-base
 correction selects `antirez/ds4`, recorded in [the source lock](../locks/source-lock.json).
 Use these operational guides:
@@ -70,8 +71,7 @@ metadata, stacks and working memory. The native admission planner accounts
 the complete declared population and reservations; these lower bounds cannot
 serve as a deployment memory plan.
 
-Provision mTLS CA/certificates/keys and exact peer certificate/SAN grants,
-plus a client API bearer file. Mount credentials read-only at the documented
+Select transport policy explicitly. For trusted-network TCP set `tls: {"enabled": false}` on both hosts/transport bootstrap inputs and use `expected_peer_name: null` in applicable model grants; no certificates are needed. For mTLS provision CA/certificates/keys, expected peer SAN names and matching model grants; transport fixture bootstrap also pins the opposite leaf DER fingerprint. Both modes require a client API bearer file. Mount credentials read-only at the documented
 paths. Expert control/bulk listeners are private; the HTTP export is loopback.
 The project never generates a shared default credential or embeds a secret
 in an image, command argument or evidence record.
@@ -91,7 +91,7 @@ in an image, command argument or evidence record.
    qualification containers. Run bounded native probes inside those same
    containers; verify their hidden host cgroup ancestry from the host.
 4. Register the joint four-run fixture population, derive requests, run the
-   numerical/transfer and paired TLS qualifiers under supervision, and derive
+   numerical/transfer and selected-mode paired transport qualifiers under supervision, and derive
    all five component proofs from their authenticated raw measurements.
    Qualification Python resides at `/opt/ria-qualification/bin/python`, with
    tools at `/opt/ria-tools`; it is not the learned model executor.

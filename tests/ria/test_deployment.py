@@ -23,7 +23,7 @@ def isolated_controller_lock_directory(tmp_path, monkeypatch):
     monkeypatch.setattr("ria.host.revalidate_host_report", lambda report: report)
 
 
-def deployment_request(tmp_path, role="expert", executor="cpu"):
+def deployment_request(tmp_path, role="expert", executor="cpu", *, tls_enabled=True):
     recipe = seal({**fixture_recipe(tmp_path), "chunk_size": 4096})
     manifest = prepare(tmp_path, recipe, tmp_path / "model")
     identity = hashlib.sha256(b"synthetic offline deployment fixture").hexdigest()
@@ -39,7 +39,8 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
     gpu = None if executor == "cpu" else "GPU-12345678-1234-1234-1234-123456789abc"
     secret_dir = tmp_path / "secrets"
     secret_dir.mkdir()
-    for name in ("ca.pem", "peer.pem", "peer.key", "api.token"):
+    credentials = ("ca.pem", "peer.pem", "peer.key", "api.token") if tls_enabled else (("api.token",) if role == "client" else ())
+    for name in credentials:
         path = secret_dir / name
         path.write_text("test-only noncredential")
         path.chmod(0o600)
@@ -52,7 +53,7 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
     ctl.write_text("#!/bin/sh\nexit 2\n")
     ctl.chmod(0o755)
     tls = {"ca_file": "/run/secrets/ca.pem", "certificate_file": "/run/secrets/peer.pem", "private_key_file": "/run/secrets/peer.key",
-           "expected_peer_name": "peer.test.internal", "minimum_version": "TLS1.3", "early_data": False}
+           "expected_peer_name": "peer.test.internal", "minimum_version": "TLS1.3", "early_data": False} if tls_enabled else {"enabled": False}
     network = {"control_address": "0.0.0.0:7443", "bulk_address": "0.0.0.0:7444", "connect_timeout_ms": 1000,
         "handshake_timeout_ms": 1000, "operation_timeout_ms": 1000, "frame_io_timeout_ms": 1000, "write_timeout_ms": 1000,
         "max_row_lookup_rows": 256, "max_inflight_payload_bytes": 67108864, "max_frame_payload_bytes": 16777216,
@@ -80,7 +81,7 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
         request["expert"] = {"numa_policy": "sharded", "nodes": [{"node": 0, "cpus": [0], "workers": 1, "local_bytes": str(16 << 20)}],
             "projection_tile_rows": 64, "host_runtime_bytes": str(8 << 20), "startup_host_bytes": str(16 << 20),
             "device_workspace_bytes": "0" if executor == "cpu" else str(4 << 20), "pinned_workspace_bytes": "0" if executor == "cpu" else str(2 << 20), "drain_timeout_ms": 1000}
-        grants = seal({"schema_revision": 1, "grants": [{"expected_peer_name": tls["expected_peer_name"],
+        grants = seal({"schema_revision": 1, "grants": [{"expected_peer_name": tls.get("expected_peer_name"),
             "logical_model_digest": planning["logical_model_digest"], "operator_contract_digest": planning["operator_contract_digest"],
             "encoding_digest": manifest["encoding_digest"], "client_layout_digest": identity, "placement_plan_digest": identity,
             "profile": "bf16", "server_executor": executor, "server_layout_digest": manifest["layout_digest"]}]})
@@ -111,7 +112,8 @@ def measurement_fixture(request, directory, *, qualified=True):
     from fixture_measurements import registration, write_component_fixture
     environments = {"server": seal(frozen_environment(request))}
     reg = registration(policy, server_environment=base["environment_digest"], server_build=base["build_digest"],
-                       operator=request["planning_request"]["operator_contract_digest"], environments=environments)
+                       operator=request["planning_request"]["operator_contract_digest"], environments=environments,
+                       tls_enabled=request["tls"].get("enabled", True))
     components = write_component_fixture(directory, policy, reg, environments=environments)
     calibration_evidence = seal({"schema_revision": 1, "kind": "calibration_evidence", "qualification_scope": "initial_fixture", **base,
         "policy_digest": policy["digest"], "profile": "bf16", "executor": "cpu", "operator_contract_digest": request["planning_request"]["operator_contract_digest"],
@@ -156,8 +158,9 @@ def compose_fixture(request, directory):
 
 
 @pytest.mark.parametrize("role,executor", [("expert", "cpu"), ("expert", "cuda"), ("client", "cuda")])
-def test_bootstrap_three_roles_and_immutable_publication(tmp_path, role, executor):
-    request = deployment_request(tmp_path, role, executor)
+@pytest.mark.parametrize("tls_enabled", [True, False])
+def test_bootstrap_three_roles_and_immutable_publication(tmp_path, role, executor, tls_enabled):
+    request = deployment_request(tmp_path, role, executor, tls_enabled=tls_enabled)
     output = tmp_path / "bootstrap"
     calls = []
     def runner(args, deadline, cwd=None):
@@ -169,6 +172,47 @@ def test_bootstrap_three_roles_and_immutable_publication(tmp_path, role, executo
     assert len(calls) == 2
     with pytest.raises(ArtifactError, match="immutable"):
         bootstrap(request, output, runner=runner)
+
+
+@pytest.mark.parametrize("field", ["ca_file", "certificate_file", "private_key_file", "expected_peer_name", "minimum_version", "early_data"])
+def test_plaintext_config_rejects_certificate_fields(tmp_path, field):
+    request = deployment_request(tmp_path)
+    request["tls"] = {"enabled": False, field: request["tls"][field]}
+    with pytest.raises(ArtifactError):
+        validate("deployment-request", request)
+
+
+@pytest.mark.parametrize("mode", [None, 0, 1, "false", "true"])
+def test_transport_mode_requires_a_boolean(tmp_path, mode):
+    request = deployment_request(tmp_path)
+    request["tls"]["enabled"] = mode
+    with pytest.raises(ArtifactError):
+        validate("deployment-request", request)
+
+
+def test_enabled_secure_mode_still_requires_complete_credentials(tmp_path):
+    request = deployment_request(tmp_path)
+    request["tls"]["enabled"] = True
+    validate("deployment-request", request)
+    del request["tls"]["certificate_file"]
+    with pytest.raises(ArtifactError):
+        validate("deployment-request", request)
+
+
+@pytest.mark.parametrize("tls_enabled,credential", [(True, "ca.pem"), (True, "peer.pem"), (True, "peer.key"), (False, "api.token")])
+def test_bootstrap_preserves_required_credentials_in_both_modes(tmp_path, tls_enabled, credential):
+    request = deployment_request(tmp_path, "client", "cuda", tls_enabled=tls_enabled)
+    (Path(request["environment"]["secret_dir"]) / credential).unlink()
+    with pytest.raises(ArtifactError, match="required credential"):
+        bootstrap(request, tmp_path / "bootstrap")
+    assert not (tmp_path / "bootstrap").exists()
+
+
+def test_plaintext_api_token_remains_private(tmp_path):
+    request = deployment_request(tmp_path, "client", "cuda", tls_enabled=False)
+    (Path(request["environment"]["secret_dir"]) / "api.token").chmod(0o644)
+    with pytest.raises(ArtifactError, match="world-readable"):
+        bootstrap(request, tmp_path / "bootstrap")
 
 
 def test_controls_environment_and_host_override_rejected(tmp_path, monkeypatch):
@@ -211,8 +255,16 @@ def test_unqualified_measurements_fail_before_mutation(tmp_path):
     assert not (tmp_path / "final").exists()
 
 
-def test_native_plan_invocation_without_python_memory_equations(tmp_path):
-    request = deployment_request(tmp_path)
+@pytest.mark.parametrize("transport_mode", ["default_tls", "explicit_tls", "trusted_network"])
+@pytest.mark.parametrize("wrong_peer_grant", [False, True])
+def test_native_plan_invocation_without_python_memory_equations(tmp_path, transport_mode, wrong_peer_grant):
+    request = deployment_request(tmp_path, tls_enabled=transport_mode != "trusted_network")
+    if transport_mode == "explicit_tls":
+        request["tls"]["enabled"] = True
+    if wrong_peer_grant:
+        grants = read_json(request["peer_grants"])
+        grants["grants"][0]["expected_peer_name"] = None if request["tls"].get("enabled", True) else "peer.test.internal"
+        atomic_json(request["peer_grants"], seal(grants))
     planning = request["planning_request"]
     probe, calibration, evidence = measurement_fixture(request, tmp_path)
     inventory = fixture_inventory(request)
@@ -238,10 +290,17 @@ def test_native_plan_invocation_without_python_memory_equations(tmp_path):
             atomic_json(paths["--output"], plan)
             return b""
         return canonical(compose_fixture(request, output)) if args[-2:] == ["--format", "json"] else b""
+    if wrong_peer_grant:
+        with pytest.raises(ArtifactError, match="peer grants"):
+            finalize(request, probe, inventory, calibration, output, runner=runner, **evidence)
+        assert not output.exists()
+        return
     lock = finalize(request, probe, inventory, calibration, output, runner=runner, **evidence)
     assert calls[0][1] == "inventory" and calls[1][1] == "plan" and len(calls) == 4
     assert lock["memory_plan_digest"] == read_json(output / "memory-plan.json")["digest"]
     assert read_json(output / "service.json")["peer_grants"] == "/etc/dwarfstar/peer-grants.json"
+    assert read_json(output / "service.json")["tls"] == request["tls"]
+    assert lock["expected_peer_name"] == request["tls"].get("expected_peer_name")
     assert "private_key" not in canonical(lock).decode()
     assert lock["qualification_scope"] == "initial_fixture" and not lock["final_release_qualified"]
     assert (output / "evidence" / "experts.json").is_file()
@@ -255,12 +314,17 @@ def fixture_inventory(request):
                            Path(request["environment"]["report_dir"]) / "fixture-inventory.json")
 
 
-@pytest.mark.parametrize("mutation", ["environment", "raw_capacity", "missing_proof", "scope"])
+@pytest.mark.parametrize("mutation", ["environment", "transport_mode", "raw_capacity", "missing_proof", "scope"])
 def test_finalize_rejects_resealed_mismatched_or_missing_provenance(tmp_path, mutation):
     request = deployment_request(tmp_path)
     probe, calibration, evidence = measurement_fixture(request, tmp_path)
     if mutation == "environment":
         request["environment"]["pids_limit"] += 1
+    elif mutation == "transport_mode":
+        request["tls"] = {"enabled": False}
+        grants = read_json(request["peer_grants"])
+        grants["grants"][0]["expected_peer_name"] = None
+        atomic_json(request["peer_grants"], seal(grants))
     elif mutation == "raw_capacity":
         evidence["probe_evidence"] = seal({**evidence["probe_evidence"], "host_available_bytes": "1"})
         probe = seal({**probe, "evidence_digest": evidence["probe_evidence"]["digest"]})

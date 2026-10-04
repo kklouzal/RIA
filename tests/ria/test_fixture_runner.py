@@ -76,10 +76,10 @@ def test_resealed_registration_cannot_change_contract(tmp_path, failure):
         validate_registration(seal(reg), p)
 
 
-def frozen_inputs(tmp_path, p):
+def frozen_inputs(tmp_path, p, *, tls_enabled=True):
     from test_deployment import deployment_request
     from ria.deployment import frozen_environment
-    reg = registration(p)
+    reg = registration(p, tls_enabled=tls_enabled)
     builds, environments = {}, {}
     for role in ("server", "client"):
         build = seal({"schema_revision": 1, "source_lock_digest": p["source_lock_digest"],
@@ -87,7 +87,8 @@ def frozen_inputs(tmp_path, p):
         bootstrap = reg["runs"]["transport_" + role]["bootstrap_body"]
         directory = tmp_path / role
         directory.mkdir()
-        deployment = deployment_request(directory, role="expert" if role == "server" else "client", executor="cpu" if role == "server" else "cuda")
+        deployment = deployment_request(directory, role="expert" if role == "server" else "client", executor="cpu" if role == "server" else "cuda",
+                                        tls_enabled=tls_enabled)
         deployment["environment"].update(build_digest=build["digest"], source_lock_digest=p["source_lock_digest"])
         deployment["planning_request"].update(logical_model_digest=p["logical_model_digest"], operator_contract_digest="3" * 64)
         deployment["planning_request"]["caps"].update(host_bytes=268435456,
@@ -109,9 +110,10 @@ def frozen_inputs(tmp_path, p):
     return reg, builds, environments
 
 
-def test_registration_uses_actual_sealed_build_and_environment(tmp_path):
+@pytest.mark.parametrize("tls_enabled", [True, False])
+def test_registration_uses_actual_sealed_build_and_environment(tmp_path, tls_enabled):
     p = policy(tmp_path)
-    request, builds, environments = frozen_inputs(tmp_path, p)
+    request, builds, environments = frozen_inputs(tmp_path, p, tls_enabled=tls_enabled)
     result = freeze_registration(request, p, builds, environments, tmp_path / "registration.json")
     assert result["runs"]["native_server"]["binary_sha256"] == "e" * 64
     assert result["runs"]["transport_client"]["binary_sha256"] == "f" * 64
@@ -119,6 +121,76 @@ def test_registration_uses_actual_sealed_build_and_environment(tmp_path):
     with pytest.raises(ArtifactError, match="network/TLS"):
         freeze_registration(request, p, builds, environments, tmp_path / "bad-registration.json")
     assert not (tmp_path / "bad-registration.json").exists()
+
+
+def test_explicit_tls_bootstrap_matches_default_tls_environment(tmp_path):
+    p = policy(tmp_path)
+    request, builds, environments = frozen_inputs(tmp_path, p)
+    for name in ("transport_server", "transport_client"):
+        request["runs"][name]["bootstrap_body"]["tls"]["enabled"] = True
+    result = freeze_registration(request, p, builds, environments, tmp_path / "registration.json")
+    assert result["runs"]["transport_client"]["bootstrap_body"]["tls"]["enabled"] is True
+
+
+def test_registration_rejects_different_peer_transport_modes(tmp_path):
+    p = policy(tmp_path)
+    reg = registration(p)
+    reg["runs"]["transport_client"]["bootstrap_body"]["tls"] = {"enabled": False}
+    with pytest.raises(ArtifactError, match="same TLS/trusted-network mode"):
+        validate_registration(seal(reg), p)
+
+
+def test_registration_rejects_mode_change_from_frozen_environment(tmp_path):
+    p = policy(tmp_path)
+    request, builds, environments = frozen_inputs(tmp_path, p)
+    for name in ("transport_server", "transport_client"):
+        request["runs"][name]["bootstrap_body"]["tls"] = {"enabled": False}
+    with pytest.raises(ArtifactError, match="network/TLS"):
+        freeze_registration(request, p, builds, environments, tmp_path / "registration.json")
+    assert not (tmp_path / "registration.json").exists()
+
+
+@pytest.mark.parametrize("field", ["ca_file", "certificate_file", "private_key_file", "expected_peer_name", "authorized_peer_sha256", "enabled"])
+def test_trusted_network_bootstrap_rejects_ambiguous_security_fields(tmp_path, field):
+    p = policy(tmp_path)
+    reg = registration(p, tls_enabled=False)
+    bootstrap = derive_bootstrap(reg, "transport_client")
+    bootstrap["tls"][field] = True if field == "enabled" else "unexpected"
+    with pytest.raises(ArtifactError):
+        validate("transport-bootstrap", bootstrap)
+
+
+@pytest.mark.parametrize("tls_enabled", [True, False])
+def test_complete_transport_population_preserves_registered_mode(tmp_path, tls_enabled):
+    p = policy(tmp_path)
+    reg = registration(p, tls_enabled=tls_enabled)
+    population = raw_population(reg)
+    _source_population(reg, population, p)
+    for name in ("transport_server", "transport_client"):
+        raw = population[name][0]
+        assert raw["tls_enabled"] is tls_enabled
+        assert (raw["peer_certificate_digest"] is None) is not tls_enabled
+        assert validate_transport(raw, reg, name, p) == {}
+
+
+@pytest.mark.parametrize("tls_enabled", [True, False])
+@pytest.mark.parametrize("failure", ["mode", "certificate", "check", "missing_mode"])
+def test_transport_reports_reject_cross_mode_claims(tmp_path, tls_enabled, failure):
+    p = policy(tmp_path)
+    reg = registration(p, tls_enabled=tls_enabled)
+    raw = copy.deepcopy(raw_population(reg)["transport_client"][0])
+    if failure == "mode":
+        raw["tls_enabled"] = not tls_enabled
+        raw["peer_certificate_digest"] = None if tls_enabled else "f" * 64
+        raw["checks"][0]["id"] = "trusted_network_peer_pair" if tls_enabled else "mtls_san_certificate_pair"
+    elif failure == "certificate":
+        raw["peer_certificate_digest"] = None if tls_enabled else "f" * 64
+    elif failure == "check":
+        raw["checks"][0]["id"] = "trusted_network_peer_pair" if tls_enabled else "mtls_san_certificate_pair"
+    else:
+        del raw["tls_enabled"]
+    with pytest.raises(ArtifactError):
+        validate_transport(seal(raw), reg, "transport_client", p)
 
 
 @pytest.mark.parametrize("failure", ["missing", "duplicate", "identity", "shape", "component", "path", "exactness", "false_exact", "numerics", "samples", "repeat", "placement", "warmup", "timing_group", "allocation_peak", "case_duration", "rss", "scope"])
@@ -259,9 +331,10 @@ def test_injected_actual_runtime_preflight_rejects_changed_restrictions(tmp_path
         validate_preflight(pre, reg, "native_client")
 
 
-def test_derived_components_revalidate_every_raw_source(tmp_path):
+@pytest.mark.parametrize("tls_enabled", [True, False])
+def test_derived_components_revalidate_every_raw_source(tmp_path, tls_enabled):
     p = policy(tmp_path)
-    reg = registration(p)
+    reg = registration(p, tls_enabled=tls_enabled)
     references = write_component_fixture(tmp_path, p, reg)
     proof = read_json(tmp_path / "experts.json")
     assert len(validate_component_sources(proof, tmp_path, p)) == 9

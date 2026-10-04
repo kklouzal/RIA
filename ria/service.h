@@ -43,6 +43,11 @@ bool ria_expert_config_parse(const ria_json_doc *,uint32_t,const char *,uint32_t
 /* Pure boundary parsing for the shared transport memory/lifecycle contract.
  * Updates only network fields; returned strings borrow the input document. */
 bool ria_service_network_parse(const ria_json_doc *,uint32_t,ria_service *,ria_error *);
+/* Parse selected transport policy; omission of enabled preserves TLS.
+ * Updates credential pointers/plaintext only, preserving server and timeout.
+ * Strings borrow the document. Exact {enabled:false} needs no credentials. */
+bool ria_service_tls_parse(const ria_json_doc *, uint32_t, ria_tls_config *,
+                           ria_error *);
 bool ria_service_read(ria_service *service, const char *path, ria_error *error);
 void ria_service_free(ria_service *service);
 bool ria_service_grant(const ria_service *service,

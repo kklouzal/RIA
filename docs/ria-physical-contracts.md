@@ -1,7 +1,7 @@
 # Physical qualification software and diagnostic contracts
 
 **Full physical qualification software is incomplete.** The supplied native
-fixtures, paired TLS tests and HTTP replay are runnable partial producers. No
+fixtures, paired selected-transport tests and HTTP replay are runnable partial producers. No
 supplied producer and semantic release adapter covers the complete 540-cell
 route/cache/residency/NUMA matrix and G01–G28. Some offline gate obligations have
 complete runnable tests; others have partial or missing producers. Adequate
@@ -26,7 +26,7 @@ comparison. Neither is falsely labeled as having no test software. A complete
 authenticated gate receipt/semantic release adapter is still needed to integrate
 those results into final qualification. The authoritative catalog is
 `tools/ria/qualification_readiness.py`; it binds specification SHA256
-`14224cdb33476944111e14f69a5679f0597c192a44d67b48f048910f326f3f6e`.
+`1720ef37b3bf1f561501293823973ef1475f65979d351804f45562fff5ce5767`.
 Its digest is frozen into each diagnostic plan. The gate names are the plan's
 traceability identifiers for the cumulative specification acceptance contract.
 
@@ -59,7 +59,7 @@ and corpus; real Linux x86-64 CPU and RTX 5090/SM120 hosts; enough actual
 per-node capacity for each required replica policy; a separately qualified
 Blackwell expert; and administrator-controlled cgroups, firewall, GPU access
 and owned container recreation/fault controls. Synthetic offsets, simulated
-NUMA metadata, localhost TLS or HTTP-only observations cannot supply them.
+NUMA metadata, localhost transport or HTTP-only observations cannot supply them.
 
 ## Numeric diagnostic reports grant no release coverage
 

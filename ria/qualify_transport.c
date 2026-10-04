@@ -205,11 +205,25 @@ static bool configuration(qualifier *q, const char *config, const char *request,
       "operation_timeout_ms"};
   const char *const tls_fields[] = {"ca_file", "certificate_file",
                                     "private_key_file", "expected_peer_name",
-                                    "authorized_peer_sha256"};
+                                    "authorized_peer_sha256", "enabled"};
+  const char *const plaintext_fields[] = {"enabled"};
+  bool tls_enabled = true;
+  const ria_json_node *enabled =
+      ria_json_at(&q->config, ria_json_get(&q->config, tls, "enabled"));
+  if (enabled) {
+    if (enabled->type != RIA_JSON_BOOL)
+      return ria_fail(e, RIA_INVALID_REQUEST,
+                      "transport TLS enabled must be Boolean");
+    tls_enabled = enabled->boolean;
+  }
+  if (!(tls_enabled
+            ? ria_json_fields(&q->config, tls, tls_fields, 6, tls_fields, 5, e)
+            : ria_json_fields(&q->config, tls, plaintext_fields, 1,
+                               plaintext_fields, 1, e)))
+    return false;
   uint64_t handshake, frame_time, write_time, operation;
   if (!ria_json_fields(&q->config, network, network_fields, 7, network_fields,
                        7, e) ||
-      !ria_json_fields(&q->config, tls, tls_fields, 5, tls_fields, 5, e) ||
       !number(&q->config, network, "connect_timeout_ms", false,
               &q->connect_timeout, e) ||
       !number(&q->config, network, "handshake_timeout_ms", false, &handshake,
@@ -222,10 +236,7 @@ static bool configuration(qualifier *q, const char *config, const char *request,
       !q->connect_timeout || q->connect_timeout > duration || !handshake ||
       handshake > duration || !frame_time || frame_time > duration ||
       !write_time || write_time > duration || !operation ||
-      operation > duration ||
-      !ria_json_digest_field(
-          &q->config, ria_json_get(&q->config, tls, "authorized_peer_sha256"),
-          q->authorized_peer, e))
+      operation > duration)
     return false;
   uint64_t chunk = frame - 64;
   if (chunk > RIA_BULK_MAX)
@@ -239,16 +250,22 @@ static bool configuration(qualifier *q, const char *config, const char *request,
       !ria_binding_protect(&q->binding, q->control_credit, q->row_credit,
                            q->bulk_credit, e))
     return false;
-  ria_tls_config tc = {.server = q->server, .handshake_timeout_ms = handshake};
-  if (!text_field(&q->config, tls, "ca_file", &tc.ca_file, e) ||
-      !text_field(&q->config, tls, "certificate_file", &tc.certificate_file,
-                  e) ||
-      !text_field(&q->config, tls, "private_key_file", &tc.private_key_file,
-                  e) ||
-      !text_field(&q->config, tls, "expected_peer_name", &tc.expected_peer_name,
-                  e) ||
-      tc.ca_file[0] != '/' || tc.certificate_file[0] != '/' ||
-      tc.private_key_file[0] != '/')
+  ria_tls_config tc = {.server = q->server,
+                       .plaintext = !tls_enabled,
+                       .handshake_timeout_ms = handshake};
+  if (tls_enabled &&
+      (!ria_json_digest_field(
+           &q->config, ria_json_get(&q->config, tls, "authorized_peer_sha256"),
+           q->authorized_peer, e) ||
+       !text_field(&q->config, tls, "ca_file", &tc.ca_file, e) ||
+       !text_field(&q->config, tls, "certificate_file", &tc.certificate_file,
+                   e) ||
+       !text_field(&q->config, tls, "private_key_file", &tc.private_key_file,
+                   e) ||
+       !text_field(&q->config, tls, "expected_peer_name", &tc.expected_peer_name,
+                   e) ||
+       tc.ca_file[0] != '/' || tc.certificate_file[0] != '/' ||
+       tc.private_key_file[0] != '/'))
     return false;
   q->case_capacity = (size_t)q->repeats * 9;
   q->cases = calloc(q->case_capacity, sizeof *q->cases);
@@ -364,16 +381,18 @@ static bool pair_channel(qualifier *q, unsigned channel, ria_error *e) {
     if (!ok)
       close(fd);
   }
-  uint8_t peer[32];
-  if (!ok || !ria_transport_peer_digest(t, peer, e) ||
-      CRYPTO_memcmp(peer, q->authorized_peer, 32))
-    return ria_fail(
-        e, RIA_UNAUTHORIZED,
-        "fixture peer certificate is not provisioned for this request");
-  if (channel && CRYPTO_memcmp(peer, q->peer, 32))
-    return ria_fail(e, RIA_UNAUTHORIZED, "control/bulk certificates differ");
-  memcpy(q->peer, peer, 32);
-  return true;
+  if (!ok)
+    return false;
+  if (!q->tls.plaintext) {
+    uint8_t peer[32];
+    if (!ria_transport_peer_digest(t, peer, e) ||
+        CRYPTO_memcmp(peer, q->authorized_peer, 32))
+      return ria_fail(
+          e, RIA_UNAUTHORIZED,
+          "fixture peer certificate is not provisioned for this request");
+    memcpy(q->peer, peer, 32);
+  }
+  return !channel || ria_transport_same_peer(&q->control, &q->bulk, e);
 }
 static ria_header header(qualifier *q, uint16_t kind, uint64_t id,
                          uint64_t length, bool reply, uint32_t status) {
@@ -393,7 +412,7 @@ static bool send_frame(qualifier *q, ria_transport *t, const ria_header *h,
     return false;
   uint64_t deadline = phase_deadline(q, q->limits.write_timeout_ms);
   /* Deliberate record fragmentation tests first-byte/header/payload partial IO
-   * using the production TLS writer under one absolute write deadline. */
+   * using the production transport writer under one absolute write deadline. */
   for (size_t i = 0; i < 64;) {
     size_t n = i ? 7 : 1;
     if (n > 64 - i)
@@ -1071,11 +1090,19 @@ static bool report(qualifier *q, char **out, size_t *length, ria_error *e) {
     ria_hex_encode(q->identities[i], 32, hex);
     ok = report_append(&b, e, ",\"%s\":\"%s\"", identity_names[i], hex);
   }
-  ria_hex_encode(q->peer, 32, hex);
+  if (ok)
+    ok = report_append(&b, e, ",\"tls_enabled\":%s,\"peer_certificate_digest\":",
+                       q->tls.plaintext ? "false" : "true");
+  if (ok && q->tls.plaintext)
+    ok = report_append(&b, e, "null");
+  else if (ok) {
+    ria_hex_encode(q->peer, 32, hex);
+    ok = report_append(&b, e, "\"%s\"", hex);
+  }
   if (ok)
     ok = report_append(
         &b, e,
-        ",\"peer_certificate_digest\":\"%s\",\"warmup_completed\":%llu,"
+        ",\"warmup_completed\":%llu,"
         "\"iterations_completed\":%llu,"
         "\"startup_ns\":%llu,\"elapsed_ns\":%llu,\"cpu_ns\":%llu,\"max_rss_"
         "bytes\":\"%llu\","
@@ -1083,7 +1110,7 @@ static bool report(qualifier *q, char **out, size_t *length, ria_error *e) {
         "llu\","
         "\"measured_response_bytes\":\"%llu\",\"timeout_elapsed_ns\":%llu,"
         "\"checks\":[",
-        hex, (unsigned long long)q->warmup, (unsigned long long)q->repeats,
+        (unsigned long long)q->warmup, (unsigned long long)q->repeats,
         (unsigned long long)q->startup_ns, (unsigned long long)elapsed,
         (unsigned long long)(cpu_end - cpu_start),
         (unsigned long long)((uint64_t)usage.ru_maxrss * 1024),
@@ -1091,7 +1118,8 @@ static bool report(qualifier *q, char **out, size_t *length, ria_error *e) {
         (unsigned long long)q->reply_bytes, (unsigned long long)q->timeout_ns);
   for (unsigned i = 0; ok && i < 8; i++)
     ok = report_append(&b, e, "%s{\"id\":\"%s\",\"passed\":true}", i ? "," : "",
-                       check_names[i]);
+                       !i && q->tls.plaintext ? "trusted_network_peer_pair"
+                                             : check_names[i]);
   if (ok)
     ok = report_append(&b, e, "],\"cases\":[");
   for (size_t i = 0; ok && i < q->case_count; i++) {

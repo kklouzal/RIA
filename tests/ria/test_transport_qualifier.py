@@ -1,10 +1,13 @@
-"""Model-free paired production TLS/protocol qualification and boundary checks."""
+"""Model-free paired production TLS/trusted-network protocol boundary checks."""
 
+import contextlib
 import hashlib
 import json
 import os
 import socket
+import struct
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -43,8 +46,7 @@ def openssl(directory, *args):
     return result.stdout
 
 
-@pytest.fixture()
-def provision(tmp_path):
+def provision_tls(tmp_path):
     openssl(
         tmp_path,
         "req",
@@ -109,6 +111,13 @@ def provision(tmp_path):
         ).hexdigest()
         (tmp_path / f"{role}.key").chmod(0o600)
     (tmp_path / "ca.key").chmod(0o600)
+    return certificate_hash
+
+
+@pytest.fixture()
+def provision(tmp_path, request):
+    tls_mode = getattr(request, "param", None)
+    certificate_hash = {} if tls_mode is False else provision_tls(tmp_path)
     sockets = [socket.socket() for _ in range(2)]
     for item in sockets:
         item.bind(("127.0.0.1", 0))
@@ -158,7 +167,9 @@ def provision(tmp_path):
                 "frame_io_timeout_ms": 150,
                 "write_timeout_ms": 3000,
             },
-            "tls": {
+            "tls": {"enabled": False}
+            if tls_mode is False
+            else {
                 "ca_file": str(tmp_path / "ca.pem"),
                 "certificate_file": str(tmp_path / f"{role}.pem"),
                 "private_key_file": str(tmp_path / f"{role}.key"),
@@ -166,6 +177,8 @@ def provision(tmp_path):
                 "authorized_peer_sha256": certificate_hash[peer],
             },
         }
+        if tls_mode is True:
+            config["tls"]["enabled"] = True
         requests[role], configs[role] = (
             tmp_path / f"{role}-request.json",
             tmp_path / f"{role}-config.json",
@@ -198,9 +211,19 @@ def paired(configs, requests):
             server.communicate(timeout=5)
 
 
+@pytest.mark.parametrize(
+    "provision",
+    [None, True, False],
+    indirect=True,
+    ids=["tls-default", "tls-explicit", "trusted-network"],
+)
 def test_real_paired_transport(provision):
     configs, requests, certificates = provision
     client, server = paired(configs, requests)
+    tls_enabled = bool(certificates)
+    if not tls_enabled:
+        assert not list(configs["client"].parent.glob("*.pem"))
+        assert not list(configs["client"].parent.glob("*.key"))
     expected = {
         "health": (21, 0),
         "rows": (11, 0),
@@ -221,10 +244,22 @@ def test_real_paired_transport(provision):
         assert len(document["checks"]) == 8 and all(
             item["passed"] for item in document["checks"]
         )
-        assert (
-            document["peer_certificate_digest"]
-            == certificates["expert" if document["role"] == "client" else "client"]
+        assert document["tls_enabled"] is tls_enabled
+        assert document["peer_certificate_digest"] == (
+            certificates["expert" if document["role"] == "client" else "client"]
+            if tls_enabled
+            else None
         )
+        assert [item["id"] for item in document["checks"]] == [
+            "mtls_san_certificate_pair" if tls_enabled else "trusted_network_peer_pair",
+            "bind_and_bulk_one_use",
+            "credit_and_protected_progress",
+            "cancel_no_early_credit",
+            "terminal_history",
+            "malformed_typed_error",
+            "partial_frame_deadline",
+            "response_payload_integrity",
+        ]
         assert document["timeout_elapsed_ns"] >= 149000000
         assert int(document["owned_buffers_peak_bytes"]) > 4096
         assert int(document["max_rss_bytes"]) > 4096
@@ -261,6 +296,9 @@ def test_real_paired_transport(provision):
             assert left[field] == right[field]
 
 
+@pytest.mark.parametrize(
+    "provision", [None, False], indirect=True, ids=["tls-default", "trusted-network"]
+)
 def test_unregistered_request_rejected_before_network(provision):
     configs, requests, _ = provision
     request = json.loads(requests["client"].read_bytes())
@@ -299,3 +337,217 @@ def test_unmatched_certificate_is_rejected(provision):
         if server.poll() is None:
             server.kill()
         server.communicate(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "tls",
+    [
+        {},
+        {"enabled": True},
+        {"enabled": None},
+        {"enabled": 0},
+        {"enabled": "false"},
+        {"enabled": False, "ca_file": "/absent/ca.pem"},
+        {"enabled": False, "expected_peer_name": "ignored.test"},
+        {"enabled": False, "authorized_peer_sha256": "f" * 64},
+        {"enabled": False, "unknown": True},
+    ],
+)
+@pytest.mark.parametrize("provision", [False], indirect=True)
+def test_invalid_mode_configuration_never_falls_back(provision, tls):
+    configs, requests, _ = provision
+    config = json.loads(configs["client"].read_bytes())
+    config["tls"] = tls
+    configs["client"].write_bytes(canonical(config))
+    result = subprocess.run(
+        invoke(configs["client"], requests["client"]),
+        capture_output=True,
+        timeout=3,
+        check=False,
+    )
+    assert result.returncode != 0 and not result.stdout
+    assert result.stderr
+
+
+@pytest.mark.parametrize("plaintext_role", ["client", "expert"])
+def test_mixed_modes_fail_without_fallback(provision, plaintext_role):
+    configs, requests, _ = provision
+    config = json.loads(configs[plaintext_role].read_bytes())
+    config["tls"] = {"enabled": False}
+    configs[plaintext_role].write_bytes(canonical(config))
+    with server_process(configs, requests) as server:
+        client = subprocess.run(
+            invoke(configs["client"], requests["client"]),
+            capture_output=True,
+            timeout=6,
+            check=False,
+        )
+        output, error = server.communicate(timeout=6)
+        assert client.returncode != 0 and not client.stdout
+        assert server.returncode != 0 and not output
+        assert client.stderr and error
+
+
+@contextlib.contextmanager
+def server_process(configs, requests):
+    server = subprocess.Popen(
+        invoke(configs["expert"], requests["expert"]),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        yield server
+    finally:
+        if server.poll() is None:
+            server.kill()
+        server.communicate(timeout=5)
+
+
+# Independent wire oracle: fixed little-endian fields, never a native struct.
+WIRE = struct.Struct("<4sHHIIQQ16sQ8s")
+
+
+def connect_plain(config_path, channel, *, source="127.0.0.1"):
+    config = json.loads(config_path.read_bytes())
+    host, port = config["network"][channel + "_address"].rsplit(":", 1)
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            return socket.create_connection(
+                (host, int(port)), timeout=1, source_address=(source, 0)
+            )
+        except ConnectionRefusedError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def send_plain(sock, payload, *, kind=1, request_id=1, session=bytes(16), epoch=0):
+    encoded = canonical(payload)
+    sock.sendall(
+        WIRE.pack(
+            b"DSER", 1, kind, 0, 0, len(encoded), request_id, session, epoch, bytes(8)
+        )
+        + encoded
+    )
+
+
+def receive_plain(sock):
+    def exact(length):
+        data = bytearray()
+        while len(data) < length:
+            chunk = sock.recv(length - len(data))
+            if not chunk:
+                raise EOFError("incomplete qualifier frame")
+            data.extend(chunk)
+        return bytes(data)
+
+    fields = WIRE.unpack(exact(WIRE.size))
+    assert fields[:5] == (b"DSER", 1, 1, 1, 0)
+    assert fields[5] <= 4096
+    return json.loads(exact(fields[5]))
+
+
+def bind_plain(sock, request_path, config_path):
+    request = json.loads(request_path.read_bytes())
+    network = json.loads(config_path.read_bytes())["network"]
+    frame = int(request["max_frame_bytes"])
+    credit = sum(
+        int(request[name])
+        for name in ("control_credit", "expert_credit", "row_credit", "bulk_credit")
+    )
+    send_plain(
+        sock,
+        {
+            "role": "client",
+            "logical_model_digest": request["logical_model_digest"],
+            "operator_contract_digest": request["operator_contract_digest"],
+            "encoding_digest": request["source_lock_digest"],
+            "client_layout_digest": request["environment_digest"],
+            "placement_plan_digest": request["preregistration_digest"],
+            "profile": "bf16",
+            "server_executor": "cpu",
+            "limits": {
+                "frame_payload_bytes": frame,
+                "bulk_data_bytes": min(
+                    frame - 64, 4 << 20, int(request["bulk_credit"]) - 208
+                ),
+                "expert_rows": 1,
+                "expert_requests": 2,
+                "row_lookup_rows": 1,
+                "inflight_payload_bytes": credit,
+                **{
+                    name: network[name]
+                    for name in (
+                        "operation_timeout_ms",
+                        "frame_io_timeout_ms",
+                        "write_timeout_ms",
+                    )
+                },
+            },
+        },
+    )
+    return receive_plain(sock)
+
+
+@pytest.mark.parametrize("provision", [False], indirect=True)
+@pytest.mark.parametrize("defect", ["magic", "reserved", "oversize"])
+def test_plaintext_malformed_header_rejected(provision, defect):
+    configs, requests, _ = provision
+    with server_process(configs, requests) as server:
+        with connect_plain(configs["client"], "control") as control:
+            encoded = bytearray(
+                WIRE.pack(b"DSER", 1, 1, 0, 0, 0, 1, bytes(16), 0, bytes(8))
+            )
+            if defect == "magic":
+                encoded[0] ^= 1
+            elif defect == "reserved":
+                encoded[-1] = 1
+            else:
+                struct.pack_into("<Q", encoded, 16, 4097)
+            control.sendall(encoded)
+            output, error = server.communicate(timeout=3)
+        assert server.returncode != 0 and not output
+        assert b"wire" in error
+
+
+@pytest.mark.parametrize("provision", [False], indirect=True)
+@pytest.mark.parametrize(
+    "defect", ["peer_ip", "capability", "session", "request_order"]
+)
+def test_plaintext_bulk_binding_rejected(provision, defect):
+    configs, requests, _ = provision
+    with server_process(configs, requests) as server:
+        with connect_plain(configs["client"], "control") as control:
+            bound = bind_plain(control, requests["client"], configs["client"])
+            with connect_plain(
+                configs["client"],
+                "bulk",
+                source=("127.0.0.2" if defect == "peer_ip" else "127.0.0.1"),
+            ) as bulk:
+                if defect != "peer_ip":
+                    capability = bytearray.fromhex(bound["bulk_capability"])
+                    session = bytearray.fromhex(bound["session_id"])
+                    if defect == "capability":
+                        capability[0] ^= 1
+                    if defect == "session":
+                        session[0] ^= 1
+                    send_plain(
+                        bulk,
+                        {
+                            "session_id": session.hex(),
+                            "epoch": "1",
+                            "logical_model_digest": bound["logical_model_digest"],
+                            "operator_contract_digest": bound[
+                                "operator_contract_digest"
+                            ],
+                            "bulk_capability": capability.hex(),
+                        },
+                        kind=2,
+                        request_id=2 if defect == "request_order" else 1,
+                        session=bytes(session),
+                        epoch=1,
+                    )
+                output, error = server.communicate(timeout=3)
+        assert server.returncode != 0 and not output
+        assert error

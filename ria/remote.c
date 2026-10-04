@@ -438,14 +438,8 @@ bool ria_remote_open(ria_remote **out, const ria_remote_options *o,
       bind_control(r, o, e) &&
       ria_transport_connect(&r->bulk, &r->tls, (struct sockaddr *)&bulk,
                             bulk_length, o->service->connect_timeout_ms, e);
-  uint8_t a[32], b[32];
   if (ok)
-    ok = ria_transport_peer_digest(&r->control, a, e) &&
-         ria_transport_peer_digest(&r->bulk, b, e) &&
-         (CRYPTO_memcmp(a, b, 32) == 0 ||
-          ria_fail(e, RIA_UNAUTHORIZED,
-                   "control/bulk peer certificates differ")) &&
-         bind_bulk(r, e);
+    ok = ria_transport_same_peer(&r->control, &r->bulk, e) && bind_bulk(r, e);
   if (!ok) {
     ria_transport_close(&r->control);
     ria_transport_close(&r->bulk);

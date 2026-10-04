@@ -72,8 +72,19 @@ PROBE = obj({"schema_revision": REV, "role": ROLE, "executor": EXECUTOR, "device
              "numa_nodes": array({"type": "integer", "minimum": 0, "maximum": 63}, maximum=64, minimum=1, unique=True), "max_host_test_bytes": POS,
              "max_device_test_bytes": INT, "max_pinned_test_bytes": INT, "deadline_ms": POS,
              "disable_core_dumps": {"const": True}, "environment_digest": SHA, "build_digest": SHA, "build_info_file": PATH})
-TLS = obj({"ca_file": PATH, "certificate_file": PATH, "private_key_file": PATH, "expected_peer_name": TEXT,
-           "minimum_version": {"const": "TLS1.3"}, "early_data": {"const": False}})
+def transport_security(fields):
+    """Explicit trusted-network mode, or certificate verification by default."""
+    return {"oneOf": [obj({**fields, "enabled": {"const": True}}, ("enabled",)),
+                      obj({"enabled": {"const": False}})]}
+
+
+def tls_enabled(configuration):
+    """Read the mode of a validated transport security configuration."""
+    return configuration.get("enabled", True)
+
+
+TLS = transport_security({"ca_file": PATH, "certificate_file": PATH, "private_key_file": PATH,
+    "expected_peer_name": TEXT, "minimum_version": {"const": "TLS1.3"}, "early_data": {"const": False}})
 NETWORK = obj({k: TEXT if k.endswith("address") else POS for k in (
     "control_address", "bulk_address", "connect_timeout_ms", "handshake_timeout_ms", "operation_timeout_ms",
     "frame_io_timeout_ms", "write_timeout_ms", "max_row_lookup_rows", "max_inflight_payload_bytes",
@@ -169,7 +180,7 @@ LOCK = obj({"schema_revision": REV, "role": ROLE, "executor": EXECUTOR, "image":
             "source_lock_digest": SHA, "logical_model_digest": SHA, "operator_contract_digest": SHA,
             "environment_digest": SHA, "probe_digest": SHA, "calibration_digest": SHA, "memory_plan_digest": SHA,
             "service_digest": SHA, "compose_digest": SHA, "host_report_digest": SHA, "seccomp_digest": SHA,
-            "expected_peer_name": TEXT, "gpu_uuid": nullable(TEXT), "model_manifest_digest": SHA,
+            "expected_peer_name": nullable(TEXT), "gpu_uuid": nullable(TEXT), "model_manifest_digest": SHA,
             "peer_grants_digest": SHA, "placement_plan_digest": SHA, "probe_evidence_digest": SHA,
             "calibration_evidence_digest": SHA, "policy_digest": SHA, "digest": SHA}, ("peer_grants_digest", "placement_plan_digest"))
 LOCK["properties"].update(qualification_scope={"enum": ["initial_fixture", "final_release"]}, final_release_qualified=BOOL)
@@ -184,7 +195,7 @@ PLACEMENT_PLAN = obj({"schema_revision": REV, "logical_model_digest": SHA, "oper
     "runtime": obj({"tokenizer_file": PATH, "tokenizer_sha256": SHA, "tokenizer_memory_bytes": U64,
         "host_state_bytes": U64, "device_state_bytes": U64, "frontend_host_bytes": U64, "projection_tile_rows": POS,
         "state_tile_rows": POS, "max_image_patches": POS, "prefill_rows": PREFILL_ROWS}), "digest": SHA})
-PEER_GRANTS = obj({"schema_revision": REV, "grants": array(obj({"expected_peer_name": TEXT,
+PEER_GRANTS = obj({"schema_revision": REV, "grants": array(obj({"expected_peer_name": nullable(TEXT),
     "logical_model_digest": SHA, "operator_contract_digest": SHA, "encoding_digest": SHA,
     "client_layout_digest": SHA, "placement_plan_digest": SHA, "profile": PROFILE,
     "server_executor": EXECUTOR, "server_layout_digest": SHA}), minimum=1, maximum=1024), "digest": SHA})
@@ -194,7 +205,7 @@ TRANSPORT_NETWORK = obj({name: TEXT if name.endswith("address") else {**POS, "ma
                  "frame_io_timeout_ms", "write_timeout_ms", "operation_timeout_ms")})
 TRANSPORT_BOOTSTRAP = obj({"schema_revision": REV, "role": ROLE, "environment_digest": SHA,
     "build_digest": SHA, "build_info_file": PATH, "request_digest": SHA, "network": TRANSPORT_NETWORK,
-    "tls": obj({"ca_file": PATH, "certificate_file": PATH, "private_key_file": PATH,
+    "tls": transport_security({"ca_file": PATH, "certificate_file": PATH, "private_key_file": PATH,
                 "expected_peer_name": TEXT, "authorized_peer_sha256": SHA})})
 TRANSPORT_REQUEST = obj({"schema_revision": REV, "kind": {"const": "transport_request"},
     **{name: SHA for name in ("environment_digest", "build_digest", "policy_digest", "logical_model_digest",
@@ -417,9 +428,10 @@ def _relations(kind, value):
     if kind == "deployment-lock" and value["final_release_qualified"] != (value["qualification_scope"] == "final_release"):
         raise ArtifactError("release qualification label disagrees with explicit calibration scope")
     if kind in ("service", "deployment-request"):
-        for field, path in (("ca_file", "/run/secrets/ca.pem"), ("certificate_file", "/run/secrets/peer.pem"), ("private_key_file", "/run/secrets/peer.key")):
-            if value["tls"][field] != path:
-                raise ArtifactError("TLS credentials must use provisioned read-only secret paths")
+        if tls_enabled(value["tls"]):
+            for field, path in (("ca_file", "/run/secrets/ca.pem"), ("certificate_file", "/run/secrets/peer.pem"), ("private_key_file", "/run/secrets/peer.key")):
+                if value["tls"][field] != path:
+                    raise ArtifactError("TLS credentials must use provisioned read-only secret paths")
         if "api" in value and value["api"]["bearer_token_file"] != "/run/secrets/api.token":
             raise ArtifactError("API token must use provisioned read-only secret path")
 

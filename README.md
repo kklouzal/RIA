@@ -1,6 +1,6 @@
 # RIA — Remote Inference Architecture
 
-This fork of [antirez/ds4](https://github.com/antirez/ds4) implements the native RIA path for **DeepSeek-V4.1-Flash**: a CUDA client runs the graph, attention/state, tokenizer and HTTP frontend; a separate CPU or CUDA expert service holds the prepared server bank in RAM and executes remote expert/Engram requests. The two machines communicate over mutually authenticated TLS control and bulk connections. Python tools prepare artifacts and admit deployments; Python is not the model serving runtime.
+This fork of [antirez/ds4](https://github.com/antirez/ds4) implements the native RIA path for **DeepSeek-V4.1-Flash**: a CUDA client runs the graph, attention/state, tokenizer and HTTP frontend; a separate CPU or CUDA expert service holds the prepared server bank in RAM and executes remote expert/Engram requests. The two machines communicate over control and bulk connections using either explicitly selected trusted-network TCP or mutual TLS. Python tools prepare artifacts and admit deployments; Python is not the model serving runtime.
 
 **Current status:** candidate inference, grouped prompt prefill, container builds, physical probe/initial fixture admission, and a teacher-forced logit exporter are implemented. These images have passed offline build/static/sanitizer checks, but have not been qualified on the intended hardware. Complete full-model reference/corpus registration and execution, the semantic release matrix, and fault/soak gate producers/validators remain software gaps. Use `qualification_scope: "initial_fixture"` for supervised hardware testing; this is not a final release approval. See [qualification limits](#qualification-limits) before handoff.
 
@@ -29,7 +29,7 @@ This is the deployment runbook for **RIA safetensors containers**. The [original
 
 The client always uses CUDA, including when the expert uses CPU. CUDA binaries contain `sm_120a` AOT code, with no PTX fallback. Do not substitute ARM64, another GPU architecture, MIG identities or an arbitrary device ordinal. The selected physical UUID becomes the sole visible device, addressed as container device index `0`. Use the `GPU-` prefix and lowercase hexadecimal UUID consistently in preflight, requests and registration; the native fixture schema requires that spelling.
 
-Use these immutable, published `linux/amd64` images. Their runtime source is `3614e21aad6465c1af41a2fbeccad2991a6243d2`:
+These preceding immutable `linux/amd64` images support mutual TLS only. Trusted-network TCP requires a fresh build from this branch; verified replacement pins will be recorded after the optional-transport publication completes. Their runtime source is `3614e21aad6465c1af41a2fbeccad2991a6243d2`:
 
 ```bash
 CPU_IMAGE='ghcr.io/kklouzal/ria-cpu@sha256:54d515c2c0249b81b6f575317bd20287b3b34a888bea8d8082cead0f31c8c4be'
@@ -83,7 +83,7 @@ install -d -m 0700 -o 10001 -g 10001 /srv/ria/reports
 | --- | --- |
 | `/srv/ria/source` | Complete publisher checkpoint plus pinned native tokenizer/chat metadata; preparation can write its owned `.ria-recipes` subtree |
 | `/srv/ria/model` | This host's verified prepared server or client package; mounted read-only at `/model` |
-| `/srv/ria/secrets` | `ca.pem`, this role's `peer.pem`, `peer.key`; client also `api.token`; mounted read-only at `/run/secrets` |
+| `/srv/ria/secrets` | TLS mode: `ca.pem`, this role's `peer.pem`, `peer.key`; client `api.token` is required in both modes. The expert directory may be empty in trusted-network mode; mounted read-only at `/run/secrets` |
 | `/srv/ria/reports` | Writable by UID/GID `10001:10001`; mounted at `/artifacts`; retain probe/raw fixture outputs |
 | `/srv/ria/operator` | Reviewed requests, manifests/identities, build info, policies, transferred evidence; host controller only |
 | `/srv/ria/bootstrap` | Renderer-created, temporary no-model fixture configuration |
@@ -187,14 +187,24 @@ Use a private routed network between machines. Permit expert TCP **7443** (contr
 | --- | --- | --- |
 | `network.control_address` | `0.0.0.0:7443` | Actual expert private numeric address, e.g. `192.168.50.10:7443` |
 | `network.bulk_address` | `0.0.0.0:7444` | Same expert address, port `7444` |
-| `tls.expected_peer_name` | Client leaf SAN, e.g. `ria-client.internal` | Expert leaf SAN, e.g. `ria-expert.internal` |
+| `tls.expected_peer_name` (TLS only) | Client leaf SAN, e.g. `ria-client.internal` | Expert leaf SAN, e.g. `ria-expert.internal` |
 | `network.server_executor` | Selected `cpu` or `cuda` | The **same expert executor**, even though the client itself is CUDA |
 | `api.bind_address` | Not applicable | `0.0.0.0:8000` inside the container |
 | Published API | Not applicable | `127.0.0.1:API_PORT:8000` on the client host |
 
-The addresses/names above are illustrative; substitute your actual network and certificate identities. Network endpoints use numeric `IPv4:port` or `[IPv6]:port`; SAN identity is a separate TLS field. Do not bind inside the expert container to the host's private IP. Both channels use TLS 1.3, mutual certificates and disabled early data.
+The addresses/names above are illustrative; substitute your actual network and certificate identities. Network endpoints use numeric `IPv4:port` or `[IPv6]:port`; SAN identity is a separate TLS field. Do not bind inside the expert container to the host's private IP. Select the same transport mode for both roles/channels. TLS mode uses TLS 1.3, mutual certificates and disabled early data.
 
-Provision a trusted CA and **different client/expert private keys and leaves**. Leaves need the appropriate server/client authentication EKUs and DNS/IP SANs that match `expected_peer_name`; common-name-only identities are insufficient. Either use your existing issuer or, on a protected issuing machine, create a dedicated test CA and short-lived leaves. This example uses a 365-day CA and 30-day leaves; select validity/renewal appropriate to your testing window:
+For a **trusted private network**, put this entire `tls` object in both deployment requests and both transport fixture bootstrap inputs:
+
+```json
+{"enabled": false}
+```
+
+That is all the transport credential configuration needed. Skip the CA/certificate/PEM steps below, leave the expert secrets directory empty, and set every applicable expert grant's `expected_peer_name` to **`null`**. The client still needs `api.token`. Do not leave unused certificate/SAN/fingerprint fields in the disabled object: the schema rejects them. Control and bulk must reach the same expert IP and originate from the same client IP; numeric peer pairing and the one-use bulk capability remain required.
+
+This mode is ordinary TCP without encryption or cryptographic peer authentication; it relies on the network being trusted. Model/layout/placement grants, data validation, session/epoch binding, bounded credits, deadlines and HTTP API authentication still apply. The mode is frozen into admission evidence; mixed-mode peers fail and TLS errors never trigger a downgrade.
+
+For **mutual TLS**, retain the certificate configuration below (existing configs default to TLS), optionally adding `"enabled": true`. Provision a trusted CA and **different client/expert private keys and leaves**. Leaves need the appropriate server/client authentication EKUs and DNS/IP SANs that match `expected_peer_name`; common-name-only identities are insufficient. Either use your existing issuer or, on a protected issuing machine, create a dedicated test CA and short-lived leaves. This example uses a 365-day CA and 30-day leaves; select validity/renewal appropriate to your testing window:
 
 ```bash
 set -euo pipefail
@@ -228,14 +238,17 @@ On the client generate its HTTP bearer token directly into a protected file:
 ```bash
 umask 077
 openssl rand -hex 32 > /srv/ria/secrets/api.token
-chown root:10001 /srv/ria/secrets/ca.pem /srv/ria/secrets/peer.pem /srv/ria/secrets/peer.key
-chmod 0640 /srv/ria/secrets/ca.pem /srv/ria/secrets/peer.pem /srv/ria/secrets/peer.key
-# Client only:
 chown root:10001 /srv/ria/secrets/api.token
 chmod 0640 /srv/ria/secrets/api.token
 ```
 
-Apply the three PEM ownership/mode commands on the expert too. Token content must be 1–4096 printable ASCII bytes, optionally followed by LF/CRLF. Never put token/key contents in a deployment JSON, Compose environment, command argument, Git commit or log. The HTTP API uses bearer authentication over plaintext loopback HTTP; RPC mTLS does not secure that API. For remote access use an SSH tunnel or a separately reviewed authenticated TLS proxy.
+In TLS mode only, apply PEM permissions on both hosts:
+
+```bash
+chown root:10001 /srv/ria/secrets/ca.pem /srv/ria/secrets/peer.pem /srv/ria/secrets/peer.key
+chmod 0640 /srv/ria/secrets/ca.pem /srv/ria/secrets/peer.pem /srv/ria/secrets/peer.key
+```
+ Token content must be 1–4096 printable ASCII bytes, optionally followed by LF/CRLF. Never put token/key contents in a deployment JSON, Compose environment, command argument, Git commit or log. The HTTP API uses bearer authentication over plaintext loopback HTTP; RPC mTLS does not secure that API. For remote access use an SSH tunnel or a separately reviewed authenticated TLS proxy.
 
 ## Configure placement and peer authorization
 
@@ -264,7 +277,7 @@ Expert [peer-grants schema](schema/peer-grants.json): `schema_revision: 1`, `gra
 
 | Grant field | Value/meaning |
 | --- | --- |
-| `expected_peer_name` | Authorized client's SAN identity |
+| `expected_peer_name` | TLS: authorized client's SAN identity. Trusted-network TCP: **`null`**; that model grant applies to clients on the trusted network, without certificate identity |
 | `logical_model_digest`, `operator_contract_digest`, `encoding_digest` | Exact shared prepared-model/operator/encoding identities |
 | `client_layout_digest`, `placement_plan_digest` | Authorized client manifest layout and sealed placement identity |
 | `profile`, `server_executor`, `server_layout_digest` | Selected profile, expert mode and expert manifest layout |
@@ -388,7 +401,7 @@ The optional planning `digest` may be omitted. Budget host state, full bank/popu
 | `environment_digest`, `build_digest` | Derived frozen environment identity and actual image build identity; generate below |
 | `build_info_file` | `/usr/share/dwarfstar/build-info.json` inside the container |
 
-`tls` is exactly this object with the other role's actual SAN substituted:
+`tls` is exactly `{ "enabled": false }` for trusted-network TCP. For TLS it is this object with the other role's actual SAN substituted; `"enabled": true` is optional:
 
 ```json
 {
@@ -540,9 +553,9 @@ Each transport `bootstrap_body` has every [transport-bootstrap](schema/transport
 | `schema_revision`, `role` | `1`; server run `"expert"`, client run `"client"` |
 | `environment_digest`, `build_digest`, `build_info_file` | Runner identities; `/usr/share/dwarfstar/build-info.json` |
 | `network` | Exact deployment control/bulk addresses and five timeout fields; **no** deployment payload-cap/executor fields in this smaller object |
-| `tls` | Exactly `ca_file`, `certificate_file`, `private_key_file`, `expected_peer_name`, `authorized_peer_sha256`; last is the **opposite peer's DER certificate hash** |
+| `tls` | Trusted-network TCP: exactly `{ "enabled": false }`. TLS: `ca_file`, `certificate_file`, `private_key_file`, `expected_peer_name`, `authorized_peer_sha256`, optionally `enabled: true`; fingerprint is the **opposite peer's DER certificate hash** |
 
-Transport bootstrap TLS does not take `minimum_version` or `early_data` keys. Registration input does not take a guessed `binary_sha256`; the freezer authenticates it from the supplied actual build-info. Freeze the four-run plan and derive its requests:
+Transport bootstrap TLS does not take `minimum_version` or `early_data` keys. Both registered roles must select the same mode. Raw reports record `tls_enabled`; trusted-network reports have a `null` certificate digest and a numeric-peer pairing check, never a claimed mTLS check. Registration input does not take a guessed `binary_sha256`; the freezer authenticates it from the supplied actual build-info. Freeze the four-run plan and derive its requests:
 
 ```bash
 cd /opt/RIA
@@ -730,7 +743,7 @@ ria_compose stop --timeout "$STOP_GRACE_SECONDS" "$ROLE"
 
 SIGTERM removes readiness and begins bounded draining. The HTTP client forces exit on a second signal; the expert retains its drain/termination state. `ria_compose down` removes the stopped project's containers/network while leaving bind-mounted model/config/evidence files; do not use broad volume/file deletion commands. The templates intentionally have `restart: 'no'`. After a failure, fix it and relaunch through the controller. Session/KV state is not persisted across process restarts; recovery creates a new binding and replays the full prompt. A lost response does not authorize an automatic repeat of a potentially completed generation.
 
-An expert serves one authenticated client binding. Do not run `ds4` or `ds4-eval` through `docker exec` alongside the HTTP client: that attempts another binding. For an optional one-shot CLI, drain/stop the HTTP client first, keep the expert healthy, use the same reviewed client mounts/caps/identity, and then restore HTTP with the managed launcher:
+An expert serves one admitted client binding. Do not run `ds4` or `ds4-eval` through `docker exec` alongside the HTTP client: that attempts another binding. For an optional one-shot CLI, drain/stop the HTTP client first, keep the expert healthy, use the same reviewed client mounts/caps/identity, and then restore HTTP with the managed launcher:
 
 ```bash
 # On the client, only after the HTTP client has been drained/stopped:
@@ -740,7 +753,7 @@ ria_compose run --rm --no-deps --entrypoint /usr/local/bin/ds4 client \
 
 A one-shot Compose run is an explicitly reviewed diagnostic operation and does not replace managed deployment inspection/admission. Likewise, `ds4-eval --config /etc/dwarfstar/service.json --teacher-forced /artifacts/inputs/tokens.json --logits-output /artifacts/logits.bin` exports candidate logits when it owns the client binding. Input is exactly `{schema_revision: 1, tokens: [...]}` with optional `label_mask`: 2–1048576 integer IDs in 0–129279, fitting the admitted context; the Boolean mask has `len(tokens)-1` entries and at least one scored position. Keep the JSON within the 16 MiB/1,000,000-node parser limits. It does not generate an independent full-model reference or complete final qualification; see below.
 
-Changing profile, executor, image, placement/cache membership, context/prefill, budgets, CPU/NUMA selection, relevant driver/kernel/runtime/security policy, or credentials requires review of affected identities and **fresh applicable baseline/probe/registration/calibration/inventory/finalization evidence**. New grants are required for new authorized identities/layouts. Prepare new output directories and publish only after their checks pass. Do not patch a sealed plan or reuse stale evidence to force a restart.
+Changing profile, executor, image, placement/cache membership, context/prefill, budgets, CPU/NUMA selection, transport mode, relevant driver/kernel/runtime/security policy, or credentials requires review of affected identities and **fresh applicable baseline/probe/registration/calibration/inventory/finalization evidence**. New grants are required for new authorized identities/layouts. Prepare new output directories and publish only after their checks pass. Do not patch a sealed plan or reuse stale evidence to force a restart.
 
 ## Troubleshooting
 
@@ -752,7 +765,7 @@ Changing profile, executor, image, placement/cache membership, context/prefill, 
 | Host/cgroup/Compose identity mismatch | Record actual local daemon versions and container parent ancestry; remove ambient overrides; rerun affected baseline/evidence after a real change. |
 | Seccomp/NUMA or locked-memory failure | Use the reviewed `seccomp-numa.json`; check selected CPU/node memberships and finite memlock/population budgets. Do not use privileged/unconfined containers or enable swap as a workaround. |
 | OOM/allocation/plan rejection | Compare estimator/inventory/probe details, cgroup ancestor limits, actual RAM/VRAM, replication/workspace/state/startup accounting. Reduce workload or choose adequate resources and regenerate evidence. |
-| TLS/transport timeout or identity rejection | Check clock/expiry, CA/leaf/key match, SAN peer name, opposite DER fingerprint, grant/layout/profile identity, private firewall and both ports. Start transport server before client. |
+| Transport timeout or identity rejection | Check both roles select the same mode, private firewall/both ports and grant/layout/profile identity. TLS additionally checks clock/expiry, CA/leaf/key, SAN and opposite DER fingerprint. Trusted-network TCP requires same control/bulk peer IP and null grant peer name. Start transport server before client. |
 | Fixture container vanished or run exceeds idle deadline | Its lifetime is 1800 seconds. Stop/reset through the controller; create a new bootstrap/evidence set with preregistered feasible bounds. |
 | Finalizer rejects calibration/proof | Retain and transfer all four full run directories and the complete role bundle; match policy/registration/environment/build/probe identities. Do not write `passed: true` or raise tolerance after observing output. |
 | Container started but health unready | Read role logs and initialization progress; `started` is not `ready`. Bank loading/population must finish within the reviewed operational allowance. |

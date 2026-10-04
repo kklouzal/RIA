@@ -42,6 +42,41 @@ static bool checked_doc(const char *path, const uint8_t expected[32],
           ria_fail(e, RIA_INTEGRITY_ERROR,
                    "provisioned document digest mismatch"));
 }
+bool ria_service_tls_parse(const ria_json_doc *d, uint32_t node,
+                           ria_tls_config *tls, ria_error *e) {
+  if (!d || !tls)
+    return ria_fail(e, RIA_INVALID_REQUEST, "invalid transport policy");
+  tls->ca_file = tls->certificate_file = tls->private_key_file =
+      tls->expected_peer_name = NULL;
+  tls->plaintext = false;
+  uint32_t index = ria_json_get(d, node, "enabled");
+  const ria_json_node *enabled = ria_json_at(d, index);
+  if (index != RIA_JSON_NONE && (!enabled || enabled->type != RIA_JSON_BOOL))
+    return ria_fail(e, RIA_INVALID_REQUEST, "tls.enabled must be Boolean");
+  if (enabled && !enabled->boolean) {
+    const char *const fields[] = {"enabled"};
+    if (!ria_json_fields(d, node, fields, 1, fields, 1, e))
+      return false;
+    tls->plaintext = true;
+    return true;
+  }
+  const char *const fields[] = {"ca_file", "certificate_file", "private_key_file",
+                                "expected_peer_name", "minimum_version", "early_data", "enabled"};
+  const char *version;
+  if (!ria_json_fields(d, node, fields, 7, fields, 6, e) ||
+      !text(d, node, "ca_file", &tls->ca_file, e) ||
+      !text(d, node, "certificate_file", &tls->certificate_file, e) ||
+      !text(d, node, "private_key_file", &tls->private_key_file, e) ||
+      !text(d, node, "expected_peer_name", &tls->expected_peer_name, e) ||
+      !text(d, node, "minimum_version", &version, e))
+    return false;
+  const ria_json_node *early = ria_json_at(d, ria_json_get(d, node, "early_data"));
+  if (strcmp(version, "TLS1.3") || tls->ca_file[0] != '/' ||
+      tls->certificate_file[0] != '/' || tls->private_key_file[0] != '/' ||
+      !early || early->type != RIA_JSON_BOOL || early->boolean)
+    return ria_fail(e, RIA_INVALID_REQUEST, "invalid TLS 1.3 credential policy");
+  return true;
+}
 bool ria_expert_config_parse(const ria_json_doc *d,uint32_t x,const char *executor,uint32_t prefill_rows,
                               uint64_t host_cap,uint64_t device_cap,uint64_t pinned_cap,
                               ria_expert_config *c,ria_error *e) {
@@ -257,22 +292,19 @@ bool ria_service_read(ria_service *s, const char *path, ria_error *e) {
       !s->host_cap)
     goto fail;
   uint32_t tls = ria_json_get(d, 0, "tls");
-  const char *const tf[] = {"ca_file",          "certificate_file",
-                            "private_key_file", "expected_peer_name",
-                            "minimum_version",  "early_data"};
-  const char *version;
-  if (!ria_json_fields(d, tls, tf, 6, tf, 6, e) ||
-      !text(d, tls, "ca_file", &s->tls.ca_file, e) ||
-      !text(d, tls, "certificate_file", &s->tls.certificate_file, e) ||
-      !text(d, tls, "private_key_file", &s->tls.private_key_file, e) ||
-      !text(d, tls, "expected_peer_name", &s->tls.expected_peer_name, e) ||
-      !text(d, tls, "minimum_version", &version, e) ||
-      strcmp(version, "TLS1.3"))
-    goto invalid;
-  const ria_json_node *early =
-      ria_json_at(d, ria_json_get(d, tls, "early_data"));
-  if (!early || early->type != RIA_JSON_BOOL || early->boolean)
-    goto invalid;
+  if (!ria_service_tls_parse(d, tls, &s->tls, e))
+    goto fail;
+  const ria_json_node *locked_peer =
+      ria_json_at(&s->lock, ria_json_get(&s->lock, 0, "expected_peer_name"));
+  if (s->tls.plaintext) {
+    if (!locked_peer || locked_peer->type != RIA_JSON_NULL)
+      goto invalid;
+  } else {
+    const char *name;
+    if (!text(&s->lock, 0, "expected_peer_name", &name, e) ||
+        strcmp(name, s->tls.expected_peer_name))
+      goto invalid;
+  }
   s->tls.server = !strcmp(s->role, "expert");
   uint32_t network = ria_json_get(d, 0, "network");
   if (!ria_service_network_parse(d,network,s,e))
@@ -343,9 +375,17 @@ bool ria_service_grant(const ria_service *s, const ria_tensor_store *store,
     return false;
   for (uint32_t i = grants->child; i != RIA_JSON_NONE;
        i = s->grants.nodes[i].next) {
-    const char *peer;
-    bool match = text(&s->grants, i, "expected_peer_name", &peer, e) &&
-                 !strcmp(peer, s->tls.expected_peer_name);
+    const ria_json_node *peer_node =
+        ria_json_at(&s->grants, ria_json_get(&s->grants, i, "expected_peer_name"));
+    bool match;
+    if (s->tls.plaintext) {
+      match = peer_node && peer_node->type == RIA_JSON_NULL;
+    } else {
+      const char *peer;
+      match = peer_node && peer_node->type == RIA_JSON_STRING &&
+              text(&s->grants, i, "expected_peer_name", &peer, e) &&
+              s->tls.expected_peer_name && !strcmp(peer, s->tls.expected_peer_name);
+    }
     for (unsigned k = 0; match && k < 7; k++) {
       const char *want, *actual;
       match = text(&s->grants, i, keys[k], &want, e) &&

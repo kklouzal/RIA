@@ -60,12 +60,23 @@ static bool credential_file(const char *path, ria_error *e) {
                         "TLS credential is not a bounded regular PEM file");
 }
 bool ria_tls_create(ria_tls *t, const ria_tls_config *c, ria_error *e) {
-  if (!t || !c || !c->ca_file || !c->certificate_file || !c->private_key_file ||
-      !c->expected_peer_name || !c->expected_peer_name[0] ||
-      strlen(c->expected_peer_name) >= sizeof t->expected_peer_name ||
-      !c->handshake_timeout_ms)
-    return ria_fail(e, RIA_INVALID_REQUEST, "incomplete TLS configuration");
+  if (!t || !c || !c->handshake_timeout_ms)
+    return ria_fail(e, RIA_INVALID_REQUEST, "incomplete transport configuration");
   memset(t, 0, sizeof *t);
+  if (c->plaintext) {
+    if (c->ca_file || c->certificate_file || c->private_key_file ||
+        c->expected_peer_name)
+      return ria_fail(e, RIA_INVALID_REQUEST,
+                      "trusted-network transport does not accept TLS credentials");
+    t->plaintext = true;
+    t->server = c->server;
+    t->handshake_timeout_ms = c->handshake_timeout_ms;
+    return true;
+  }
+  if (!c->ca_file || !c->certificate_file || !c->private_key_file ||
+      !c->expected_peer_name || !c->expected_peer_name[0] ||
+      strlen(c->expected_peer_name) >= sizeof t->expected_peer_name)
+    return ria_fail(e, RIA_INVALID_REQUEST, "incomplete TLS configuration");
   if (!credential_file(c->ca_file, e) ||
       !credential_file(c->certificate_file, e) ||
       !credential_file(c->private_key_file, e))
@@ -139,12 +150,18 @@ static bool wait_ssl(SSL *ssl, int result, int fd, uint64_t end, ria_error *e) {
 }
 static bool establish(ria_transport *t, ria_tls *ctx, int fd, bool owns,
                       ria_error *e) {
-  if (!t || !ctx || !ctx->context)
-    return ria_fail(e, RIA_INVALID_REQUEST, "invalid TLS transport context");
+  if (!t || !ctx || (!ctx->plaintext && !ctx->context))
+    return ria_fail(e, RIA_INVALID_REQUEST, "invalid transport context");
   memset(t, 0, sizeof *t);
   t->fd = -1;
   if (!nonblocking(fd, e))
     return false;
+  if (ctx->plaintext) {
+    t->plaintext = true;
+    t->fd = fd;
+    t->owns_fd = owns;
+    return true;
+  }
   SSL *ssl = SSL_new(ctx->context);
   if (!ssl)
     return ria_fail(e, RIA_RESOURCE_LIMIT, "TLS connection allocation failed");
@@ -244,12 +261,59 @@ bool ria_transport_connect(ria_transport *t, ria_tls *ctx,
 bool ria_transport_accept(ria_transport *t, ria_tls *ctx, int fd,
                           ria_error *e) {
   if (!ctx || !ctx->server || fd < 0)
-    return ria_fail(e, RIA_INVALID_REQUEST, "invalid accepted TLS socket");
+    return ria_fail(e, RIA_INVALID_REQUEST, "invalid accepted transport socket");
   return establish(t, ctx, fd, true, e);
+}
+bool ria_transport_step(ria_transport *t, bool writing, void *buffer,
+                        size_t length, size_t *amount, short *wait_event,
+                        ria_error *e) {
+  if (!t || (!t->plaintext && !t->ssl) || t->fd < 0 || t->unusable)
+    return ria_fail(e, RIA_NOT_READY, "transport is not established");
+  if (!buffer || !length || !amount || !wait_event || length > SSIZE_MAX) {
+    t->unusable = true;
+    return ria_fail(e, RIA_INVALID_REQUEST, "invalid transport transfer");
+  }
+  *amount = 0;
+  *wait_event = 0;
+  if (t->plaintext) {
+    ssize_t count = writing ? send(t->fd, buffer, length, MSG_NOSIGNAL)
+                            : recv(t->fd, buffer, length, 0);
+    if (count > 0) {
+      *amount = (size_t)count;
+      return true;
+    }
+    if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+      *wait_event = writing ? POLLOUT : POLLIN;
+      return true;
+    }
+    t->unusable = true;
+    return ria_fail(e, RIA_NOT_READY, "trusted-network channel disconnected/failed");
+  }
+  ERR_clear_error();
+  int result = writing ? SSL_write_ex(t->ssl, buffer, length, amount)
+                       : SSL_read_ex(t->ssl, buffer, length, amount);
+  if (result == 1) {
+    if (*amount && *amount <= length)
+      return true;
+    t->unusable = true;
+    return ria_fail(e, RIA_INTERNAL_ERROR, "TLS transfer made invalid progress");
+  }
+  int code = SSL_get_error(t->ssl, result);
+  if (code == SSL_ERROR_WANT_READ || code == SSL_ERROR_WANT_WRITE) {
+    *amount = 0;
+    *wait_event = code == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
+    return true;
+  }
+  t->unusable = true;
+  return ria_fail(e, code == SSL_ERROR_ZERO_RETURN ? RIA_NOT_READY : RIA_INTEGRITY_ERROR,
+                  "authenticated channel disconnected/failed");
+}
+bool ria_transport_pending(const ria_transport *t) {
+  return t && !t->plaintext && t->ssl && !t->unusable && SSL_pending(t->ssl) > 0;
 }
 static bool transfer(ria_transport *t, void *buffer, size_t length,
                      uint64_t end, bool write, ria_error *e) {
-  if (!t || !t->ssl || t->fd < 0 || t->unusable || (!buffer && length))
+  if (!t || (!t->plaintext && !t->ssl) || t->fd < 0 || t->unusable || (!buffer && length))
     return ria_fail(e, RIA_NOT_READY, "transport is not established");
   size_t done = 0;
   while (done < length) {
@@ -260,19 +324,13 @@ static bool transfer(ria_transport *t, void *buffer, size_t length,
                       "transport I/O deadline exceeded");
     }
     size_t amount = 0;
-    ERR_clear_error();
-    int rc = write ? SSL_write_ex(t->ssl, (unsigned char *)buffer + done,
-                                  length - done, &amount)
-                   : SSL_read_ex(t->ssl, (unsigned char *)buffer + done,
-                                 length - done, &amount);
-    if (rc == 1) {
-      if (!amount || amount > length - done) {
-        t->unusable = true;
-        return ria_fail(e, RIA_INTERNAL_ERROR,
-                        "TLS transfer made invalid progress");
-      }
+    short event = 0;
+    if (!ria_transport_step(t, write, (unsigned char *)buffer + done,
+                            length - done, &amount, &event, e))
+      return false;
+    if (amount) {
       done += amount;
-    } else if (!wait_ssl(t->ssl, rc, t->fd, end, e)) {
+    } else if (!ready(t->fd, event, end, e)) {
       t->unusable = true;
       return false;
     }
@@ -340,7 +398,7 @@ bool ria_transport_send(ria_transport *t, const ria_header *h, const void *p,
 }
 bool ria_transport_peer_digest(const ria_transport *t, uint8_t digest[32],
                                ria_error *e) {
-  if (!t || !t->ssl || !digest)
+  if (!t || t->plaintext || !t->ssl || t->unusable || !digest)
     return ria_fail(e, RIA_NOT_READY, "transport peer is unavailable");
   X509 *peer = SSL_get1_peer_certificate(t->ssl);
   unsigned length = 0;
@@ -349,6 +407,47 @@ bool ria_transport_peer_digest(const ria_transport *t, uint8_t digest[32],
   X509_free(peer);
   return ok || ria_fail(e, RIA_UNAUTHORIZED,
                         "authenticated certificate digest unavailable");
+}
+static bool peer_address(const ria_transport *t, uint8_t address[16],
+                         uint32_t *scope, ria_error *e) {
+  struct sockaddr_storage peer;
+  socklen_t length = sizeof peer;
+  if (getpeername(t->fd, (struct sockaddr *)&peer, &length) != 0)
+    return ria_fail(e, RIA_NOT_READY, "transport peer address unavailable");
+  *scope = 0;
+  if (peer.ss_family == AF_INET && length >= sizeof(struct sockaddr_in)) {
+    const struct sockaddr_in *v4 = (const struct sockaddr_in *)&peer;
+    memset(address, 0, 10);
+    address[10] = address[11] = 255;
+    memcpy(address + 12, &v4->sin_addr, 4);
+    return true;
+  }
+  if (peer.ss_family == AF_INET6 && length >= sizeof(struct sockaddr_in6)) {
+    const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)&peer;
+    memcpy(address, &v6->sin6_addr, 16);
+    *scope = v6->sin6_scope_id;
+    return true;
+  }
+  return ria_fail(e, RIA_INVALID_REQUEST, "transport requires an IP peer");
+}
+bool ria_transport_same_peer(const ria_transport *a, const ria_transport *b,
+                             ria_error *e) {
+  if (!a || !b || a->fd < 0 || b->fd < 0 || a->unusable || b->unusable ||
+      a->plaintext != b->plaintext)
+    return ria_fail(e, RIA_UNAUTHORIZED, "control/bulk transport modes differ or are unavailable");
+  uint8_t left[32], right[32];
+  if (a->plaintext) {
+    uint32_t left_scope, right_scope;
+    if (!peer_address(a, left, &left_scope, e) ||
+        !peer_address(b, right, &right_scope, e))
+      return false;
+    return (left_scope == right_scope && !memcmp(left, right, 16)) ||
+           ria_fail(e, RIA_UNAUTHORIZED, "control/bulk trusted-network peer IPs differ");
+  }
+  return ria_transport_peer_digest(a, left, e) &&
+         ria_transport_peer_digest(b, right, e) &&
+         (CRYPTO_memcmp(left, right, 32) == 0 ||
+          ria_fail(e, RIA_UNAUTHORIZED, "control/bulk peer certificates differ"));
 }
 void ria_transport_close(ria_transport *t) {
   if (t) {

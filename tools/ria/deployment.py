@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from .identity import (ArtifactError, atomic_bytes, atomic_json, digest,
                        hash_file, read_json, seal, sync_directory, verify_identity)
-from .schemas import validate
+from .schemas import tls_enabled, validate
 
 DEPLOY_VARIABLE = re.compile(r"(?:CLIENT|EXPERT|SECCOMP)_")
 CONTROLLER_LOCK_DIRECTORY = Path("/run/lock")
@@ -126,7 +126,9 @@ def validate_paths(request):
     if profile.get("defaultAction") not in ("SCMP_ACT_ERRNO", "SCMP_ACT_KILL", "SCMP_ACT_KILL_PROCESS"):
         raise ArtifactError("seccomp must retain a default deny policy")
     secret_root = Path(environment["secret_dir"])
-    for name in ("ca.pem", "peer.pem", "peer.key") + (("api.token",) if request["planning_request"]["role"] == "client" else ()):
+    credentials = ("ca.pem", "peer.pem", "peer.key") if tls_enabled(request["tls"]) else ()
+    credentials += ("api.token",) if request["planning_request"]["role"] == "client" else ()
+    for name in credentials:
         path = secret_root / name
         if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK):
             raise ArtifactError(f"required credential {name} is unreadable")
@@ -672,7 +674,8 @@ def finalize(request, probe, inventory, calibration, output, *, probe_evidence=N
             grants = read_json(request["peer_grants"])
             validate("peer-grants", grants)
             verify_identity(grants)
-            if not any(grant["expected_peer_name"] == request["tls"]["expected_peer_name"] and
+            peer_name = request["tls"].get("expected_peer_name")
+            if not any(grant["expected_peer_name"] == peer_name and
                        grant["logical_model_digest"] == planning["logical_model_digest"] and
                        grant["operator_contract_digest"] == planning["operator_contract_digest"] and
                        grant["profile"] == planning["profile"] and grant["server_executor"] == planning["executor"] and
@@ -693,7 +696,7 @@ def finalize(request, probe, inventory, calibration, output, *, probe_evidence=N
             "probe_evidence_digest": probe_evidence["digest"], "calibration_evidence_digest": calibration_evidence["digest"], "policy_digest": policy["digest"],
             "memory_plan_digest": plan["digest"], "service_digest": digest(service), "compose_digest": digest(compose),
             "host_report_digest": environment["host_report_digest"], "seccomp_digest": hash_file(environment["seccomp_profile"]),
-            "expected_peer_name": request["tls"]["expected_peer_name"], "gpu_uuid": environment["gpu_uuid"],
+            "expected_peer_name": request["tls"].get("expected_peer_name"), "gpu_uuid": environment["gpu_uuid"],
             "model_manifest_digest": model_manifest["digest"],
             **({"placement_plan_digest": placement["digest"]} if placement is not None else {}),
             **({"peer_grants_digest": grants["digest"]} if grants is not None else {})})

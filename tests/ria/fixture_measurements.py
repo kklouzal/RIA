@@ -6,10 +6,10 @@ from ria.fixture_runner import RUNS, _component, derive_request
 from ria.identity import atomic_json, digest, seal
 from ria.native_fixture_schema import (EXACT_CASES, REPEATED_CASES, TIMING_GROUPS,
                                      expected_cases, expected_dimensions, expected_samples, expected_warmup)
-from ria.transport_fixture_schema import CASE_KINDS, CASE_STATUSES, EXPECTED_CHECKS
+from ria.transport_fixture_schema import CASE_KINDS, CASE_STATUSES, expected_checks
 
 
-def synthetic_environment(model, source, operator, profile, executor, role, build):
+def synthetic_environment(model, source, operator, profile, executor, role, build, *, tls_enabled=True):
     gpu = "GPU-12345678-1234-1234-1234-123456789abc" if role == "client" or executor == "cuda" else None
     return seal({"schema_revision": 1, "seccomp_sha256": "8" * 64,
         "environment": {"image": "registry.test/ria@sha256:" + "9" * 64, "image_kind": "cuda" if gpu else "cpu", "build_digest": build,
@@ -23,7 +23,7 @@ def synthetic_environment(model, source, operator, profile, executor, role, buil
             "caps": {"host_bytes": 268435456, "device_bytes": 134217728 if gpu else 0, "pinned_bytes": 1048576 if gpu else 0,
                      "numa": [{"node": 0, "bytes": 268435456}]}},
         "tls": {"ca_file": "/run/secrets/ca.pem", "certificate_file": "/run/secrets/peer.pem", "private_key_file": "/run/secrets/peer.key",
-            "expected_peer_name": "peer.test.internal", "minimum_version": "TLS1.3", "early_data": False},
+            "expected_peer_name": "peer.test.internal", "minimum_version": "TLS1.3", "early_data": False} if tls_enabled else {"enabled": False},
         "network": {"control_address": "127.0.0.1:7443", "bulk_address": "127.0.0.1:7444", "server_executor": executor,
             **{key: 10 for key in ("connect_timeout_ms", "handshake_timeout_ms", "frame_io_timeout_ms", "write_timeout_ms", "operation_timeout_ms")},
             "max_row_lookup_rows": 256, "max_inflight_payload_bytes": 67108864, "max_frame_payload_bytes": 16777216,
@@ -32,7 +32,8 @@ def synthetic_environment(model, source, operator, profile, executor, role, buil
 
 def preflight(reg, role, environment=None):
     environment = environment or synthetic_environment(reg["logical_model_digest"], reg["source_lock_digest"], reg["operator_contract_digest"],
-        reg["profile"], reg["server_executor"], role, reg["realizations"][role]["build_digest"])
+        reg["profile"], reg["server_executor"], role, reg["realizations"][role]["build_digest"],
+        tls_enabled=reg["runs"]["transport_" + role]["bootstrap_body"]["tls"].get("enabled", True))
     base = reg["realizations"][role]
     planning, target = environment["planning_request"], environment["environment"]
     gpu = target["gpu_uuid"] is not None
@@ -61,11 +62,12 @@ def preflight(reg, role, environment=None):
 
 def registration(policy, *, profile="bf16", executor="cpu", server_environment=None,
                  server_build="b" * 64, client_environment="c" * 64, client_build="d" * 64,
-                 operator="3" * 64, binary="e" * 64, environments=None):
+                 operator="3" * 64, binary="e" * 64, environments=None, tls_enabled=True):
     environments = environments or {}
     for role, build in (("server", server_build), ("client", client_build)):
         if role not in environments:
-            environments[role] = synthetic_environment(policy["logical_model_digest"], policy["source_lock_digest"], operator, profile, executor, role, build)
+            environments[role] = synthetic_environment(policy["logical_model_digest"], policy["source_lock_digest"], operator, profile, executor, role, build,
+                tls_enabled=tls_enabled)
     server_environment = environments["server"]["digest"]
     client_environment = environments["client"]["digest"]
     roles = {"server": {"environment_digest": server_environment, "build_digest": server_build},
@@ -97,7 +99,7 @@ def registration(policy, *, profile="bf16", executor="cpu", server_environment=N
                 "network": {"control_address": "127.0.0.1:7443", "bulk_address": "127.0.0.1:7444",
                     **{key: 10 for key in ("connect_timeout_ms", "handshake_timeout_ms", "frame_io_timeout_ms", "write_timeout_ms", "operation_timeout_ms")}},
                 "tls": {"ca_file": "/run/secrets/ca.pem", "certificate_file": "/run/secrets/peer.pem", "private_key_file": "/run/secrets/peer.key",
-                    "expected_peer_name": "peer.test.internal", "authorized_peer_sha256": "f" * 64}}
+                    "expected_peer_name": "peer.test.internal", "authorized_peer_sha256": "f" * 64} if tls_enabled else {"enabled": False}}
         runs[name] = run
     return seal({"schema_revision": 1, "kind": "fixture_registration", "qualification_scope": "initial_fixture", **common,
         "profile": profile, "server_executor": executor, "realizations": roles, "runs": runs, "registered_at": policy["registered_at"]})
@@ -138,13 +140,16 @@ def raw_population(reg, environments=None):
                 "model_quality": "unexecuted", "graph_gpu_fixtures": "executed" if body["role"] == "client" else "unexecuted",
                 "transfer_gpu_fixtures": "executed" if body["runner_executor"] == "cuda" else "unexecuted", "cases": cases}
         else:
+            security = reg["runs"][name]["bootstrap_body"]["tls"]
+            enabled = security.get("enabled", True)
             cases = [{"iteration": iteration, "id": key, "kind": kind, "request_bytes": "64", "reply_bytes": "64",
                 "request_sha256": "5" * 64, "response_sha256": "6" * 64, "elapsed_ns": 100,
                 "status": CASE_STATUSES[key]} for iteration in range(body["repeats"]) for key, kind in CASE_KINDS.items()]
             raw = {"schema_revision": 1, "kind": "native_transport_measurements", "qualified": False, "qualification_scope": "initial_fixture",
                 **{key: request[key] for key in ("logical_model_digest", "source_lock_digest", "environment_digest", "build_digest", "policy_digest", "operator_contract_digest", "preregistration_digest")},
-                "request_digest": request["digest"], "peer_certificate_digest": "f" * 64, "role": "expert" if name.endswith("server") else "client",
-                "checks": [{"id": key, "passed": True} for key in EXPECTED_CHECKS], "warmup_completed": 0, "iterations_completed": 2,
+                "request_digest": request["digest"], "tls_enabled": enabled, "peer_certificate_digest": security.get("authorized_peer_sha256"),
+                "role": "expert" if name.endswith("server") else "client",
+                "checks": [{"id": key, "passed": True} for key in expected_checks(enabled)], "warmup_completed": 0, "iterations_completed": 2,
                 "startup_ns": 1, "elapsed_ns": 50000000, "cpu_ns": 100, "max_rss_bytes": "1048576", "owned_buffers_peak_bytes": "1000",
                 "measured_request_bytes": str(len(cases) * 64), "measured_response_bytes": str(len(cases) * 64), "timeout_elapsed_ns": 10000000, "cases": cases}
         raw = seal(raw)

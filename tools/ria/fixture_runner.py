@@ -130,6 +130,11 @@ def _registration_relations(document, policy):
     for key in ("deadline_ms", "warmup", "repeats", "fixture_seed", "max_frame_bytes", "control_credit", "expert_credit", "row_credit", "bulk_credit"):
         if left[key] != right[key]:
             raise ArtifactError("paired transport requests have different fixture/credit populations")
+    from .schemas import tls_enabled
+    modes = [tls_enabled(document["runs"][name]["bootstrap_body"]["tls"])
+             for name in ("transport_server", "transport_client")]
+    if modes[0] != modes[1]:
+        raise ArtifactError("paired transport bootstraps must select the same TLS/trusted-network mode")
     floors = {"control_credit": 131328, "expert_credit": 33160, "row_credit": 432, "bulk_credit": 1024}
     if not 4096 <= u64(left["max_frame_bytes"]) <= 16777216 or sum(u64(left[key]) for key in floors) > 67108864 or any(u64(left[key]) < minimum for key, minimum in floors.items()):
         raise ArtifactError("paired transport credits cannot guarantee bounded protected progress")
@@ -155,7 +160,7 @@ def freeze_registration(document, policy, build_info, environments, output):
     result = deepcopy(document)
     for role in ("server", "client"):
         environment = read_json(environments[role], max_bytes=2 << 20)
-        from .schemas import validate
+        from .schemas import tls_enabled, validate
         validate("deployment-environment", environment)
         verify_identity(environment, document["realizations"][role]["environment_digest"])
         if environment.get("environment", {}).get("build_digest") != document["realizations"][role]["build_digest"]:
@@ -172,7 +177,10 @@ def freeze_registration(document, policy, build_info, environments, output):
         if body["gpu_uuid"] != environment["environment"]["gpu_uuid"] or environment["network"]["server_executor"] != document["server_executor"]:
             raise ArtifactError("frozen environment changes selected GPU or server executor")
         bootstrap = document["runs"]["transport_" + role]["bootstrap_body"]
-        if any(value != environment["network"].get(key) for key, value in bootstrap["network"].items()) or any(bootstrap["tls"][key] != environment["tls"].get(key) for key in ("ca_file", "certificate_file", "private_key_file", "expected_peer_name")):
+        if any(value != environment["network"].get(key) for key, value in bootstrap["network"].items()) or (
+                tls_enabled(bootstrap["tls"]) != tls_enabled(environment["tls"])) or (
+                tls_enabled(bootstrap["tls"]) and any(bootstrap["tls"][key] != environment["tls"].get(key)
+                    for key in ("ca_file", "certificate_file", "private_key_file", "expected_peer_name"))):
             raise ArtifactError("transport bootstrap changes the actual frozen network/TLS settings")
         build = read_json(build_info[role], max_bytes=16 << 20)
         verify_identity(build, document["realizations"][role]["build_digest"])
@@ -298,7 +306,8 @@ def validate_native(raw, registration, name, policy):
 
 
 def validate_transport(raw, registration, name, policy):
-    from .transport_fixture_schema import TRANSPORT_SEALED_MEASUREMENTS, EXPECTED_CHECKS, CASE_KINDS, CASE_STATUSES
+    from .transport_fixture_schema import TRANSPORT_SEALED_MEASUREMENTS, expected_checks, CASE_KINDS, CASE_STATUSES
+    from .schemas import tls_enabled
     _schema(TRANSPORT_SEALED_MEASUREMENTS, raw, "transport measurements")
     verify_identity(raw)
     request, limits = derive_request(registration, name), registration["runs"][name]["hard_limits"]
@@ -307,8 +316,13 @@ def validate_transport(raw, registration, name, policy):
             raise ArtifactError("transport measurements have another preregistered identity")
     if raw["request_digest"] != request["digest"] or raw["role"] != ("expert" if name.endswith("server") else "client"):
         raise ArtifactError("transport measurements have another exact derived request/role")
+    security = registration["runs"][name]["bootstrap_body"]["tls"]
+    enabled = tls_enabled(security)
+    if raw["tls_enabled"] != enabled:
+        raise ArtifactError("transport measurements changed the registered TLS/trusted-network mode")
+    required_checks = expected_checks(enabled)
     checks = raw["checks"]
-    if len(checks) != len(EXPECTED_CHECKS) or {item["id"] for item in checks} != set(EXPECTED_CHECKS) or not all(item["passed"] for item in checks):
+    if len(checks) != len(required_checks) or {item["id"] for item in checks} != set(required_checks) or not all(item["passed"] for item in checks):
         raise ArtifactError("transport report lacks an actual required passing contract check")
     if (raw["warmup_completed"], raw["iterations_completed"]) != (request["warmup"], request["repeats"]):
         raise ArtifactError("paired transport did not complete the registered population")
@@ -323,10 +337,10 @@ def validate_transport(raw, registration, name, policy):
         for key in ("request_bytes", "reply_bytes"):
             _bound(case[key], u64(request["max_frame_bytes"]) + 64, "transport frame bytes", positive=True)
             if u64(case[key]) < 64:
-                raise ArtifactError("transport measured frame omits its authenticated wire header")
+                raise ArtifactError("transport measured frame omits its wire header")
     for field, bound in (("owned_buffers_peak_bytes", "host_bytes"), ("max_rss_bytes", "max_rss_bytes"), ("elapsed_ns", "max_elapsed_ns"), ("startup_ns", "max_startup_ns")):
         _bound(raw[field], u64(limits[bound]), field, positive=field in ("max_rss_bytes", "elapsed_ns"))
-    if raw["peer_certificate_digest"] != registration["runs"][name]["bootstrap_body"]["tls"]["authorized_peer_sha256"]:
+    if raw["peer_certificate_digest"] != security.get("authorized_peer_sha256"):
         raise ArtifactError("transport measurements authenticated a different exact peer certificate")
     frame_timeout = registration["runs"][name]["bootstrap_body"]["network"]["frame_io_timeout_ms"] * 1000000
     if not frame_timeout <= raw["timeout_elapsed_ns"] <= u64(limits["max_elapsed_ns"]):
@@ -384,7 +398,7 @@ def execute_run(registration, name, policy, executable, build_info, output, *, e
         args = [str(executable), str(staging / "request.json")]
         if name.startswith("transport_"):
             if transport_config is None:
-                raise ArtifactError("paired transport execution requires its explicit TLS bootstrap configuration")
+                raise ArtifactError("paired transport execution requires its explicit transport bootstrap configuration")
             from .schemas import validate
             config = read_json(transport_config)
             validate("transport-bootstrap", config)
