@@ -21,10 +21,10 @@ def run_bounded(arguments, *, cwd=None, env=None, timeout=30,
         raise ArtifactError("invalid subprocess deadline/output bound")
     if max_rss_bytes is not None and (type(max_rss_bytes) is not int or not 0 < max_rss_bytes <= 9007199254740991):
         raise ArtifactError("invalid subprocess RSS bound")
-    process = subprocess.Popen(arguments, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=True)
     started = time.monotonic()
     deadline = started + timeout
+    process = subprocess.Popen(arguments, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=True)
     output, diagnostic = bytearray(), bytearray()
     complete = False
     usage = None

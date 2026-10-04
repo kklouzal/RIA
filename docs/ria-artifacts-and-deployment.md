@@ -340,6 +340,13 @@ and hidden host ancestors. Failed inspection stops the owned service within a
 finite grace period. A changed image, source, build, caps, context, TLS/network,
 cache policy or security settings invalidates the relevant evidence.
 
+Mount validation uses the frozen actual Compose version. Released Compose 2
+through 2.40.3 omits a false `create_host_path` value from a present `bind`
+object; that empty object is accepted for those versions. Missing/null `bind`
+settings remain rejected. Compose 5 and unknown versions must emit an explicit
+false value because their omission semantics differ. Source paths, access
+flags and the exact mount population remain mandatory in either representation.
+
 Initial admission records `qualification_scope=initial_fixture` and
 `final_release_qualified=false`, permitting bounded full-bank/model qualification
 after admission. Final release separately requires actual full-model fidelity

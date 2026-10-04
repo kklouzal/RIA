@@ -258,6 +258,11 @@ def validate_effective_compose(document, request, config_dir, *, qualification=F
         raise ArtifactError("Compose default network policy changed")
     expected_volumes = {"/model": (source["model_dir"], True), "/etc/dwarfstar": (str(config_dir), True),
                         "/run/secrets": (source["secret_dir"], True), "/artifacts": (source["report_dir"], False)}
+    # Released Compose 2 (through 2.40.3) uses bool/omitempty: a present empty
+    # bind object omits false. Compose 5's OptOut/omitzero omits true instead.
+    # Keep nil/missing bind distinct: Compose 2 permits legacy path creation.
+    version = re.fullmatch(r"2\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]{0,2})", source["compose_version"])
+    empty_bind_is_false = version is not None and tuple(map(int, version.groups())) <= (40, 3)
     volumes = service.get("volumes", [])
     if len(volumes) != 4 or {volume.get("target") for volume in volumes} != set(expected_volumes):
         raise ArtifactError("unexpected mount population")
@@ -265,7 +270,10 @@ def validate_effective_compose(document, request, config_dir, *, qualification=F
         if volume.get("type") != "bind" or volume.get("target") not in expected_volumes:
             raise ArtifactError("unauthorized mount")
         path, readonly = expected_volumes[volume["target"]]
-        if set(volume) - {"type", "source", "target", "read_only", "bind"} or volume.get("source") != path or bool(volume.get("read_only", False)) != readonly or volume.get("bind", {}) != {"create_host_path": False}:
+        bind = volume.get("bind")
+        bind_valid = isinstance(bind, dict) and ((not bind and empty_bind_is_false) or (set(bind) == {"create_host_path"} and bind["create_host_path"] is False))
+        read_only = volume.get("read_only", False)
+        if set(volume) - {"type", "source", "target", "read_only", "bind"} or volume.get("source") != path or type(read_only) is not bool or read_only != readonly or not bind_valid:
             raise ArtifactError("mount source/access changed")
     cuda = request["planning_request"]["executor"] == "cuda"
     devices = service.get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices", [])

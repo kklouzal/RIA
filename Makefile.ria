@@ -1,6 +1,7 @@
 # RIA numerical code has an explicit floating-point contract; never inherit
 # the donor's fast-math or build-host-specific ISA flags for portable images.
 RIA_CC ?= $(CC)
+RIA_THREAD_CC ?= clang-18
 RIA_NVCC ?= /usr/local/cuda/bin/nvcc
 RIA_CUDA_HOME ?= /usr/local/cuda
 RIA_PYTHON ?= python3
@@ -188,6 +189,25 @@ ria-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_TENSOR_FIXTURE=$(CURDIR)/build/ria/sanitize/tensor $(RIA_PYTHON) -m pytest -q tests/ria/test_native_artifacts.py > build/ria/evidence/sanitize-tensor.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_QUALIFY_FIXTURE=$(CURDIR)/build/ria/sanitize/qualify $(RIA_PYTHON) -m pytest -q tests/ria/test_qualify.py > build/ria/evidence/sanitize-qualify.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_TRANSPORT_FIXTURE=$(CURDIR)/build/ria/sanitize/ctl $(RIA_PYTHON) -m pytest -q tests/ria/test_transport_qualifier.py > build/ria/evidence/sanitize-transport.log 2>&1
+
+# LLVM 18 uses this same per-process ASLR policy when high-entropy mappings
+# conflict with its shadow. Keep diagnostic binaries and policy out of serving.
+build/ria/thread-sanitize/admin: tests/ria/test_admin.c $(RIA_CORE_SRC)
+	@mkdir -p $(@D)
+	$(RIA_THREAD_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=thread -fPIE -pie -fno-omit-frame-pointer -pthread $^ $(RIA_LDLIBS) -o $@
+
+build/ria/thread-sanitize/server: tests/ria/test_server_contracts.c ria/server.c ria/numa.c ria/remote.c $(RIA_CORE_SRC)
+	@mkdir -p $(@D)
+	$(RIA_THREAD_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=thread -fPIE -pie -fno-omit-frame-pointer -pthread $^ $(RIA_LDLIBS) -o $@
+
+.PHONY: ria-thread-sanitize
+ria-thread-sanitize: build/ria/thread-sanitize/admin build/ria/thread-sanitize/server
+	@mkdir -p build/ria/evidence
+	$(RIA_THREAD_CC) --version > build/ria/evidence/thread-sanitize-environment.log
+	setarch --version >> build/ria/evidence/thread-sanitize-environment.log
+	uname -m >> build/ria/evidence/thread-sanitize-environment.log
+	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/admin > build/ria/evidence/thread-sanitize-admin.log 2>&1
+	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/server > build/ria/evidence/thread-sanitize-server.log 2>&1
 
 ria-clean:
 	rm -rf build/ria

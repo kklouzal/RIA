@@ -21,20 +21,32 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - name: Prepare bounded evidence destination
+        run: |
+          mkdir -p build/ria/evidence
+          printf '%s\n' 'Offline/static fixtures only; no model or physical GPU execution.' > build/ria/evidence/ci-scope.txt
       - name: Install native diagnostic tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential clang clang-tools libssl-dev libnuma-dev libonig-dev libpng-dev libjpeg-dev
+          sudo apt-get install -y --no-install-recommends build-essential clang clang-18 clang-tools libclang-rt-18-dev libssl-dev libnuma-dev libonig-dev libpng-dev libjpeg-dev
       - name: Install hash-locked offline dependencies
         run: python -m pip install --no-deps --require-hashes -r requirements-ria-dev.txt
       - name: Install checksum-locked static check tools
-        run: python deploy/install_checks.py --output-dir build/ria/check-tools
+        run: |
+          set -o pipefail
+          python deploy/install_checks.py --output-dir build/ria/check-tools 2>&1 | tee build/ria/evidence/ci-install-check-tools.log
       - name: Native and independent offline fixtures
-        run: make -j2 ria-offline RIA_PYTHON=python
+        run: |
+          set -o pipefail
+          make -j2 ria-offline RIA_PYTHON=python 2>&1 | tee build/ria/evidence/ci-native-offline.log
       - name: Static analysis, source and deployment checks
         run: python deploy/offline_checks.py --output build/ria/evidence/ci-offline.json
       - name: Sanitizers
         run: make ria-sanitize
+      - name: Thread sanitizer on model-free admin and server fixtures
+        run: |
+          set -o pipefail
+          make ria-thread-sanitize 2>&1 | tee build/ria/evidence/ci-thread-sanitize.log
       - name: Verify generated schemas
         run: |
           PYTHONPATH=tools python -m ria.schemas

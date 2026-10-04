@@ -15,7 +15,7 @@ from ria.deployment import (bootstrap, fixture_start, fixture_stop, fixture_exec
 from ria.identity import ArtifactError, atomic_bytes, canonical, read_json, seal
 from ria.host import revalidate_host_report
 from test_container_inspection import inspection_fixture
-from test_deployment import compose_fixture, deployment_request
+from test_deployment import compose_fixture, deployment_request, record_config_only_compose_version
 
 
 @pytest.fixture(autouse=True)
@@ -215,6 +215,7 @@ def test_actual_qualification_compose_override_config_only(tmp_path, role, execu
     if role == "expert" and executor == "cuda":
         request["compose_files"].append(str(root / "deploy/compose.expert-cuda.yml"))
     request["deadline_ms"] = 10000
+    record_config_only_compose_version(request)
     directory = tmp_path / "actual-compose"
     bootstrap(request, directory)
     override = directory / "qualification.override.yml"

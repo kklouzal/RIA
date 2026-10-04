@@ -1,8 +1,10 @@
 """Synthetic cgroup/proc trees and bounded subprocess tests; no physical probe."""
 
 from pathlib import Path
+import resource
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -10,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from ria.host import cgroup_ancestors, verify_container_ancestors
 from ria.identity import ArtifactError, seal
 from ria.process import run_bounded
+import ria.process as process_module
 
 
 def group(path, memory="max"):
@@ -65,7 +68,11 @@ def test_native_arguments_output_bounds_and_deadline():
 
 def test_complete_child_rss_and_invalid_limits():
     code = "import resource; x=bytearray(32*1024*1024); del x; print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)"
-    result = run_bounded([sys.executable, "-c", code], max_rss_bytes=128 << 20)
+    # Linux wait4 includes the child's inherited fork image before exec. The
+    # fixture's startup budget must account for the actual pytest parent, whose
+    # NumPy/tokenizer state varies with test order and architecture.
+    startup_budget = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 + (128 << 20)
+    result = run_bounded([sys.executable, "-c", code], max_rss_bytes=startup_budget)
     assert result.peak_rss_bytes >= int(result.stdout) * 1024 >= 32 << 20
     assert result.elapsed_seconds > 0 and "complete child lifetime" in result.rss_scope
     with pytest.raises(ArtifactError, match="RSS"):
@@ -75,3 +82,19 @@ def test_complete_child_rss_and_invalid_limits():
             run_bounded([sys.executable, "-c", "pass"], timeout=bad)
     with pytest.raises(ArtifactError):
         run_bounded([sys.executable, "-c", "pass"], max_rss_bytes=True)
+
+
+def test_process_creation_is_included_in_the_deadline(monkeypatch):
+    original = subprocess.Popen
+    children = []
+
+    def delayed_spawn(*arguments, **keywords):
+        child = original(*arguments, **keywords)
+        children.append(child)
+        time.sleep(0.05)
+        return child
+
+    monkeypatch.setattr(process_module.subprocess, "Popen", delayed_spawn)
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_bounded([sys.executable, "-c", "pass"], timeout=0.01)
+    assert len(children) == 1 and children[0].returncode is not None

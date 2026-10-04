@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from ria.container_inspection import validate_container_inspection
 from ria.deployment import bootstrap
 from ria.identity import ArtifactError
-from test_deployment import deployment_request
+from test_deployment import deployment_request, record_config_only_compose_version
 
 
 def inspection_fixture(request, directory):
@@ -67,5 +67,6 @@ def test_real_compose_config_only(tmp_path, role, executor):
     if role == "expert" and executor == "cuda":
         request["compose_files"].append(str(root / "deploy/compose.expert-cuda.yml"))
     request["deadline_ms"] = 10000
+    record_config_only_compose_version(request)
     report = bootstrap(request, tmp_path / "actual-compose")
     assert report["status"] == "not_admitted" and not report["admitted"]

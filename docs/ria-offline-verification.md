@@ -9,12 +9,13 @@ The final available offline checks passed:
 
 | Check | Result |
 | --- | --- |
-| Independent Python, boundary and cross-language fixtures | 360 passed |
+| Independent Python, boundary and cross-language fixtures | 370 passed |
 | Ruff E/F/B rules, Python compilation, generated schemas | Passed |
 | GCC strict C99 and CUDA host branches | Passed |
 | Clang static analyzer, all 25 owned C modules | Zero findings |
 | Isolated, checksum-pinned Cppcheck 2.22.0, CPU/CUDA-host analyses | Zero findings |
 | ASan, UBSan and leak detection | Passed |
+| Clang 18 ThreadSanitizer, model-free admin/server fixtures | Passed, with per-process diagnostic ASLR policy |
 | Paired TLS, cancellation, teardown and malformed protocol fixtures | Passed normally and under sanitizers |
 | CPU binaries | Three compiled and linked |
 | CUDA binaries | Six compiled and linked for SM120a |
@@ -32,11 +33,12 @@ evidence artifacts for seven days. The compact tracked
 source identities, exact local image IDs and the scope of these results.
 
 The Pillow reference emits its documented warning for a deliberately exercised
-palette-transparency input; the pixel comparison passes. ThreadSanitizer binaries
-compiled, but both PIE and non-PIE attempts failed to initialize on this ARM64
-host with `unexpected memory mapping` (exit 66). Those attempts are unavailable
-instrumentation, not successful race checks. The concurrency fixtures and
-ASan/UBSan tests do not replace a working race detector on a supported test host.
+palette-transparency input; the pixel comparison passes. Earlier GCC
+ThreadSanitizer attempts failed to initialize with `unexpected memory mapping`
+(exit 66). Installing the Clang 18 runtime and using its supported per-process
+diagnostic ASLR policy resolved that limitation: both instrumented fixtures pass
+without suppressions or retries. The separate `make ria-thread-sanitize` target
+is also required in CI. These fixtures do not prove all production interleavings.
 
 The workflow builds the actual Linux amd64 images on standard hosted runners and
 publishes immutable commit-tagged CPU/CUDA GHCR images with SBOM and provenance

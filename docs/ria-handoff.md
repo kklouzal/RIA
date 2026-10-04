@@ -131,11 +131,14 @@ python3.12 -m venv .venv
 PATH="$PWD/.venv/bin:$PATH" make -j2 ria-offline RIA_PYTHON="$PWD/.venv/bin/python"
 PATH="$PWD/.venv/bin:$PATH" .venv/bin/python deploy/offline_checks.py --output build/ria/evidence/offline.json
 PATH="$PWD/.venv/bin:$PATH" make ria-sanitize RIA_PYTHON="$PWD/.venv/bin/python"
+make ria-thread-sanitize
 PYTHONPATH=tools .venv/bin/python -m ria.schemas
 make -j2 ria-cuda
 ```
 
-The CUDA build needs the pinned compiler/toolkit but no GPU. The workflow
+The thread sanitizer needs Clang 18 and its runtime package; its ASLR policy
+applies only to the diagnostic process. The CUDA build needs the pinned
+compiler/toolkit but no GPU. The workflow
 `.github/workflows/ria.yml` runs offline checks and builds Linux amd64 CPU/CUDA
 containers. Authorized pushes publish commit-tagged GHCR images with SBOM and
 provenance; use the resulting immutable digest in a deployment request.

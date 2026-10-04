@@ -90,6 +90,16 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
     return request
 
 
+def record_config_only_compose_version(request):
+    """Record the actual CLI version in an otherwise synthetic host fixture."""
+    from ria.deployment import _run
+    version = _run(["docker", "compose", "version", "--short"], request["deadline_ms"]).decode("ascii").strip().removeprefix("v")
+    report = seal({**read_json(request["host_report"]), "compose_version": version})
+    atomic_json(request["host_report"], report)
+    request["environment"].update(compose_version=version, host_report_digest=report["digest"])
+    return version
+
+
 def measurement_fixture(request, directory, *, qualified=True):
     """Synthetic sealed evidence for orchestration tests, never a hardware claim."""
     from ria.qualification import freeze_policy
@@ -338,6 +348,44 @@ def test_compose_exact_resources_health_and_canonical_duration(tmp_path):
         altered["services"]["expert"][field] = value
         with pytest.raises(ArtifactError):
             validate_effective_compose(altered, request, tmp_path / "config")
+
+
+@pytest.mark.parametrize("version", ["2.0.0", "2.20.0", "2.40.3"])
+def test_compose2_omitted_false_bind_keeps_strict_mount_contract(tmp_path, version):
+    request = deployment_request(tmp_path)
+    request["environment"]["compose_version"] = version
+    document = compose_fixture(request, tmp_path / "config")
+    for volume in document["services"]["expert"]["volumes"]:
+        volume["bind"] = {}
+    validate_effective_compose(document, request, tmp_path / "config")
+    for mutation in ("missing", "null", "true", "zero", "propagation", "source", "readonly", "readonly_type"):
+        altered = copy.deepcopy(document)
+        volume = altered["services"]["expert"]["volumes"][0]
+        if mutation == "missing":
+            volume.pop("bind")
+        elif mutation == "null":
+            volume["bind"] = None
+        elif mutation in ("true", "zero"):
+            volume["bind"] = {"create_host_path": True if mutation == "true" else 0}
+        elif mutation == "propagation":
+            volume["bind"] = {"propagation": "rshared"}
+        elif mutation == "source":
+            volume["source"] = "/unreviewed/source"
+        else:
+            volume["read_only"] = False if mutation == "readonly" else "true"
+        with pytest.raises(ArtifactError):
+            validate_effective_compose(altered, request, tmp_path / "config")
+
+
+@pytest.mark.parametrize("version", ["2.40.4", "2.41.0", "5.0.0", "5.2.0", "fixture", "2.40.3-dev"])
+def test_unknown_or_optout_compose_cannot_treat_empty_bind_as_false(tmp_path, version):
+    request = deployment_request(tmp_path)
+    request["environment"]["compose_version"] = version
+    document = compose_fixture(request, tmp_path / "config")
+    validate_effective_compose(document, request, tmp_path / "config")
+    document["services"]["expert"]["volumes"][0]["bind"] = {}
+    with pytest.raises(ArtifactError):
+        validate_effective_compose(document, request, tmp_path / "config")
 
 
 def test_strict_role_budget_gpu_and_identity_crossfields(tmp_path):
