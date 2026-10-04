@@ -59,6 +59,13 @@ typedef struct {
 bool ria_tensor_store_open(ria_tensor_store *store, const char *manifest_path,
                            const ria_tensor_load_options *options,
                            ria_error *error);
+/* Preparation/admission inspection only. Authenticate the complete bounded
+ * metadata graph and validate descriptors without opening/copying payloads,
+ * allocating a bank, touching NUMA policy or initializing CUDA. Every data
+ * pointer remains NULL. This does not establish payload integrity/readiness.
+ * The returned metadata owner must be closed through store_close. */
+bool ria_tensor_store_inspect(ria_tensor_store *, const char *,
+                             const ria_tensor_load_options *, ria_error *);
 /* Startup-only callback first receives shard=NULL for complete metadata-only
  * admission, before any payload arena allocation. Then before any shard page
  * is touched and again after

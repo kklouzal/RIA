@@ -924,6 +924,12 @@ static bool populate(ria_tensor_store *s, ria_shard *a, int root, const ria_tens
     ok = ria_fail(e, RIA_RESOURCE_LIMIT, "immutable shard protection failed");
   return ok;
 }
+static bool store_read(ria_tensor_store *,const char *,const ria_tensor_load_options *,
+                       ria_tensor_place,void *,ria_tensor_progress,void *,bool,ria_error *);
+bool ria_tensor_store_inspect(ria_tensor_store *s,const char *path,
+                              const ria_tensor_load_options *o,ria_error *e) {
+  return store_read(s,path,o,NULL,NULL,NULL,NULL,true,e);
+}
 bool ria_tensor_store_open(ria_tensor_store *s, const char *path,
                            const ria_tensor_load_options *o, ria_error *e) {
   return ria_tensor_store_open_placed(s, path, o, NULL, NULL, e);
@@ -935,6 +941,11 @@ bool ria_tensor_store_open_placed(ria_tensor_store *s, const char *path,
 }
 bool ria_tensor_store_open_controlled(ria_tensor_store *s,const char *path,const ria_tensor_load_options *o,
                                      ria_tensor_place place,void *context,ria_tensor_progress progress,void *progress_context,ria_error *e) {
+  return store_read(s,path,o,place,context,progress,progress_context,false,e);
+}
+static bool store_read(ria_tensor_store *s,const char *path,const ria_tensor_load_options *o,
+                       ria_tensor_place place,void *context,ria_tensor_progress progress,void *progress_context,
+                       bool metadata_only,ria_error *e) {
   memset(s, 0, sizeof(*s));
   if (!o || !o->expected_digest || !o->role || !o->max_resident_bytes)
     return ria_fail(e, RIA_INVALID_REQUEST, "missing trusted tensor admission");
@@ -965,6 +976,11 @@ bool ria_tensor_store_open_controlled(ria_tensor_store *s,const char *path,const
     goto fail;
   }
   bool ok = indexes(s, root, metadata_budget,e) && descriptors(s, o, e) && contracts(s,root,metadata_budget,e);
+  if (metadata_only) {
+    if (close(root) && ok) ok=ria_fail(e,RIA_INTEGRITY_ERROR,"metadata directory close failed");
+    if (!ok) goto fail;
+    return true;
+  }
   if (ok && place) ok=place(context,s,NULL,false,e);
   for (uint64_t i = 0; ok && i < s->shard_count; i++)
     ok =

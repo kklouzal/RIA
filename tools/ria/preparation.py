@@ -12,10 +12,11 @@ import sys
 from pathlib import Path
 
 from .identity import (ArtifactError, atomic_json, canonical, checked_product, digest,
-                       hash_file, open_regular, read_json, seal, sync_directory,
+                       hash_file, loads, open_regular, read_json, read_verified_bytes, seal, sync_directory,
                        u64, verify_identity, within)
 from .numeric import (decode_matrix_rows, encode_bf16, encode_fp8_block32)
-from .safetensors import (DTYPE_BYTES, chunk_index, exact_read, inspect, tensor_blocks)
+from .safetensors import (DTYPE_BYTES, chunk_index, exact_read, inspect, tensor_blocks,
+                         validate_source_snapshot)
 from .schemas import (FORMAT, OPERATION, PROFILE, SHA, SHAPE, TEXT, POS, REV, array,
                       obj, validate)
 
@@ -95,8 +96,16 @@ def _raw_slice(shard, tensor, start, length):
     if start < 0 or length < 0 or start > tensor.length or length > tensor.length - start:
         raise ArtifactError("conversion slice exceeds source tensor")
     with open_regular(shard.path) as stream:
+        validate_source_snapshot(shard, stream)
         stream.seek(shard.data_start + tensor.offset + start)
-        return exact_read(stream, length)
+        result = exact_read(stream, length)
+        validate_source_snapshot(shard, stream)
+        return result
+
+
+def _validate_sources(tensors):
+    for shard in {str(shard.path): shard for shard, _ in tensors.values()}.values():
+        validate_source_snapshot(shard)
 
 
 def _conversion_blocks(rule, source, tensors, profile, scratch_bytes):
@@ -233,9 +242,7 @@ def _validate_recipe(root, recipe):
     source_bytes = 0
     for source in recipe["sources"]:
         path = within(root, source["path"])
-        if hash_file(path) != source["sha256"]:
-            raise ArtifactError("source shard hash mismatch")
-        shard = inspect(path)
+        shard = inspect(path, expected_sha256=source["sha256"])
         source_bytes += shard.size
         for name, tensor in shard.tensors.items():
             if name in seen:
@@ -261,9 +268,8 @@ def _validate_recipe(root, recipe):
     for item in recipe["metadata"]:
         if item["path"].endswith("model.safetensors.index.json"):
             path = within(root, item["path"])
-            if hash_file(path) != item["sha256"]:
-                raise ArtifactError("source index hash mismatch")
-            index = read_json(path, project=False, max_nodes=2000000)
+            index = loads(read_verified_bytes(path, expected_sha256=item["sha256"]),
+                          project=False, max_nodes=2000000)
             auxiliary = {"engram.token_map", "engram.primes", "engram.offsets", "engram.multipliers", "engram.pad_id"}
             if not isinstance(index.get("weight_map"), dict) or set(index["weight_map"]) != set(seen) - auxiliary:
                 raise ArtifactError("source shard inventory is incomplete for its official index")
@@ -522,7 +528,9 @@ def prepare(root, recipe, output, *, role="server", selected_names=None):
     if (output / "manifest.json").exists():
         if not state["completed"]:
             raise ArtifactError("output already contains an unrelated committed manifest")
-        return verify_package(output)
+        existing = verify_package(output)
+        _validate_sources(tensors)
+        return existing
     data_dir = output / "tensors"
     data_dir.mkdir(exist_ok=True)
     tasks = []
@@ -663,12 +671,7 @@ def prepare(root, recipe, output, *, role="server", selected_names=None):
     from .identity import atomic_bytes
     for index, item in enumerate(recipe["metadata"]):
         source_path = within(root, item["path"])
-        if hash_file(source_path) != item["sha256"]:
-            raise ArtifactError("compact metadata source hash mismatch")
-        with open_regular(source_path) as stream:
-            data = stream.read((16 << 20) + 1)
-        if len(data) > 16 << 20:
-            raise ArtifactError("compact metadata byte cap exceeded")
+        data = read_verified_bytes(source_path, expected_sha256=item["sha256"])
         relative = f"metadata/{index}.bin"
         atomic_bytes(output / relative, data)
         wrapper = seal({"schema_revision": 1, "path": relative, "source_path": item["path"], "sha256": item["sha256"], "length": str(len(data))})
@@ -685,6 +688,7 @@ def prepare(root, recipe, output, *, role="server", selected_names=None):
     if len(canonical(manifest)) > 256 << 10:
         raise ArtifactError("compact manifest root exceeds 256 KiB")
     verify_package(output, manifest)
+    _validate_sources(tensors)
     atomic_json(output / "preparation-estimate.json", {"source_bytes": source_bytes,
         "output_bytes": sum(u64(shard["length"]) for shard in shards), "scratch_bytes": recipe["scratch_bytes"]})
     atomic_json(output / "manifest.json", manifest)

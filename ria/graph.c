@@ -392,13 +392,24 @@ bool ria_graph_create(const ria_tensor_store *store,const ria_graph_options *opt
     }
     if (!ria_graph_reset(g,1,1,e)) goto bad;
     *out=g;return true;
-bad:{ria_error cleanup; (void)ria_graph_destroy(g,&cleanup);return false;}
+bad:{ria_error cleanup={0};
+    if (!ria_graph_destroy(g,&cleanup)) {
+        fprintf(stderr,"graph construction cleanup failed; terminating with owned backing intact (primary=%d cleanup=%d)\n",e ? e->code : 0,cleanup.code);
+        _Exit(e && e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+    }
+    return false;}
 }
 bool ria_graph_destroy(ria_graph *g,ria_error *e) {
     if (!g) return true;
-    bool ok=ria_vision_destroy(g->vision,e);
-    for (uint32_t i=0;i<g->options.local_expert_count;++i) if (!ria_expert_cuda_resident_destroy(&g->local_device[i],ok ? e : NULL)) ok=false;
-    if (!ria_graph_cuda_destroy(g->cuda,ok ? e : NULL)) ok=false;
+    g->poisoned=true;
+    /* Never release source backing after a failed CUDA completion/release.
+     * The serving owner must terminate; retrying this graph is unsupported. */
+    if (!ria_vision_destroy(g->vision,e)) return false;
+    g->vision=NULL;
+    for (uint32_t i=0;i<g->options.local_expert_count;++i)
+        if (!ria_expert_cuda_resident_destroy(&g->local_device[i],e)) return false;
+    if (!ria_graph_cuda_destroy(g->cuda,e)) return false;
+    g->cuda=NULL;bool ok=true;
     if (g->locked && munlock(g->host_allocation,(size_t)g->state_bytes)!=0) { if (ok) (void)ria_fail(e,RIA_INTERNAL_ERROR,"unlock graph backing failed");ok=false; }
     if (g->host_allocation && munmap(g->host_allocation,(size_t)g->state_bytes)!=0) { if (ok) (void)ria_fail(e,RIA_INTERNAL_ERROR,"release graph backing failed");ok=false; }
     size_t owner=(size_t)g->owner_bytes;
@@ -480,19 +491,26 @@ static bool attention(ria_graph *g,unsigned layer,ria_error *e) {
     }
     if (produced && (!ria_graph_cuda_rope(c,latent,1,512,pos+1-x->ratio,x->ratio,false,e) ||
         !ria_graph_cuda_pack(c,latent,512,2,g->compressed[owner]+(compressed_count-1)*288,e))) return false;
-    uint64_t window_count=pos<128 ? pos+1 : 128,oldest=pos+1-window_count;
+    uint64_t window_count=pos<128 ? pos+1 : 128;
+    /* Match the pinned sequential source forward: position zero has one
+     * window slot; subsequent decode-form forwards list the entire physical
+     * ring oldest first, including its leading uninitialized/invalid slots.
+     * Removing those holes changes the source's 64-slot BF16 probability
+     * cast boundaries when compressed keys follow the window. */
+    uint64_t window_extent=pos ? 128 : 1,first_slot=pos ? (pos%128+1)%128 : 0;
+    uint64_t masked_end=window_extent-window_count;
     float *attention_kv=buffer(g,RIA_G_ATTN_KV);
-    for (uint64_t row=0;row<window_count;++row)
-        memcpy(g->packed_window+row*528,g->windows[layer]+((oldest+row)%128)*528,528);
-    if (!ria_graph_cuda_unpack(c,g->packed_window,window_count,512,1,attention_kv,e)) return false;
+    for (uint64_t row=0;row<window_extent;++row)
+        memcpy(g->packed_window+row*528,g->windows[layer]+((first_slot+row)%128)*528,528);
+    if (!ria_graph_cuda_unpack(c,g->packed_window,window_extent,512,1,attention_kv,e)) return false;
     uint32_t selected=x->ratio ? g->selected_count : 0;
     for (uint32_t row=0;row<selected;++row) {
         if (g->selected[row]>=compressed_count) return ria_fail(e,RIA_INTERNAL_ERROR,"index selected an unpublished compressed position");
         memcpy(g->packed_selected+(uint64_t)row*288,g->compressed[owner]+(uint64_t)g->selected[row]*288,288);
     }
-    if (selected && !ria_graph_cuda_unpack(c,g->packed_selected,selected,512,2,attention_kv+window_count*512,e)) return false;
+    if (selected && !ria_graph_cuda_unpack(c,g->packed_selected,selected,512,2,attention_kv+window_extent*512,e)) return false;
     float *o=buffer(g,RIA_G_ATTN_OUT),*low=buffer(g,RIA_G_OLOW);
-    if (!ria_graph_cuda_attention(c,q,attention_kv,window_count+selected,x->sink,o,e) || !ria_graph_cuda_rope(c,o,64,512,pos,x->ratio,true,e)) return false;
+    if (!ria_graph_cuda_attention(c,q,attention_kv,window_extent+selected,0,masked_end,x->sink,o,e) || !ria_graph_cuda_rope(c,o,64,512,pos,x->ratio,true,e)) return false;
     for (unsigned group=0;group<8;++group) {
         ria_expert_matrix matrix=x->woa;matrix.out_features=1024;matrix.values+=group*1024*matrix.value_row_stride;
         matrix.values_bytes-=group*1024*matrix.value_row_stride;
@@ -532,6 +550,9 @@ bool ria_graph_step(ria_graph *g,uint32_t token,bool image,const float *embeddin
     if (!g || !logits || token>=129280 || g->poisoned || g->position>=g->options.max_tokens || (embedding && !image))
         return ria_fail(e,RIA_INVALID_REQUEST,"invalid/out-of-capacity/poisoned graph step");
     ria_graph_cuda *c=g->cuda;float *h=buffer(g,RIA_G_H),*residual=buffer(g,RIA_G_RESIDUAL),*input=buffer(g,RIA_G_INPUT);
+    /* Single-Pass mHC carries pre-mixes between layers of this token only.
+     * The source forward initializes each token independently of cached state. */
+    if (!ria_graph_cuda_begin_step(c,e)) goto bad;
     for (unsigned i=3;i>0;--i) g->history[i]=g->history[i-1];
     g->history[0]=image ? INT64_C(-1) : (int64_t)g->options.compressed_token_map[token];
     if (!(embedding ? ria_graph_cuda_upload(c,input,embedding,5120,e) :

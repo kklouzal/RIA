@@ -324,15 +324,23 @@ bool ria_expert_cuda_resident_create(ria_expert_cuda *c,const ria_expert *source
         if (ok && m->scales) ok=copy_rows(c,(void *)m->scales,m->scale_row_stride,s->scales,s->scale_row_stride,m->scale_row_stride,
             m->profile==RIA_EXPERT_FP8 ? ceil_groups(m->out_features,32) : m->out_features,cudaMemcpyHostToDevice,e,"initialize local expert scales");
     }
-    if (!ok) { ria_error cleanup;(void)ria_expert_cuda_resident_destroy(view,&cleanup);return false; }
+    if (!ok) { ria_error cleanup={0,{0}};
+        if (!ria_expert_cuda_resident_destroy(view,&cleanup)) {
+            fprintf(stderr,"CUDA resident construction cleanup failed; retaining owned buffers (primary=%d cleanup=%d)\n",e ? e->code : 0,cleanup.code);
+            _Exit(e && e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+        }
+        return false;
+    }
     return true;
 }
 bool ria_expert_cuda_resident_destroy(ria_expert_cuda_resident *view,ria_error *e) {
     if (!view || !view->owner) return true;
-    bool ok=cuda_failure(cudaSetDevice(view->owner->device),e,"select local expert cleanup device");
-    if (!cuda_failure(cudaStreamSynchronize(view->owner->stream),ok ? e : NULL,"drain local expert before release")) ok=false;
-    if (!cuda_failure(cudaFree((void *)view->expert.gate.values),ok ? e : NULL,"release immutable local expert population")) ok=false;
-    memset(view,0,sizeof(*view));return ok;
+    /* A failed CUDA wait is not a usable completion proof. Retain every
+     * borrowed/owned address for the process owner's fail-stop policy. */
+    if (!cuda_failure(cudaSetDevice(view->owner->device),e,"select local expert cleanup device") ||
+        !cuda_failure(cudaStreamSynchronize(view->owner->stream),e,"drain local expert before release") ||
+        !cuda_failure(cudaFree((void *)view->expert.gate.values),e,"release immutable local expert population")) return false;
+    memset(view,0,sizeof(*view));return true;
 }
 uint64_t ria_expert_cuda_resident_bytes(const ria_expert_cuda_resident *view) { return view ? view->bytes : 0; }
 bool ria_expert_cuda_evaluate_device(ria_expert_cuda *c,const ria_expert *source,const ria_expert_cuda_resident *resident,
@@ -411,19 +419,27 @@ bool ria_expert_cuda_create_pooled(int device,uint64_t input,uint64_t intermedia
         allocation(c,(void **)&c->tile_values,tile_rows*c->width,4,e) &&
         allocation(c,(void **)&c->tile_scales,tile_rows*ceil_groups(c->width,16),1,e) &&
         allocation(c,(void **)&c->device_error,1,sizeof(int),e);
-    if (!ok) { ria_error cleanup; (void)ria_expert_cuda_destroy(c,&cleanup); return false; }
+    if (!ok) { ria_error cleanup={0,{0}};
+        if (!ria_expert_cuda_destroy(c,&cleanup)) {
+            fprintf(stderr,"CUDA expert construction cleanup failed; retaining owned buffers (primary=%d cleanup=%d)\n",e ? e->code : 0,cleanup.code);
+            _Exit(e && e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+        }
+        return false;
+    }
     *out=c; return true;
 }
 bool ria_expert_cuda_destroy(ria_expert_cuda *c,ria_error *e) {
     if (!c) return true;
-    bool ok=cuda_failure(cudaSetDevice(c->device),e,"select CUDA device for cleanup");
-    if (c->stream && !cuda_failure(cudaStreamSynchronize(c->stream),ok ? e : NULL,"drain expert stream")) ok=false;
-    void *owned[]={c->input_values,c->quantized,c->factors,c->activation_codes,c->activation_scales,c->gate,c->up,c->output_values,c->coefficients,c->tile_values,c->tile_scales,c->device_error};
-    for (unsigned i=0;i<sizeof(owned)/sizeof(owned[0]);++i)
-        if (owned[i] && !cuda_failure(cudaFree(owned[i]),ok ? e : NULL,"release expert workspace")) ok=false;
-    if (c->stream && !cuda_failure(cudaStreamDestroy(c->stream),ok ? e : NULL,"destroy expert stream")) ok=false;
-    if (c->pinned && !cuda_failure(cudaFreeHost(c->pinned),ok ? e : NULL,"release bounded pinned transfer pool")) ok=false;
-    free(c); return ok;
+    if (!cuda_failure(cudaSetDevice(c->device),e,"select CUDA device for cleanup") ||
+        (c->stream && !cuda_failure(cudaStreamSynchronize(c->stream),e,"drain expert stream"))) return false;
+#define RELEASE(member) do { if (c->member && !cuda_failure(cudaFree(c->member),e,"release expert workspace")) return false;c->member=NULL; } while (0)
+    RELEASE(input_values);RELEASE(quantized);RELEASE(factors);RELEASE(activation_codes);RELEASE(activation_scales);
+    RELEASE(gate);RELEASE(up);RELEASE(output_values);RELEASE(coefficients);RELEASE(tile_values);RELEASE(tile_scales);RELEASE(device_error);
+#undef RELEASE
+    if (c->stream && !cuda_failure(cudaStreamDestroy(c->stream),e,"destroy expert stream")) return false;
+    c->stream=NULL;
+    if (c->pinned && !cuda_failure(cudaFreeHost(c->pinned),e,"release bounded pinned transfer pool")) return false;
+    c->pinned=NULL;free(c);return true;
 }
 uint64_t ria_expert_cuda_workspace_bytes(const ria_expert_cuda *c) { return c ? c->workspace_bytes : 0; }
 uint64_t ria_expert_cuda_pinned_bytes(const ria_expert_cuda *c) { return c ? c->pinned_bytes : 0; }

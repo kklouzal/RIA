@@ -171,6 +171,17 @@ static void cancellation_progress(void) {
   ria_binding_invalidate(&b); assert(!b.valid);
   assert(!ria_binding_receive(&b,&h,true,&e));
 }
+static void error_credit(void) {
+  ria_error e={0}; uint64_t charge;
+  /* Independent constants include the 16KiB error alternative for tiny work. */
+  assert(ria_request_charge(RIA_ROWS,32,320,&charge,&e) && charge==16544);
+  assert(ria_request_charge(RIA_CHUNK,16,65,&charge,&e) && charge==16528);
+  assert(ria_request_charge(RIA_CANCEL,16,24,&charge,&e) && charge==16528);
+  assert(ria_request_charge(RIA_CLOSE,0,0,&charge,&e) && charge==16512);
+  assert(ria_request_charge(RIA_EXPERT,68,36,&charge,&e) && charge==8405188);
+  assert(ria_request_charge(RIA_CHUNK,16,4194368,&charge,&e) && charge==4194512);
+  assert(!ria_request_charge(RIA_CHUNK,UINT64_MAX,0,&charge,&e) && e.code==RIA_RESOURCE_LIMIT);
+}
 static void addresses(void) {
   struct sockaddr_storage address; socklen_t length; ria_error e={0};
   assert(ria_address("127.0.0.1:7443",true,&address,&length,&e));
@@ -199,7 +210,7 @@ static void contribution(void) {
   assert(!ria_server_contribution_pack(&r,1,output,2,result,sizeof(result)-1,&e));
 }
 int main(void) {
-  accounting(); seccomp_contract(); grants(); queue_stress(); cancellation_progress(); addresses(); contribution();
+  accounting(); seccomp_contract(); grants(); queue_stress(); cancellation_progress(); error_credit(); addresses(); contribution();
   puts("RIA server contracts: NUMA policy allocation/alias accounting, whole-chunk grants, concurrent bounded queues, cancellation credit and independent progress passed; no model/NUMA/GPU execution");
   return 0;
 }

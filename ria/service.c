@@ -40,9 +40,12 @@ static bool checked_doc(const char *path, const uint8_t expected[32],
           ria_fail(e, RIA_INTEGRITY_ERROR,
                    "provisioned document digest mismatch"));
 }
-static bool expert_config(ria_service *s, ria_error *e) {
-  ria_expert_config *c=&s->expert; const ria_json_doc *d=&s->document;
-  uint32_t x=ria_json_get(d,0,"expert"); const char *policy;
+bool ria_expert_config_parse(const ria_json_doc *d,uint32_t x,const char *executor,
+                              uint64_t host_cap,uint64_t device_cap,uint64_t pinned_cap,
+                              ria_expert_config *c,ria_error *e) {
+  if (!d || !executor || !c || (strcmp(executor,"cpu") && strcmp(executor,"cuda")))
+    return ria_fail(e,RIA_INVALID_REQUEST,"invalid expert configuration parse input");
+  memset(c,0,sizeof(*c)); const char *policy;
   const char *const fields[]={"numa_policy","nodes","projection_tile_rows","host_runtime_bytes",
     "startup_host_bytes","device_workspace_bytes","pinned_workspace_bytes","drain_timeout_ms"};
   if (!ria_json_fields(d,x,fields,8,fields,8,e) || !text(d,x,"numa_policy",&policy,e)) return false;
@@ -54,20 +57,12 @@ static bool expert_config(ria_service *s, ria_error *e) {
       !ria_json_u64(d,ria_json_get(d,x,"startup_host_bytes"),true,&c->startup_host_bytes,e) ||
       !ria_json_u64(d,ria_json_get(d,x,"device_workspace_bytes"),true,&c->device_workspace_bytes,e) ||
       !ria_json_u64(d,ria_json_get(d,x,"pinned_workspace_bytes"),true,&c->pinned_workspace_bytes,e) ||
-      !c->host_runtime_bytes || c->host_runtime_bytes>c->startup_host_bytes || c->startup_host_bytes>s->host_cap ||
-      c->device_workspace_bytes>s->device_cap || c->pinned_workspace_bytes>s->pinned_cap)
+      !c->host_runtime_bytes || c->host_runtime_bytes>c->startup_host_bytes || c->startup_host_bytes>host_cap ||
+      c->device_workspace_bytes>device_cap || c->pinned_workspace_bytes>pinned_cap)
     return ria_fail(e,RIA_RESOURCE_LIMIT,"expert reservations exceed admitted caps");
   const ria_json_node *nodes=ria_json_at(d,ria_json_get(d,x,"nodes"));
   if (!nodes || nodes->type!=RIA_JSON_ARRAY) return ria_fail(e,RIA_INVALID_REQUEST,"expert NUMA nodes missing");
   const char *const nf[]={"node","cpus","workers","local_bytes"};
-  const ria_json_node *caps=ria_json_at(&s->plan,ria_json_get(&s->plan,ria_json_get(&s->plan,0,"caps"),"numa"));
-  uint32_t startup=ria_json_get(&s->plan,ria_json_get(&s->plan,0,"phases"),"startup");
-  uint64_t startup_host,startup_device,startup_pinned;
-  if (!integer(&s->plan,startup,"host_bytes",&startup_host,e) || !integer(&s->plan,startup,"device_bytes",&startup_device,e) ||
-      !integer(&s->plan,startup,"pinned_bytes",&startup_pinned,e) || c->startup_host_bytes>startup_host ||
-      c->device_workspace_bytes>startup_device || c->pinned_workspace_bytes>startup_pinned)
-    return ria_fail(e,RIA_RESOURCE_LIMIT,"expert physical reservations exceed admitted startup phase peak");
-  const ria_json_node *startup_nodes=ria_json_at(&s->plan,ria_json_get(&s->plan,startup,"numa"));
   for (uint32_t i=nodes->child;i!=RIA_JSON_NONE;i=d->nodes[i].next) {
     uint64_t id,workers; if (c->node_count==64) return ria_fail(e,RIA_RESOURCE_LIMIT,"too many expert NUMA nodes");
     ria_expert_node *n=&c->nodes[c->node_count++];
@@ -75,20 +70,6 @@ static bool expert_config(ria_service *s, ria_error *e) {
         !integer(d,i,"workers",&workers,e) || !workers || workers>64 ||
         !ria_json_u64(d,ria_json_get(d,i,"local_bytes"),true,&n->local_bytes,e) || !n->local_bytes) return false;
     n->node=(unsigned)id; n->workers=(unsigned)workers; c->worker_count+=n->workers;
-    bool found=false;
-    for (uint32_t j=caps ? caps->child : RIA_JSON_NONE;j!=RIA_JSON_NONE;j=s->plan.nodes[j].next) {
-      uint64_t node,bytes;
-      if (!integer(&s->plan,j,"node",&node,e) || !integer(&s->plan,j,"bytes",&bytes,e)) return false;
-      if (node==id && n->local_bytes<=bytes) found=true;
-    }
-    if (!found) return ria_fail(e,RIA_RESOURCE_LIMIT,"expert node lacks admitted local capacity");
-    found=false;
-    for (uint32_t j=startup_nodes ? startup_nodes->child : RIA_JSON_NONE;j!=RIA_JSON_NONE;j=s->plan.nodes[j].next) {
-      uint64_t node,bytes;
-      if (!integer(&s->plan,j,"node",&node,e) || !integer(&s->plan,j,"bytes",&bytes,e)) return false;
-      if (node==id && n->local_bytes<=bytes) found=true;
-    }
-    if (!found) return ria_fail(e,RIA_RESOURCE_LIMIT,"expert local reserve exceeds admitted startup node peak");
     const ria_json_node *cpus=ria_json_at(d,ria_json_get(d,i,"cpus"));
     if (!cpus || cpus->type!=RIA_JSON_ARRAY) return ria_fail(e,RIA_INVALID_REQUEST,"explicit expert CPU affinities missing");
     for (uint32_t j=cpus->child;j!=RIA_JSON_NONE;j=d->nodes[j].next) {
@@ -104,9 +85,36 @@ static bool expert_config(ria_service *s, ria_error *e) {
       return ria_fail(e,RIA_INVALID_REQUEST,"duplicate expert NUMA node");
   }
   if (!c->node_count || c->worker_count>128 ||
-      (!strcmp(s->executor,"cpu") && (c->device_workspace_bytes || c->pinned_workspace_bytes)) ||
-      (!strcmp(s->executor,"cuda") && (c->worker_count!=1 || !c->device_workspace_bytes || !c->pinned_workspace_bytes)))
+      (!strcmp(executor,"cpu") && (c->device_workspace_bytes || c->pinned_workspace_bytes)) ||
+      (!strcmp(executor,"cuda") && (c->worker_count!=1 || !c->device_workspace_bytes || !c->pinned_workspace_bytes)))
     return ria_fail(e,RIA_INVALID_REQUEST,"executor/node/worker reservation mismatch");
+  return true;
+}
+static bool expert_config(ria_service *s,ria_error *e) {
+  ria_expert_config *c=&s->expert;
+  if (!ria_expert_config_parse(&s->document,ria_json_get(&s->document,0,"expert"),s->executor,
+                               s->host_cap,s->device_cap,s->pinned_cap,c,e)) return false;
+  const ria_json_node *caps=ria_json_at(&s->plan,ria_json_get(&s->plan,ria_json_get(&s->plan,0,"caps"),"numa"));
+  uint32_t startup=ria_json_get(&s->plan,ria_json_get(&s->plan,0,"phases"),"startup");
+  uint64_t startup_host,startup_device,startup_pinned;
+  if (!integer(&s->plan,startup,"host_bytes",&startup_host,e) || !integer(&s->plan,startup,"device_bytes",&startup_device,e) ||
+      !integer(&s->plan,startup,"pinned_bytes",&startup_pinned,e) || c->startup_host_bytes>startup_host ||
+      c->device_workspace_bytes>startup_device || c->pinned_workspace_bytes>startup_pinned)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"expert physical reservations exceed admitted startup phase peak");
+  const ria_json_node *startup_nodes=ria_json_at(&s->plan,ria_json_get(&s->plan,startup,"numa"));
+  for (unsigned i=0;i<c->node_count;i++) {
+    const ria_expert_node *n=&c->nodes[i];
+    const ria_json_node *sets[]={caps,startup_nodes};
+    for (unsigned k=0;k<2;k++) {
+      bool found=false;
+      for (uint32_t j=sets[k] ? sets[k]->child : RIA_JSON_NONE;j!=RIA_JSON_NONE;j=s->plan.nodes[j].next) {
+        uint64_t node,bytes;
+        if (!integer(&s->plan,j,"node",&node,e) || !integer(&s->plan,j,"bytes",&bytes,e)) return false;
+        if (node==n->node && n->local_bytes<=bytes) found=true;
+      }
+      if (!found) return ria_fail(e,RIA_RESOURCE_LIMIT,"expert local reserve exceeds admitted node peak/capacity");
+    }
+  }
   return true;
 }
 bool ria_service_read(ria_service *s, const char *path, ria_error *e) {

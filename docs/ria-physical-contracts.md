@@ -1,57 +1,112 @@
-# Independent physical matrix and gate reports
+# Physical qualification software and diagnostic contracts
 
-`tools/ria/physical_contract.py` validates independent instrumented reports for
-release matrix cells and G01–G28 gates. It executes no workload, supplies no
-passing thresholds, and cannot generate physical qualification from synthetic
-fixtures. Its tests are synthetic parser and contract fixtures only.
+**Full physical qualification software is incomplete.** The supplied native
+fixtures, paired TLS tests and HTTP replay are runnable partial producers. No
+supplied producer and semantic release adapter covers the complete 540-cell
+route/cache/residency/NUMA matrix and G01–G28. Some offline gate obligations have
+complete runnable tests; others have partial or missing producers. Adequate
+hardware alone does not resolve the remaining missing software.
+An operator is not expected to write the missing internal instrumentation or
+fault harness as a provisioning step.
 
-The independent producer must run the declared physical workloads and retain
-their evidence. A selfhash authenticates bytes and references; **it is not
-hardware attestation and cannot prove that execution actually happened**. The
-operator must separately establish producer trust and genuine hardware execution.
+Run the bounded offline readiness check before arranging hardware qualification:
 
-The four strict schemas exported as `PHYSICAL_CONTRACT_SCHEMAS` are
-`physical-runtime-identity`, `physical-contract-plan`,
-`physical-contract-measurements`, and `physical-contract-evidence`. Every document
-is revision 1 and selfsealed with the repository RFC 8785 digest convention.
-Unknown fields, unknown kinds, duplicate JSON keys, and nonfinite numbers fail.
+```sh
+python tools/qualify_ria.py readiness --output /artifacts/qualification-readiness.json
+```
 
-Plan, runtime identity witness, raw measurements, and final evidence bind the
-same `policy_digest`, `logical_model_digest`, `source_lock_digest`,
-`environment_digest`, `build_digest`, `operator_contract_digest`,
-`runtime_config_digest`, `profile`, and `server_executor`. The policy/model/source
-identities must match the frozen qualification policy. The identity witness
-contains digests only; do not put credentials or configuration contents in it.
-A proof covers one profile/executor realization. The 540-cell matrix can combine
-different candidate proofs; every covered cell must match its proof's candidate.
+It executes no workload, probes no GPU and loads no checkpoint. It writes a
+selfsealed report and exits **1** while required producer software is missing.
+The report lists the fixed G01–G28 obligations, their specification sections,
+per-obligation available/partial/missing software with exact paths, all matrix
+axes, supported partial producer commands and distinct software and external-input
+blockers. For example, G02 has runnable schema/JCS/wide-offset tests; G25 has
+locked builds and provenance tooling but lacks automated repeated-build output
+comparison. Neither is falsely labeled as having no test software. A complete
+authenticated gate receipt/semantic release adapter is still needed to integrate
+those results into final qualification. The authoritative catalog is
+`tools/ria/qualification_readiness.py`; it binds specification SHA256
+`14224cdb33476944111e14f69a5679f0597c192a44d67b48f048910f326f3f6e`.
+Its digest is frozen into each diagnostic plan. The gate names are the plan's
+traceability identifiers for the cumulative specification acceptance contract.
 
-Register the sealed plan after the policy and before execution, using exact UTC
-timestamps (`YYYY-MM-DDTHH:MM:SSZ`). The plan freezes the child binary SHA256,
-positive monotonic elapsed limit, required cells/gates, and named checks. Each
-check declares a unit, numeric domain, inclusive minimum and/or maximum, and
-assigned cells/gates. At least one bound is mandatory. Every required obligation
-needs a planned check; assignments cannot expand coverage beyond the plan.
-Units must match exactly; the validator performs no conversion. Domain `number`
-requires a finite JSON number within the repository safe-integer convention.
-Domain `u64` requires a canonical decimal string in `[0, 18446744073709551615]`
-and compares integers exactly, including values above `2^53`.
+The existing execution paths remain useful:
 
-Raw reports must identify the plan, a distinct run ID, child PID, actual binary
-SHA256, UTC start, `CLOCK_MONOTONIC` elapsed nanoseconds, complete child lifetime,
-successful exit code, and no terminating signal. Elapsed time must be positive
-and within the declared limit. Every planned check has exactly one measurement
-with a unique measurement ID, matching units/domain, and exact assigned coverage.
-The final proof references the sealed plan and raw JSON files and associates each
-result with its measurement ID and raw digest. `passed` is recomputed from the
-plan's bounds for every check and for the entire proof. A consistent measured
-failure is valid evidence with `passed:false`; it provides no passing coverage.
+- `tools/qualify_ria.py run-fixture` supervises the registered native expert,
+  graph/state/transfer or paired transport fixture, checks its binary and
+  environment identity, and bounds complete-child RSS, output and elapsed time.
+  Follow [native fixtures](ria-native-fixtures.md) and the
+  [bootstrap guide](ria-artifacts-and-deployment.md).
+- `tools/run_ria_release.py --execute` runs registered authenticated HTTP
+  workloads and measures actual native token timing, features, continuation
+  and monotonic soak. Follow [replay and soak](ria-release-replay.md).
+- `tools/qualify_ria.py compare-logits` independently compares saved candidate
+  and reference logits on the frozen corpus and fidelity axis. It consumes
+  logits; it does not execute a trusted native-source reference itself.
 
-`validate_physical_contract(proof, evidence_dir, frozen_policy)` returns sorted,
-deduplicated relative `{path,digest}` dependencies for staging. References are
-canonical relative paths and every directory component and file is opened
-without following symlinks. There are at most 4096 checks, measurements, and
-total referenced files, 540 cells, and 28 gates. Parsing is bounded to 8 MiB and
-250000 nodes per document, depth 16, and 64 MiB total referenced input plus the
-proof and policy. No external contents are included in schema error messages.
-The release aggregator additionally authenticates the top-level proof reference
-and requires `passed:true` before crediting any claimed cell or gate.
+Those paths cannot certify a complete gate merely because they exercise part
+of it. Missing software includes full-target reference/matrix execution with
+actual routing, ownership, cache/migration and physical NUMA observations;
+independent packed-state/oracle comparisons; all prescribed protocol race and
+fault injection points; container pressure, GPU access loss and shutdown tests;
+and matched native/container broad-routing performance orchestration with raw
+resource, locality, power/thermal and uncertainty records. Their complete
+positive and adversarial obligations are available in the readiness report.
+
+External inputs remain necessary after implementing those producers: authorized
+checkpoint and independent reference access; reviewed preregistered policies
+and corpus; real Linux x86-64 CPU and RTX 5090/SM120 hosts; enough actual
+per-node capacity for each required replica policy; a separately qualified
+Blackwell expert; and administrator-controlled cgroups, firewall, GPU access
+and owned container recreation/fault controls. Synthetic offsets, simulated
+NUMA metadata, localhost TLS or HTTP-only observations cannot supply them.
+
+## Numeric diagnostic reports grant no release coverage
+
+`tools/ria/physical_contract.py` retains strict validation of preregistered,
+bounded numeric diagnostics. **Revision 2 is deliberately unqualified.**
+All cell and gate coverage arrays are required to be empty; plan/evidence
+`qualification_scope` is `unqualified_diagnostic`, and raw/evidence
+`classification` is `unqualified_measurements`. Any claimed cell, gate or
+`final_release` scope is rejected. Revision-1 generic physical proofs are not
+accepted: assigning one unrelated numeric metric to every cell/gate was a
+qualification loophole, and renaming the metric cannot repair its semantics.
+
+The exported strict schemas remain `physical-runtime-identity`,
+`physical-contract-plan`, `physical-contract-measurements` and
+`physical-contract-evidence`. Every document is revision 2 and selfsealed with
+the repository RFC 8785 convention. Unknown fields/kinds/revisions, duplicate
+JSON keys and nonfinite numbers fail. Plan, runtime identity witness, raw and
+evidence share policy/model/source/environment/build/operator/runtime/profile
+and executor identities. The witness contains digests only; it is not proof
+that the running configuration matched those digests.
+
+Register the plan after the frozen policy and before execution, with exact UTC
+timestamps. Freeze the child binary SHA256, a positive monotonic elapsed limit,
+the fixed catalog digest, units/domains and inclusive minimum/maximum bounds.
+Each check needs at least one consistent bound. Domain `number` requires a
+finite JSON number under the repository safe-integer rules. Domain `u64`
+requires a canonical decimal string in `[0,18446744073709551615]` and uses exact
+integer comparison above `2^53`; no unit conversion occurs.
+
+Raw records identify their plan, distinct run ID, PID, binary, UTC start,
+`CLOCK_MONOTONIC` elapsed time, complete child lifetime, successful exit and no
+signal. Each planned diagnostic has exactly one unique measurement. The final
+report binds each result to its measurement ID and raw digest. Numeric pass
+bits are recomputed from the frozen bounds; a consistent measured failure is
+valid evidence with `passed:false`. A numeric `passed:true` is not model,
+hardware, capacity, security, performance or release qualification.
+
+`validate_physical_contract` returns authenticated relative dependencies for
+staging diagnostics. Paths are canonical and every component is opened without
+following symlinks. Parsing is bounded to 4096 checks/references, 8 MiB and
+250000 nodes per document, depth 16 and 64 MiB total input. Error messages do
+not include externally supplied contents. Selfhashes authenticate bytes; they
+are not execution attestation or independent producer trust.
+
+Full-release aggregation requires complete semantic coverage and therefore
+fails closed with current diagnostic reports. Enabling a gate or cell requires
+implementing its real producer and a validator that derives the fixed
+obligations from the specific raw observations and independent oracles. Adding
+generic numeric/Boolean assertions, trusting a selfsealed external pass flag,
+or widening the coverage schema is insufficient.

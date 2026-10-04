@@ -1,11 +1,13 @@
 """Offline immutable Engram lookup metadata using pinned normalization/PCG64."""
 
 import importlib.metadata
+import hashlib
 import math
 import struct
 from pathlib import Path
 
-from .identity import ArtifactError, atomic_bytes, atomic_json, canonical, hash_file, read_json, seal
+from .identity import (ArtifactError, atomic_bytes, atomic_json, canonical, loads,
+                       read_verified_bytes, seal)
 
 NUMPY_VERSION = "2.5.3"
 TOKENIZERS_VERSION = "0.23.2"
@@ -17,7 +19,7 @@ def _prime(value):
     return all(value % divisor for divisor in range(3, math.isqrt(value) + 1, 2))
 
 
-def tables(config, tokenizer_path):
+def tables(config, tokenizer_data):
     import numpy as np
     from tokenizers import Regex, Tokenizer, normalizers
     if importlib.metadata.version("numpy") != NUMPY_VERSION or importlib.metadata.version("tokenizers") != TOKENIZERS_VERSION:
@@ -28,8 +30,8 @@ def tables(config, tokenizer_path):
         "engram_vocab_size": 16000000, "engram_num_embeddings": [384006168, 384016682]}
     if not isinstance(text, dict) or any(text.get(key) != value for key, value in required.items()) or type(config.get("pad_token_id")) is not int or not 0 <= config["pad_token_id"] < 129280:
         raise ArtifactError("Engram derivation is restricted to the bounded pinned V4.1 configuration")
-    read_json(tokenizer_path, project=False, max_nodes=2000000)
-    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    loads(tokenizer_data, project=False, max_nodes=2000000)
+    tokenizer = Tokenizer.from_str(tokenizer_data.decode("utf-8", errors="strict"))
     vocab = tokenizer.get_vocab_size(with_added_tokens=True)
     if vocab != text["vocab_size"] or vocab > 200000:
         raise ArtifactError("tokenizer vocabulary differs from pinned target")
@@ -78,9 +80,11 @@ def tables(config, tokenizer_path):
             "pad_compressed_id": token_map[config["pad_token_id"]]}
 
 
-def prepare_metadata(config_path, tokenizer_path, output_dir):
-    config, output = read_json(config_path), Path(output_dir)
-    result = tables(config, tokenizer_path)
+def prepare_metadata(config_path, tokenizer_path, output_dir, *, configuration_sha256=None, tokenizer_sha256=None):
+    config_data = read_verified_bytes(config_path, expected_sha256=configuration_sha256)
+    tokenizer_data = read_verified_bytes(tokenizer_path, expected_sha256=tokenizer_sha256)
+    config, output = loads(config_data), Path(output_dir)
+    result = tables(config, tokenizer_data)
     tensors = [
         ("engram.token_map", "U32", [len(result["token_map"])], struct.pack("<" + "I" * len(result["token_map"]), *result["token_map"])),
         ("engram.primes", "U64", [2, 3, 8], b"".join(struct.pack("<Q", value) for row in result["primes"] for value in row)),
@@ -98,8 +102,8 @@ def prepare_metadata(config_path, tokenizer_path, output_dir):
     atomic_bytes(path, struct.pack("<Q", len(encoded)) + encoded + data)
     provenance = seal({"schema_revision": 1, "algorithm": "pinned_deepseek_normalization_pcg64_and_unique_ascending_primes",
         "numpy_version": NUMPY_VERSION, "tokenizers_version": TOKENIZERS_VERSION,
-        "configuration_sha256": hash_file(config_path), "tokenizer_sha256": hash_file(tokenizer_path),
-        "engram_metadata_sha256": hash_file(path), "compressed_vocab": result["compressed_vocab"],
+        "configuration_sha256": hashlib.sha256(config_data).hexdigest(), "tokenizer_sha256": hashlib.sha256(tokenizer_data).hexdigest(),
+        "engram_metadata_sha256": hashlib.sha256(struct.pack("<Q", len(encoded)) + encoded + data).hexdigest(), "compressed_vocab": result["compressed_vocab"],
         "pad_compressed_id": result["pad_compressed_id"], "multipliers": [[str(value) for value in row] for row in result["multipliers"]],
         "primes": result["primes"], "offsets": result["offsets"]})
     atomic_json(output / "engram-metadata.json", provenance)

@@ -72,7 +72,7 @@ build/ria/donor/%.o: %.c
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_DONOR_FLAGS) -MMD -MP -c $< -o $@
 
-bin/ds4ctl: build/ria/ria/ctl.o build/ria/ria/probe.o build/ria/ria/qualify_transport.o $(RIA_CORE_OBJ)
+bin/ds4ctl: build/ria/ria/ctl.o build/ria/ria/inventory.o build/ria/ria/numa.o build/ria/ria/probe.o build/ria/ria/qualify_transport.o $(RIA_CORE_OBJ)
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CFLAGS) $^ $(RIA_LDLIBS) -o $@
 
@@ -80,7 +80,7 @@ bin/ds4-expert-server: build/ria/ria/expert_main.o build/ria/ria/server.o build/
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CFLAGS) $^ $(RIA_LDLIBS) -o $@
 
-bin/cuda/ds4ctl: build/ria/ria/ctl.o build/ria/cuda/probe.o build/ria/ria/qualify_transport.o build/ria/ria/probe_cuda.cu.o build/ria/ria/expert_cuda.cu.o $(RIA_CORE_OBJ)
+bin/cuda/ds4ctl: build/ria/ria/ctl.o build/ria/ria/inventory.o build/ria/ria/numa.o build/ria/cuda/probe.o build/ria/ria/qualify_transport.o build/ria/ria/probe_cuda.cu.o build/ria/ria/expert_cuda.cu.o $(RIA_CORE_OBJ)
 	@mkdir -p $(@D)
 	$(RIA_NVCC) $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) -o $@
 
@@ -133,6 +133,10 @@ build/ria/tests/test_server_contracts: tests/ria/test_server_contracts.c ria/ser
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) $^ $(RIA_LDLIBS) -o $@
 
+build/ria/tests/test_server_lifecycle: tests/ria/test_server_lifecycle.c ria/server.c ria/numa.c ria/remote.c $(RIA_CORE_SRC)
+	@mkdir -p $(@D)
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) $(filter-out ria/server.c,$^) $(RIA_LDLIBS) -o $@
+
 RIA_FRONTEND_FIXTURE_SRC = tests/ria/test_frontend_contracts.c ria/engine.c ria/tokenizer.c ria/prompt.c ria/json.c ria/common.c third_party/ryu/ryu/d2s.c
 build/ria/tests/test_frontend_contracts: $(RIA_FRONTEND_FIXTURE_SRC)
 	@mkdir -p $(@D)
@@ -142,7 +146,7 @@ build/ria/tests/test_measurements: tests/ria/test_measurements.c ds4_server.c ri
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) -O2 -g -std=c99 -Wall -Wextra -Werror -Wno-unused-function -fno-fast-math -ffp-contract=off -ffunction-sections -fdata-sections tests/ria/test_measurements.c ria/common.c -Wl,--gc-sections -lm -lpthread -lcrypto -o $@
 
-ria-offline: build/ria/tests/test_measurements bin/ds4ctl bin/ds4-ria-qualify build/ria/tests/test_contracts build/ria/tests/test_expert build/ria/tests/test_state build/ria/tests/test_tensor build/ria/tests/test_graph_contracts build/ria/tests/test_probe_config build/ria/tests/test_admin build/ria/tests/test_frontend_contracts build/ria/tests/test_server_contracts
+ria-offline: build/ria/tests/test_measurements bin/ds4ctl bin/ds4-ria-qualify build/ria/tests/test_contracts build/ria/tests/test_expert build/ria/tests/test_state build/ria/tests/test_tensor build/ria/tests/test_graph_contracts build/ria/tests/test_probe_config build/ria/tests/test_admin build/ria/tests/test_frontend_contracts build/ria/tests/test_server_contracts build/ria/tests/test_server_lifecycle
 	build/ria/tests/test_contracts
 	build/ria/tests/test_measurements
 	build/ria/tests/test_expert
@@ -151,6 +155,7 @@ ria-offline: build/ria/tests/test_measurements bin/ds4ctl bin/ds4-ria-qualify bu
 	build/ria/tests/test_probe_config
 	build/ria/tests/test_admin
 	build/ria/tests/test_server_contracts
+	build/ria/tests/test_server_lifecycle
 	$(RIA_PYTHON) -m pytest -q tests/ria
 	ruff check tools tests/ria deploy
 
@@ -169,26 +174,33 @@ ria-sanitize:
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_expert.c ria/expert.c ria/common.c $(RIA_LDLIBS) -o build/ria/sanitize/expert
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_state.c ria/state.c ria/common.c $(RIA_LDLIBS) -o build/ria/sanitize/state
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections tests/ria/test_graph_contracts.c ria/graph.c ria/vision.c ria/expert.c ria/common.c -Wl,--gc-sections $(RIA_LDLIBS) -lpng -ljpeg -o build/ria/sanitize/graph
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections tests/ria/test_graph_step.c ria/common.c -Wl,--gc-sections -lcrypto -lm -o build/ria/sanitize/graph_step
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections tests/ria/test_graph_cleanup.c ria/common.c -Wl,--gc-sections -lcrypto -lm -lpthread -o build/ria/sanitize/graph_cleanup
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_admin.c $(RIA_CORE_SRC) $(RIA_LDLIBS) -o build/ria/sanitize/admin
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_probe_config.c ria/probe.c ria/runtime.c $(RIA_BASE_SRC) $(RIA_LDLIBS) -o build/ria/sanitize/probe_config
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections -fdata-sections $(RIA_FRONTEND_FIXTURE_SRC) -Wl,--gc-sections -lonig -lcrypto -lm -lpthread -o build/ria/sanitize/frontend
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_server_contracts.c ria/server.c ria/numa.c ria/remote.c $(RIA_CORE_SRC) $(RIA_LDLIBS) -o build/ria/sanitize/server
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_server_lifecycle.c ria/numa.c ria/remote.c $(RIA_CORE_SRC) $(RIA_LDLIBS) -o build/ria/sanitize/server_lifecycle
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_tensor.c $(RIA_CORE_SRC) $(RIA_LDLIBS) -o build/ria/sanitize/tensor
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -DRIA_QUALIFY_CPU_ONLY ria/qualify.c ria/expert.c ria/common.c ria/json.c third_party/ryu/ryu/d2s.c $(RIA_LDLIBS) -o build/ria/sanitize/qualify
-	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer ria/ctl.c ria/probe.c ria/qualify_transport.c $(RIA_CORE_SRC) $(RIA_LDLIBS) -o build/ria/sanitize/ctl
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer ria/ctl.c ria/inventory.c ria/numa.c ria/probe.c ria/qualify_transport.c $(RIA_CORE_SRC) $(RIA_LDLIBS) -o build/ria/sanitize/ctl
 	$(RIA_CC) $(RIA_CPPFLAGS) -O1 -g -std=c99 -Wall -Wextra -Werror -Wno-unused-function -fno-fast-math -ffp-contract=off -ffunction-sections -fdata-sections -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_measurements.c ria/common.c -Wl,--gc-sections -lm -lpthread -lcrypto -o build/ria/sanitize/measurements
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/measurements > build/ria/evidence/sanitize-measurements.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/contracts > build/ria/evidence/sanitize-contracts.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/expert > build/ria/evidence/sanitize-expert.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/state > build/ria/evidence/sanitize-state.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/graph > build/ria/evidence/sanitize-graph.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/graph_step > build/ria/evidence/sanitize-graph_step.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/graph_cleanup > build/ria/evidence/sanitize-graph_cleanup.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/admin > build/ria/evidence/sanitize-admin.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/probe_config > build/ria/evidence/sanitize-probe_config.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/server > build/ria/evidence/sanitize-server.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/server_lifecycle > build/ria/evidence/sanitize-server_lifecycle.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_FRONTEND_FIXTURE=$(CURDIR)/build/ria/sanitize/frontend $(RIA_PYTHON) -m pytest -q tests/ria/test_encoding.py > build/ria/evidence/sanitize-frontend.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_TENSOR_FIXTURE=$(CURDIR)/build/ria/sanitize/tensor $(RIA_PYTHON) -m pytest -q tests/ria/test_native_artifacts.py > build/ria/evidence/sanitize-tensor.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_QUALIFY_FIXTURE=$(CURDIR)/build/ria/sanitize/qualify $(RIA_PYTHON) -m pytest -q tests/ria/test_qualify.py > build/ria/evidence/sanitize-qualify.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_TRANSPORT_FIXTURE=$(CURDIR)/build/ria/sanitize/ctl $(RIA_PYTHON) -m pytest -q tests/ria/test_transport_qualifier.py > build/ria/evidence/sanitize-transport.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_CTL_FIXTURE=$(CURDIR)/build/ria/sanitize/ctl $(RIA_PYTHON) -m pytest -q tests/ria/test_inventory.py > build/ria/evidence/sanitize-inventory.log 2>&1
 
 # LLVM 18 uses this same per-process ASLR policy when high-entropy mappings
 # conflict with its shadow. Keep diagnostic binaries and policy out of serving.
@@ -200,14 +212,19 @@ build/ria/thread-sanitize/server: tests/ria/test_server_contracts.c ria/server.c
 	@mkdir -p $(@D)
 	$(RIA_THREAD_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=thread -fPIE -pie -fno-omit-frame-pointer -pthread $^ $(RIA_LDLIBS) -o $@
 
+build/ria/thread-sanitize/server_lifecycle: tests/ria/test_server_lifecycle.c ria/server.c ria/numa.c ria/remote.c $(RIA_CORE_SRC)
+	@mkdir -p $(@D)
+	$(RIA_THREAD_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=thread -fPIE -pie -fno-omit-frame-pointer -pthread $(filter-out ria/server.c,$^) $(RIA_LDLIBS) -o $@
+
 .PHONY: ria-thread-sanitize
-ria-thread-sanitize: build/ria/thread-sanitize/admin build/ria/thread-sanitize/server
+ria-thread-sanitize: build/ria/thread-sanitize/admin build/ria/thread-sanitize/server build/ria/thread-sanitize/server_lifecycle
 	@mkdir -p build/ria/evidence
 	$(RIA_THREAD_CC) --version > build/ria/evidence/thread-sanitize-environment.log
 	setarch --version >> build/ria/evidence/thread-sanitize-environment.log
 	uname -m >> build/ria/evidence/thread-sanitize-environment.log
 	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/admin > build/ria/evidence/thread-sanitize-admin.log 2>&1
 	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/server > build/ria/evidence/thread-sanitize-server.log 2>&1
+	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/server_lifecycle > build/ria/evidence/thread-sanitize-server_lifecycle.log 2>&1
 
 ria-clean:
 	rm -rf build/ria

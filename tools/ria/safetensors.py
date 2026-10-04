@@ -5,7 +5,7 @@ import os
 import struct
 from dataclasses import dataclass
 
-from .identity import ArtifactError, U64_MAX, checked_product, loads, open_regular
+from .identity import ArtifactError, DIGEST, U64_MAX, checked_product, loads, open_regular
 
 DTYPE_BYTES = {"BOOL": 1, "U8": 1, "I8": 1, "U16": 2, "I16": 2, "U32": 4,
                "I32": 4, "U64": 8, "I64": 8, "F16": 2, "BF16": 2, "F32": 4,
@@ -27,6 +27,24 @@ class Shard:
     size: int
     data_start: int
     tensors: dict
+    snapshot: tuple
+
+
+def _snapshot(value):
+    # Local filesystem/admin metadata is trusted; the independently supplied
+    # SHA256 authenticates content. ctime catches mutate-and-restore, while inode
+    # identity catches pathname replacement. Do not use atime: reads change it.
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def validate_source_snapshot(shard, stream=None):
+    """Reject changes to a verified source before bytes or provenance are used."""
+    try:
+        current = _snapshot(os.stat(shard.path, follow_symlinks=False))
+        if current != shard.snapshot or stream is not None and _snapshot(os.fstat(stream.fileno())) != shard.snapshot:
+            raise ArtifactError("verified source snapshot changed")
+    except OSError as exc:
+        raise ArtifactError("verified source snapshot is unavailable") from exc
 
 
 def exact_read(stream, size):
@@ -39,9 +57,20 @@ def exact_read(stream, size):
     return bytes(result)
 
 
-def inspect(path, *, max_header_bytes=16 << 20, max_tensors=100000, max_dimensions=8):
+def inspect(path, *, max_header_bytes=16 << 20, max_tensors=100000, max_dimensions=8,
+            expected_sha256=None):
     with open_regular(path) as stream:
-        size = os.fstat(stream.fileno()).st_size
+        snapshot = _snapshot(os.fstat(stream.fileno()))
+        size = snapshot[2]
+        if expected_sha256 is not None:
+            if not isinstance(expected_sha256, str) or not DIGEST.fullmatch(expected_sha256):
+                raise ArtifactError("source SHA256 identity is invalid")
+            actual = hashlib.sha256()
+            while block := stream.read(1 << 20):
+                actual.update(block)
+            if actual.hexdigest() != expected_sha256:
+                raise ArtifactError("source shard hash mismatch")
+            stream.seek(0)
         if size < 8:
             raise ArtifactError("truncated safetensors prefix")
         header_bytes = struct.unpack("<Q", exact_read(stream, 8))[0]
@@ -51,6 +80,8 @@ def inspect(path, *, max_header_bytes=16 << 20, max_tensors=100000, max_dimensio
         if raw[:1] != b"{":
             raise ArtifactError("safetensors header must begin with an object")
         header = loads(raw, project=False, max_bytes=max_header_bytes, max_nodes=max_tensors * 30 + 100)
+        witness = Shard(path, size, 8 + header_bytes, {}, snapshot)
+        validate_source_snapshot(witness, stream)
     if not isinstance(header, dict) or len(header) > max_tensors + 1:
         raise ArtifactError("invalid safetensors tensor inventory")
     metadata = header.pop("__metadata__", {})
@@ -81,19 +112,24 @@ def inspect(path, *, max_header_bytes=16 << 20, max_tensors=100000, max_dimensio
         cursor = end
     if cursor != size - data_start:
         raise ArtifactError("unindexed trailing safetensors data")
-    return Shard(path, size, data_start, tensors)
+    result = Shard(path, size, data_start, tensors, snapshot)
+    validate_source_snapshot(result)
+    return result
 
 
 def tensor_blocks(shard, tensor, *, block_bytes=1 << 20):
     if not 0 < block_bytes <= 16 << 20:
         raise ArtifactError("invalid streaming block bound")
     with open_regular(shard.path) as stream:
+        validate_source_snapshot(shard, stream)
         stream.seek(shard.data_start + tensor.offset)
         remaining = tensor.length
         while remaining:
             block = exact_read(stream, min(remaining, block_bytes))
             remaining -= len(block)
+            validate_source_snapshot(shard, stream)
             yield block
+        validate_source_snapshot(shard, stream)
 
 
 def chunk_index(path, chunk_size):

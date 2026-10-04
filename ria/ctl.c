@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "admission.h"
+#include "inventory.h"
 #include "probe.h"
 #include "qualify_transport.h"
 #include "service.h"
@@ -103,8 +104,11 @@ int main(int argc, char **argv) {
   if (argc < 2)
     ria_error_set(
         &e, RIA_INVALID_REQUEST,
-        "usage: ds4ctl validate|probe|plan|qualify-transport|health|drain [explicit options]");
-  else if (!strcmp(argv[1], "qualify-transport")) {
+        "usage: ds4ctl validate|probe|inventory|plan|qualify-transport|health|drain [explicit options]");
+  else if (!strcmp(argv[1], "inventory")) {
+    option o[]={{"--manifest",NULL},{"--request",NULL},{"--output",NULL}};
+    ok=options(argc,argv,o,3,&e) && required(o,3,&e) && ria_inventory_files(o[0].value,o[1].value,o[2].value,&e);
+  } else if (!strcmp(argv[1], "qualify-transport")) {
     option o[] = {{"--config", NULL}, {"--request", NULL}};
     char *report = NULL;
     size_t length = 0;

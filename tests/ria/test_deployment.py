@@ -24,7 +24,7 @@ def isolated_controller_lock_directory(tmp_path, monkeypatch):
 
 
 def deployment_request(tmp_path, role="expert", executor="cpu"):
-    recipe = fixture_recipe(tmp_path)
+    recipe = seal({**fixture_recipe(tmp_path), "chunk_size": 4096})
     manifest = prepare(tmp_path, recipe, tmp_path / "model")
     identity = hashlib.sha256(b"synthetic offline deployment fixture").hexdigest()
     host_report = seal({"schema_revision": 1, "kind": "host_preflight", "rootful": True, "cgroup_version": 2,
@@ -34,8 +34,8 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
     atomic_json(tmp_path / "host.json", host_report)
     planning = {"schema_revision": 1, "role": role, "executor": executor, "profile": "bf16",
         "logical_model_digest": recipe["logical_model_digest"], "operator_contract_digest": manifest["operator_contract_digest"],
-        "context_positions": 64, "caps": {"host_bytes": 1 << 20, "device_bytes": 0 if executor == "cpu" else 1 << 20,
-        "pinned_bytes": 0 if executor == "cpu" else 4096, "numa": [{"node": 0, "bytes": 1 << 20}]}}
+        "context_positions": 64, "caps": {"host_bytes": 16 << 20, "device_bytes": 0 if executor == "cpu" else 1 << 20,
+        "pinned_bytes": 0 if executor == "cpu" else 4096, "numa": [{"node": 0, "bytes": 16 << 20}]}}
     gpu = None if executor == "cpu" else "GPU-12345678-1234-1234-1234-123456789abc"
     secret_dir = tmp_path / "secrets"
     secret_dir.mkdir()
@@ -63,7 +63,7 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
             "max_pinned_test_bytes": 0 if executor == "cpu" else 4096, "deadline_ms": 1000, "disable_core_dumps": True,
             "environment_digest": identity, "build_digest": identity, "build_info_file": "/usr/share/dwarfstar/build-info.json"},
         "environment": {"image": "registry.test/ria@sha256:" + identity, "image_kind": executor,
-            "build_digest": identity, "cpuset": "0-1", "cgroup_bytes": 1 << 30, "memlock_bytes": 1 << 20, "pids_limit": 64,
+            "build_digest": identity, "cpuset": "0-1", "cgroup_bytes": 1 << 30, "memlock_bytes": 16 << 20, "pids_limit": 64,
             "gpu_uuid": gpu, "model_dir": str(tmp_path / "model"), "secret_dir": str(secret_dir), "report_dir": str(tmp_path / "reports"),
             "seccomp_profile": str(seccomp), "bind_ip": "192.168.10.2", "api_port": 8000, "start_period_seconds": 300,
             "stop_grace_seconds": 30, "docker_version": "fixture", "compose_version": "fixture", "kernel_version": "fixture",
@@ -77,8 +77,8 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
             "header_timeout_ms": 1000, "body_timeout_ms": 1000, "stream_write_timeout_ms": 1000, "max_active_generations": 1,
             "max_queued_generations": 0, "allow_remote_image_urls": False, "cors_allowed_origins": []}
     else:
-        request["expert"] = {"numa_policy": "sharded", "nodes": [{"node": 0, "cpus": [0], "workers": 1, "local_bytes": str(1 << 20)}],
-            "projection_tile_rows": 64, "host_runtime_bytes": "4096", "startup_host_bytes": str(1 << 20),
+        request["expert"] = {"numa_policy": "sharded", "nodes": [{"node": 0, "cpus": [0], "workers": 1, "local_bytes": str(16 << 20)}],
+            "projection_tile_rows": 64, "host_runtime_bytes": str(8 << 20), "startup_host_bytes": str(16 << 20),
             "device_workspace_bytes": "0" if executor == "cpu" else str(1 << 20), "pinned_workspace_bytes": "0" if executor == "cpu" else "4096", "drain_timeout_ms": 1000}
         grants = seal({"schema_revision": 1, "grants": [{"expected_peer_name": tls["expected_peer_name"],
             "logical_model_digest": planning["logical_model_digest"], "operator_contract_digest": planning["operator_contract_digest"],
@@ -122,10 +122,10 @@ def measurement_fixture(request, directory, *, qualified=True):
         "memlock_bytes": str(request["environment"]["memlock_bytes"]), "cpu_mask": request["environment"]["cpuset"], "memory_node_mask": "0",
         "host_test_bytes": "4096", "host_test_ms": "0", "numa_locality_proven": True, "driver_version": 0, "runtime_version": 0,
         "gpu_uuid": None, "compute_major": 0, "compute_minor": 0, "gpu_allocation_ms": "0", "native_kernel_ms": "0", "native_results": [0, 0, 0],
-        "host_parent_preflight_required": True, "host_available_bytes": str(1 << 20), "device_available_bytes": "0", "pinned_test_bytes": "0",
-        "numa_available": [{"node": 0, "bytes": str(1 << 20)}]})
-    probe = seal({"schema_revision": 1, "role": "expert", "executor": "cpu", "host_bytes": 1 << 20, "device_bytes": 0,
-        "pinned_bytes": 0, "numa": [{"node": 0, "bytes": 1 << 20}], "qualified": qualified, **base, "evidence_digest": probe_evidence["digest"]})
+        "host_parent_preflight_required": True, "host_available_bytes": str(request["planning_request"]["caps"]["host_bytes"]), "device_available_bytes": "0", "pinned_test_bytes": "0",
+        "numa_available": [{"node": 0, "bytes": str(request["planning_request"]["caps"]["host_bytes"])}]})
+    probe = seal({"schema_revision": 1, "role": "expert", "executor": "cpu", "host_bytes": request["planning_request"]["caps"]["host_bytes"], "device_bytes": 0,
+        "pinned_bytes": 0, "numa": [{"node": 0, "bytes": 16 << 20}], "qualified": qualified, **base, "evidence_digest": probe_evidence["digest"]})
     calibration = seal({"schema_revision": 1, "profile": "bf16", "operator_contract_digest": request["planning_request"]["operator_contract_digest"],
         "executor": "cpu", "qualified": qualified, **base, "policy_digest": policy["digest"], "evidence_digest": calibration_evidence["digest"]})
     return probe, calibration, {"probe_evidence": probe_evidence, "calibration_evidence": calibration_evidence, "calibration_evidence_dir": directory, "policy": policy}
@@ -215,18 +215,18 @@ def test_native_plan_invocation_without_python_memory_equations(tmp_path):
     request = deployment_request(tmp_path)
     planning = request["planning_request"]
     probe, calibration, evidence = measurement_fixture(request, tmp_path)
-    inventory = {"schema_revision": 1, "logical_model_digest": planning["logical_model_digest"],
-                 "operator_contract_digest": planning["operator_contract_digest"], "semantic_max_positions": 1048576,
-                 "allocations": [{"id": "1", "name": "protected-progress", "resource": "host", "base_bytes": 4096,
-                                  "bytes_per_position": 0, "numa_node": 0, "pinned": False, "protected_progress": True,
-                                  "phases": ["startup", "prefill", "decode", "continuation", "image", "drain"]}]}
+    inventory = fixture_inventory(request)
     output = tmp_path / "final"
     calls = []
     def runner(args, deadline, cwd=None):
         calls.append(args)
         if args[0] == request["native_ctl"]:
+            if args[1] == "inventory":
+                from ria.deployment import _run
+                native = Path(__file__).resolve().parents[2] / "bin/ds4ctl"
+                return _run([str(native), *args[1:]], deadline)
             paths = dict(zip(args[2::2], args[3::2], strict=True))
-            memory = {"host_bytes": 1 << 20, "device_bytes": 0, "pinned_bytes": 0, "numa": [{"node": 0, "bytes": 1 << 20}]}
+            memory = copy.deepcopy(planning["caps"])
             # Deliberately an external oracle fixture; renderer only authenticates
             # its result. Native admission tests separately prove these equations.
             plan = seal({"schema_revision": 1, "admitted": True, "role": "expert", "executor": "cpu", "profile": "bf16",
@@ -239,7 +239,7 @@ def test_native_plan_invocation_without_python_memory_equations(tmp_path):
             return b""
         return canonical(compose_fixture(request, output)) if args[-2:] == ["--format", "json"] else b""
     lock = finalize(request, probe, inventory, calibration, output, runner=runner, **evidence)
-    assert calls[0][1] == "plan" and len(calls) == 3
+    assert calls[0][1] == "inventory" and calls[1][1] == "plan" and len(calls) == 4
     assert lock["memory_plan_digest"] == read_json(output / "memory-plan.json")["digest"]
     assert read_json(output / "service.json")["peer_grants"] == "/etc/dwarfstar/peer-grants.json"
     assert "private_key" not in canonical(lock).decode()
@@ -248,13 +248,11 @@ def test_native_plan_invocation_without_python_memory_equations(tmp_path):
 
 
 def fixture_inventory(request):
-    planning = request["planning_request"]
-    return {"schema_revision": 1, "logical_model_digest": planning["logical_model_digest"],
-            "operator_contract_digest": planning["operator_contract_digest"], "semantic_max_positions": 1048576,
-            "allocations": [{"id": str(index), "name": name, "resource": "host", "base_bytes": amount,
-                             "bytes_per_position": 0, "numa_node": 0, "pinned": False, "protected_progress": index == 1,
-                             "phases": ["startup", "prefill", "decode", "continuation", "image", "drain"]}
-                            for index, name, amount in ((1, "protected-progress", 4096), (2, "synthetic-model", (1 << 20) - 4096))]}
+    from ria.inventory import build_inventory
+    native_request = copy.deepcopy(request)
+    native_request["native_ctl"] = str(Path(__file__).resolve().parents[2] / "bin/ds4ctl")
+    return build_inventory(native_request, Path(request["environment"]["model_dir"]) / "manifest.json",
+                           Path(request["environment"]["report_dir"]) / "fixture-inventory.json")
 
 
 @pytest.mark.parametrize("mutation", ["environment", "raw_capacity", "missing_proof", "scope"])
@@ -306,7 +304,7 @@ def test_real_native_admission_and_owned_launch_rollback(tmp_path, monkeypatch, 
             return canonical(observed)
         return b""
     lock = finalize(request, probe, fixture_inventory(request), calibration, output, runner=runner, **evidence)
-    assert read_json(output / "memory-plan.json")["peak"]["host_bytes"] == 1 << 20
+    assert read_json(output / "memory-plan.json")["peak"]["host_bytes"] == request["planning_request"]["caps"]["host_bytes"]
     def verify(pid, baseline):
         assert pid == 12345 and baseline["digest"] == request["environment"]["host_report_digest"]
         if failure == "ancestor":

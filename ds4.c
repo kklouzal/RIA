@@ -73113,7 +73113,7 @@ void ds4_engine_close(ds4_engine *e) {
     ria_error error = {0};
     if (!ria_engine_close(e->ria, &error)) {
       fprintf(stderr, "ds4: fatal RIA cleanup: %s\n", error.message);
-      abort();
+      _Exit(error.code ? error.code : RIA_EXECUTOR_ERROR);
     }
     free(e);
     return;

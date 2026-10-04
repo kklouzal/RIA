@@ -12,7 +12,12 @@ typedef struct {
   uint8_t client_layout_digest[32], server_layout_digest[32],
       placement_plan_digest[32];
 } ria_remote_options;
-/* Graph thread owns all SSL and binding transitions. Abort only shuts down
+/* Single-row graph callbacks split selected slots and Engram associations to
+ * agreed frame/count/byte bounds, publish all contributions atomically, and
+ * assign a fresh invocation ID to each expert group. Multirow callers pass
+ * already bounded units. Bind must support one native expert/table/error unit;
+ * authorized verification chunks always retain their manifest granule.
+ * Graph thread owns all SSL and binding transitions. Abort only shuts down
  * stable descriptors under the lifecycle mutex; destruction follows joining
  * that graph thread. Required-operation failure retires the entire pair. */
 bool ria_remote_open(ria_remote **remote, const ria_remote_options *options,
@@ -34,6 +39,9 @@ bool ria_remote_rows(ria_remote *remote, uint32_t layer, const uint64_t *rows,
 bool ria_remote_chunk(ria_remote *remote, const ria_shard *trusted,
                       uint64_t index, uint8_t **bytes, size_t *length,
                       ria_error *error);
+/* Revision-1 agreed charge: request + max(success reply,16KiB typed error)
+ * + 128 framing bytes + 8MiB workspace for Expert/Shared (zero otherwise).
+ * Actual endpoint allocations have independent memory-plan admission. */
 bool ria_request_charge(uint16_t kind, uint64_t request_bytes,
                         uint64_t response_bytes, uint64_t *charge,
                         ria_error *error);

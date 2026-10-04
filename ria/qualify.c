@@ -608,14 +608,14 @@ static bool q_attention_cases(q_context *q,ria_graph_cuda *g,float *arena) {
         uint64_t start=q_clock();
         if (!q_alive(q) || !ria_graph_cuda_upload(g,ria_graph_cuda_buffer(g,RIA_G_Q),query,32768,&q->error) ||
             !ria_graph_cuda_upload(g,ria_graph_cuda_buffer(g,RIA_G_ATTN_KV),kv,(uint64_t)(count+1)*512,&q->error) ||
-            !ria_graph_cuda_attention(g,ria_graph_cuda_buffer(g,RIA_G_Q),ria_graph_cuda_buffer(g,RIA_G_ATTN_KV),count,&sink,ria_graph_cuda_buffer(g,RIA_G_ATTN_OUT),&q->error) ||
+            !ria_graph_cuda_attention(g,ria_graph_cuda_buffer(g,RIA_G_Q),ria_graph_cuda_buffer(g,RIA_G_ATTN_KV),count,0,0,&sink,ria_graph_cuda_buffer(g,RIA_G_ATTN_OUT),&q->error) ||
             !ria_graph_cuda_download(g,ria_graph_cuda_buffer(g,RIA_G_ATTN_OUT),actual,32768,&q->error)) return false;
         r->times[r->samples++]=q_clock()-start;if (!q_measure(q,r,expected,actual,32768)) return false;
         /* The extra materialized key is outside the authoritative causal
          * extent. Changing it must leave all returned bits unchanged. */
         float future[512];for (unsigned i=0;i<512;++i) future[i]=1024;
         if (!ria_graph_cuda_upload(g,ria_graph_cuda_buffer(g,RIA_G_ATTN_KV)+(uint64_t)count*512,future,512,&q->error) ||
-            !ria_graph_cuda_attention(g,ria_graph_cuda_buffer(g,RIA_G_Q),ria_graph_cuda_buffer(g,RIA_G_ATTN_KV),count,&sink,ria_graph_cuda_buffer(g,RIA_G_ATTN_OUT),&q->error) ||
+            !ria_graph_cuda_attention(g,ria_graph_cuda_buffer(g,RIA_G_Q),ria_graph_cuda_buffer(g,RIA_G_ATTN_KV),count,0,0,&sink,ria_graph_cuda_buffer(g,RIA_G_ATTN_OUT),&q->error) ||
             !ria_graph_cuda_download(g,ria_graph_cuda_buffer(g,RIA_G_ATTN_OUT),expected,32768,&q->error)) return false;
         r->repeat_checked=true;r->repeat_identical=memcmp(expected,actual,32768*4)==0;
         for (unsigned i=0;i<32768;++i) query[i]=i%512<4 ? o_bf16((float)((int)(i%11)-5)/64) : 0;

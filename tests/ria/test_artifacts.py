@@ -163,6 +163,164 @@ def test_failed_shard_publication_never_commits(tmp_path, monkeypatch):
     assert prepare(tmp_path, recipe, output)["digest"]
 
 
+@pytest.mark.parametrize("mutation", ["same_size", "replace", "mutate_restore"])
+def test_source_change_between_hash_and_copy_never_commits(tmp_path, monkeypatch, mutation):
+    from ria import preparation
+    recipe = fixture_recipe(tmp_path)
+    source = tmp_path / "input.safetensors"
+    original_bytes, original_stat = source.read_bytes(), source.stat()
+    real = preparation._write_bundle
+    def change_before_copy(*args, **kwargs):
+        changed = bytearray(original_bytes)
+        changed[-1] ^= 1
+        if mutation == "replace":
+            replacement = tmp_path / "replacement.safetensors"
+            replacement.write_bytes(original_bytes)
+            replacement.replace(source)
+        else:
+            source.write_bytes(changed)
+            if mutation == "mutate_restore":
+                source.write_bytes(original_bytes)
+                import os
+                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(preparation, "_write_bundle", change_before_copy)
+    output = tmp_path / "out"
+    with pytest.raises(ArtifactError, match="source snapshot changed"):
+        prepare(tmp_path, recipe, output)
+    assert not (output / "manifest.json").exists()
+
+
+def test_source_change_after_copy_before_manifest_publication_never_commits(tmp_path, monkeypatch):
+    from ria import preparation
+    recipe = fixture_recipe(tmp_path)
+    source = tmp_path / "input.safetensors"
+    real = preparation.verify_package
+    def change_after_output_verification(*args, **kwargs):
+        result = real(*args, **kwargs)
+        data = bytearray(source.read_bytes())
+        data[-1] ^= 1
+        source.write_bytes(data)
+        return result
+    monkeypatch.setattr(preparation, "verify_package", change_after_output_verification)
+    output = tmp_path / "out"
+    with pytest.raises(ArtifactError, match="source snapshot changed"):
+        prepare(tmp_path, recipe, output)
+    assert not (output / "manifest.json").exists()
+
+
+def test_compact_metadata_publication_uses_the_exact_authenticated_read(tmp_path, monkeypatch):
+    from ria import identity
+    recipe = fixture_recipe(tmp_path)
+    source = tmp_path / "compact.json"
+    original = b'{"value":1}'
+    source.write_bytes(original)
+    expected = hashlib.sha256(original).hexdigest()
+    recipe = seal({**recipe, "metadata": [{"path": source.name, "sha256": expected}]})
+    real_open = identity.open_regular
+    changed = False
+    class MutatingStream:
+        def __init__(self):
+            self.stream = real_open(source)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def read(self, count):
+            nonlocal changed
+            result = self.stream.read(count)
+            if not changed:
+                changed = True
+                source.write_bytes(b'{"value":2}')  # Same size, after a successful read.
+            return result
+    monkeypatch.setattr(identity, "open_regular", lambda path: MutatingStream() if Path(path) == source else real_open(path))
+    output = tmp_path / "out"
+    manifest = prepare(tmp_path, recipe, output)
+    assert changed
+    assert (output / "metadata/0.bin").read_bytes() == original
+    assert verify_package(output)["digest"] == manifest["digest"]
+
+
+def test_compact_metadata_changed_before_read_is_rejected_before_publication(tmp_path):
+    recipe = fixture_recipe(tmp_path)
+    source = tmp_path / "compact.json"
+    source.write_bytes(b'{"value":1}')
+    recipe = seal({**recipe, "metadata": [{"path": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}]})
+    source.write_bytes(b'{"value":2}')
+    output = tmp_path / "out"
+    with pytest.raises(ArtifactError, match="compact metadata source hash mismatch"):
+        prepare(tmp_path, recipe, output)
+    assert not (output / "metadata/0.bin").exists()
+    assert not (output / "manifest.json").exists()
+
+
+def test_engram_provenance_hashes_the_consumed_compact_bytes(tmp_path, monkeypatch):
+    from ria import engram
+    config_path, tokenizer_path = tmp_path / "config.json", tmp_path / "tokenizer.json"
+    config_path.write_bytes(b'{"value":1}')
+    tokenizer_path.write_bytes(b'{"value":2}')
+    config_data, tokenizer_data = config_path.read_bytes(), tokenizer_path.read_bytes()
+    def synthetic_tables(config, tokenizer):
+        assert config == {"value": 1} and tokenizer == tokenizer_data
+        config_path.write_bytes(b'{"value":3}')
+        tokenizer_path.write_bytes(b'{"value":4}')
+        return {"token_map": [0], "primes": [[2] * 24] * 2, "offsets": [[0] * 24] * 2,
+                "multipliers": [[1] * 4] * 2, "compressed_vocab": 1, "pad_compressed_id": 0}
+    monkeypatch.setattr(engram, "tables", synthetic_tables)
+    output = tmp_path / "engram"
+    provenance = engram.prepare_metadata(config_path, tokenizer_path, output)
+    assert provenance["configuration_sha256"] == hashlib.sha256(config_data).hexdigest()
+    assert provenance["tokenizer_sha256"] == hashlib.sha256(tokenizer_data).hexdigest()
+    assert provenance["engram_metadata_sha256"] == hashlib.sha256((output / "engram-metadata.safetensors").read_bytes()).hexdigest()
+
+
+def test_calibration_scalar_uses_the_verified_source_snapshot(tmp_path):
+    from ria.target import _f32_scalar
+    from ria.identity import open_regular
+    source = source_file(tmp_path / "scalar.safetensors", {"scalar": ("F32", [], struct.pack("<f", 2))})
+    shard = inspect(source, expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    sources = {"scalar": (shard, shard.tensors["scalar"])}
+    with open_regular(source) as stream:
+        streams = {source: stream}
+        assert _f32_scalar(streams, sources, "scalar")[0] == 2
+        data = bytearray(source.read_bytes())
+        data[-1] ^= 1
+        source.write_bytes(data)
+        with pytest.raises(ArtifactError, match="source snapshot changed"):
+            _f32_scalar(streams, sources, "scalar")
+
+
+def test_whole_source_hash_and_header_share_one_unchanged_file_snapshot(tmp_path, monkeypatch):
+    from ria import safetensors
+    from ria.identity import open_regular
+    source = source_file(tmp_path / "source.safetensors", {"a": ("U8", [3], b"abc")})
+    data = source.read_bytes()
+    expected = hashlib.sha256(data).hexdigest()
+    class MutatingStream:
+        def __init__(self):
+            self.stream = open_regular(source)
+            self.changed = False
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def fileno(self):
+            return self.stream.fileno()
+        def seek(self, *args):
+            return self.stream.seek(*args)
+        def read(self, count):
+            result = self.stream.read(count)
+            if not self.changed:
+                self.changed = True
+                replacement = tmp_path / "replacement"
+                replacement.write_bytes(data)  # Same bytes; different inode.
+                replacement.replace(source)
+            return result
+    monkeypatch.setattr(safetensors, "open_regular", lambda _: MutatingStream())
+    with pytest.raises(ArtifactError, match="source snapshot changed"):
+        safetensors.inspect(source, expected_sha256=expected)
+
+
 def test_fp8_conversion_and_independent_decodes(tmp_path):
     for code in range(256):
         if code & 127 != 127:

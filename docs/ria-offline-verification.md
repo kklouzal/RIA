@@ -5,7 +5,24 @@ target remains Linux x86-64 with the specified physical client/server hardware.
 No checkpoint weights were downloaded, no CUDA kernel was launched, and no
 live model inference, physical target probe or engineering soak was run.
 
-The final available offline checks passed:
+The independent second review corrected numerical scheduling, preparation,
+protocol, resource accounting and ownership defects. Its frozen local sources
+passed413 Python tests, the34-case production socket lifecycle fixture, Ruff,
+all35 static checks (26 owned C modules, zero Clang findings), ASan/UBSan/leaks,
+and all three Clang18 ThreadSanitizer fixtures. All three CPU and six SM120a
+CUDA executables compiled and linked; production HMMA/QMMA/OMMA instructions
+were found in every CUDA executable and PTX was absent. Available donor CPU
+regressions passed. Exact commands, source identities and complete log hashes
+are recorded in [the review checkpoint](../locks/verification/implementation-review.json).
+
+These checks do not establish complete implementation. Grouped prompt prefill
+and complete semantic physical matrix/fault/gate producers remain missing
+software. [The review report](ria-implementation-review.md) and
+[producer readiness](../planning/qualification-software-readiness.json) list
+the remaining work separately from hardware execution. Generic numeric reports
+grant no release coverage. The prior complete-software claim is withdrawn.
+
+The earlier pre-review baseline checks below are retained as historical evidence:
 
 | Check | Result |
 | --- | --- |

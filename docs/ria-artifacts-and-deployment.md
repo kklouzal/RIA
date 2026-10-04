@@ -56,7 +56,17 @@ placement. Metadata is paged and independently authenticated. Every safetensors
 offset is data-relative; the header determines the authenticated absolute
 `data_start`. Full-file hashes and finite 4 MiB chunk hashes bind byte access.
 Unrecognized required tensors, incomplete scales or a changed publisher shard
-stop preparation. Resume verifies completed outputs and publishes the root
+stop preparation. Whole source SHA256 and the header are verified on one
+opened regular-file snapshot. Every subsequent calibration, conversion and
+copy read checks device/inode/size/mtime/ctime before and after use; final
+publication rechecks all source snapshots. Sources must remain immutable on
+a trusted local filesystem throughout preparation. This detects same-size
+changes, pathname replacement and mutate/restore without another full-bank
+hash pass; privileged filesystem metadata forgery is outside that trust boundary.
+Compact metadata is authenticated from the exact bounded bytes parsed or
+published. Recipe and Engram provenance retain those byte identities rather
+than rehashing potentially changed paths after using their contents.
+Resume verifies completed outputs and publishes the root
 manifest last. Reusing a completed output verifies its exact identity.
 
 Extract a compact client package using the independently provisioned server
@@ -117,9 +127,10 @@ host reports. Render each bootstrap package:
 
 Provision the prepared models, bootstrap configuration and public certificate
 files readable by runtime UID 10001, private keys readable only by their
-authorized owner/group, and reports writable by UID 10001. Generated private
-files default to mode 0600 and staged directories to mode 0700; preserve those
-bounds while assigning the intended runtime ownership or access group. The
+authorized owner/group, and reports writable by UID 10001. General atomic
+host-tool files default to mode 0644; staged deployment directories are 0700
+and explicitly private checkpoints use 0600. Set private report directories and
+the intended runtime ownership/group access before launch. The
 authorized host controller must retain access to inspect and render them.
 One host controller owner serializes each role through its persistent mode 0600
 regular one-link `/run/lock/ria-ROLE.controller.lock` inode. Startup, execution,
@@ -311,12 +322,29 @@ has no full-model comparison, release matrix or soak claim.
 
 ## Admission and controlled launch
 
-Provision a reviewed `schema/inventory.json` listing unique physical allocation
-IDs, aliases/replicas and protected progress allocations across all active
-phases. Include tensor metadata/resident/startup pages, per-node replicas,
-worker/admin stacks, runtime/library reservations, graph/frontend state,
-pinned pools and device workspaces. The Python renderer invokes the actual
-native `ds4ctl plan`; it has no second memory equation implementation.
+Generate `schema/inventory.json` from the authenticated role manifest and the
+explicit deployment reservations:
+
+```sh
+/absolute/path/ria-tools/bin/python tools/build_inventory.py \
+  --request /absolute/path/expert-request.json \
+  --manifest /absolute/path/server-population/manifest.json \
+  --output /absolute/path/expert-inventory.json
+```
+
+Repeat for the client manifest and request. This command reads authenticated
+metadata only, without loading weight payloads, probing NUMA or initializing
+CUDA. The serving loader and NUMA accountant derive physical tensor pages,
+aliases, metadata, worker reservations and replicas. Explicit runtime budgets
+cover the graph/frontend, library/admin stacks, pinned pools and workspaces;
+choose and qualify these budgets before deployment. The inventory reserves
+them conservatively across every phase and binds the context and policies.
+It does not certify that the requested capacity is physically available.
+
+Finalization regenerates this inventory and rejects edited allocations or
+omitted phases, even when the edited document has a valid self-digest. The
+Python renderer invokes the actual native `ds4ctl plan`; it has no second
+tensor or NUMA memory equation implementation.
 Finalize each role with its own evidence and an explicit reviewed placement
 plan or peer-grants document where required:
 
@@ -339,6 +367,14 @@ then checks actual container restrictions
 and hidden host ancestors. Failed inspection stops the owned service within a
 finite grace period. A changed image, source, build, caps, context, TLS/network,
 cache policy or security settings invalidates the relevant evidence.
+
+Bind may agree to smaller limits than the configured ceilings. The server
+rejects a ceiling that cannot hold a mandatory registered operation, protected
+progress or an authorized whole verification chunk. Expert and Engram callbacks
+split within accepted limits, preserving original slots, coefficients and row
+associations. A split failure publishes no partial callback result and retires
+the pair. Credit accounting includes the larger of the success reply and the
+16KiB typed-error envelope; the reviewed expert workspace allowance is separate.
 
 Mount validation uses the frozen actual Compose version. Released Compose 2
 through 2.40.3 omits a false `create_host_path` value from a present `bind`

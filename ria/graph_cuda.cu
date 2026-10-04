@@ -189,14 +189,15 @@ static __global__ void sort_top_positions(const uint32_t *source,uint32_t *desti
     }
     if (i<count) destination[i]=positions[i];
 }
-static __global__ void attention_kernel(const float *q,const float *kv,uint64_t count,const float *sink,float *output,int *error) {
+static __global__ void attention_kernel(const float *q,const float *kv,uint64_t count,uint64_t masked_begin,uint64_t masked_end,const float *sink,float *output,int *error) {
     __shared__ float scores[64],probabilities[64],maximum,denominator,rescale;
     unsigned head=blockIdx.x,lane=threadIdx.x;float accumulator[2]={0,0};
     if (lane==0) { maximum=-1e30f;denominator=0; }__syncthreads();
     for (uint64_t base=0;base<count;base+=64) {
         if (lane<64) {
-            float dot=0;if (base+lane<count) for (unsigned k=0;k<512;++k) dot=__fmaf_rn(q[head*512+k],kv[(base+lane)*512+k],dot);
-            scores[lane]=base+lane<count ? dot*0.04419417382415922f : -INFINITY;
+            bool valid=base+lane<count && !(base+lane>=masked_begin && base+lane<masked_end);
+            float dot=0;if (valid) for (unsigned k=0;k<512;++k) dot=__fmaf_rn(q[head*512+k],kv[(base+lane)*512+k],dot);
+            scores[lane]=valid ? dot*0.04419417382415922f : -INFINITY;
         }__syncthreads();
         if (lane==0) {
             float previous=maximum,sum=0;for (unsigned i=0;i<64;++i) maximum=fmaxf(maximum,scores[i]);rescale=expf(previous-maximum);
@@ -205,10 +206,13 @@ static __global__ void attention_kernel(const float *q,const float *kv,uint64_t 
         }__syncthreads();
         for (unsigned entry=0;entry<2;++entry) {
             unsigned k=lane+entry*256;accumulator[entry]*=rescale;
-            for (unsigned i=0;i<64 && base+i<count;++i) accumulator[entry]=__fmaf_rn(probabilities[i],kv[(base+i)*512+k],accumulator[entry]);
+            for (unsigned i=0;i<64 && base+i<count;++i)
+                if (!(base+i>=masked_begin && base+i<masked_end))
+                    accumulator[entry]=__fmaf_rn(probabilities[i],kv[(base+i)*512+k],accumulator[entry]);
         }__syncthreads();
     }
-    if (lane==0) denominator+=expf(sink[head]-maximum);__syncthreads();
+    if (lane==0) denominator+=expf(sink[head]-maximum);
+    __syncthreads();
     for (unsigned entry=0;entry<2;++entry) {
         float value=ria_num_bf16(accumulator[entry]/denominator);if (!isfinite(value)) atomicExch(error,2);output[head*512+lane+entry*256]=value;
     }
@@ -286,16 +290,28 @@ bool ria_graph_cuda_create(const ria_graph_options *o,ria_graph_cuda **out,ria_e
     frequency_kernel<<<1,32,0,c->stream>>>(c->frequencies);
     if (!launched(e,"initialize static RoPE frequencies") || !finish(c,e)) goto bad;
     *out=c;return true;
-bad:{ria_error cleanup;(void)ria_graph_cuda_destroy(c,&cleanup);return false;}
+bad:{ria_error cleanup={0,{0}};
+    if (!ria_graph_cuda_destroy(c,&cleanup)) {
+        fprintf(stderr,"CUDA graph construction cleanup failed; retaining owned buffers (primary=%d cleanup=%d)\n",e ? e->code : 0,cleanup.code);
+        _Exit(e && e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+    }
+    return false;}
 }
 bool ria_graph_cuda_destroy(ria_graph_cuda *c,ria_error *e) {
-    if (!c) return true;bool ok=check(cudaSetDevice(c->options.device),e,"select graph cleanup device");
-    if (c->stream && !check(cudaStreamSynchronize(c->stream),ok ? e : NULL,"drain graph kernels")) ok=false;
-    for (unsigned i=0;i<RIA_G_BUFFER_COUNT;++i) if (c->buffers[i] && !check(cudaFree(c->buffers[i]),ok ? e : NULL,"release graph buffer")) ok=false;
-    void *owned[]={c->weights,c->frequencies,c->scores,c->sorted_scores,c->block_scores,c->positions,c->sorted_positions,c->top_positions,
-                    c->route_ids,c->route_coefficients,c->packed,c->candidate_blocks,c->error,c->sort_workspace};
-    for (unsigned i=0;i<sizeof(owned)/sizeof(owned[0]);++i) if (owned[i] && !check(cudaFree(owned[i]),ok ? e : NULL,"release graph scratch")) ok=false;
-    if (!ria_expert_cuda_destroy(c->projection,ok ? e : NULL)) ok=false;free(c);return ok;
+    if (!c) return true;
+    if (!check(cudaSetDevice(c->options.device),e,"select graph cleanup device") ||
+        (c->stream && !check(cudaStreamSynchronize(c->stream),e,"drain graph kernels"))) return false;
+    for (unsigned i=0;i<RIA_G_BUFFER_COUNT;++i) {
+        if (c->buffers[i] && !check(cudaFree(c->buffers[i]),e,"release graph buffer")) return false;
+        c->buffers[i]=NULL;
+    }
+#define RELEASE(member) do { if (c->member && !check(cudaFree(c->member),e,"release graph scratch")) return false;c->member=NULL; } while (0)
+    RELEASE(weights);RELEASE(frequencies);RELEASE(scores);RELEASE(sorted_scores);RELEASE(block_scores);RELEASE(positions);
+    RELEASE(sorted_positions);RELEASE(top_positions);RELEASE(route_ids);RELEASE(route_coefficients);RELEASE(packed);
+    RELEASE(candidate_blocks);RELEASE(error);RELEASE(sort_workspace);
+#undef RELEASE
+    if (!ria_expert_cuda_destroy(c->projection,e)) return false;
+    free(c);return true;
 }
 uint64_t ria_graph_cuda_bytes(const ria_graph_cuda *c) { return c ? c->bytes : 0; }
 uint64_t ria_graph_cuda_pinned_bytes(const ria_graph_cuda *c) { return c ? ria_expert_cuda_pinned_bytes(c->projection) : 0; }
@@ -308,7 +324,12 @@ bool ria_graph_cuda_reset(ria_graph_cuda *c,ria_error *e) {
     if (!c || !check(cudaStreamSynchronize(c->stream),e,"drain previous graph generation") ||
         !check(cudaMemsetAsync(c->error,0,sizeof(int),c->stream),e,"reset graph numerical status") ||
         !check(cudaMemsetAsync(c->candidate_blocks,0,(size_t)ceil_div(c->options.max_tokens,8),c->stream),e,"reset candidate cache")) return false;
-    initial_pre<<<1,4,0,c->stream>>>(c->buffers[RIA_G_PRE]);return launched(e,"initialize one-hot graph mix") && finish(c,e);
+    return ria_graph_cuda_begin_step(c,e) && finish(c,e);
+}
+bool ria_graph_cuda_begin_step(ria_graph_cuda *c,ria_error *e) {
+    if (!c) return ria_fail(e,RIA_INVALID_REQUEST,"missing per-token graph context");
+    initial_pre<<<1,4,0,c->stream>>>(c->buffers[RIA_G_PRE]);
+    return launched(e,"initialize per-token one-hot graph mix");
 }
 bool ria_graph_cuda_copy(ria_graph_cuda *c,float *to,const float *from,uint64_t count,ria_error *e) { return check(cudaMemcpyAsync(to,from,(size_t)count*sizeof(float),cudaMemcpyDeviceToDevice,c->stream),e,"copy graph values"); }
 bool ria_graph_cuda_upload(ria_graph_cuda *c,float *to,const float *from,uint64_t count,ria_error *e) { return ria_expert_cuda_upload_bytes(c->projection,to,from,count*sizeof(float),e); }
@@ -389,9 +410,11 @@ bool ria_graph_cuda_select(ria_graph_cuda *c,uint64_t count,bool source,bool use
     if (!launched(e,"order selected positions") || !ria_expert_cuda_download_bytes(c->projection,c->top_positions,selected,chosen*sizeof(uint32_t),e) || !finish(c,e)) return false;
     *selected_count=chosen;return true;
 }
-bool ria_graph_cuda_attention(ria_graph_cuda *c,const float *q,const float *kv,uint64_t count,const ria_tensor *sink,float *output,ria_error *e) {
-    if (!count || count>640 || !ria_graph_cuda_tensor(c,sink,0,c->weights,64,e)) return false;
-    attention_kernel<<<64,256,0,c->stream>>>(q,kv,count,c->weights,output,c->error);return launched(e,"source sparse attention/sink");
+bool ria_graph_cuda_attention(ria_graph_cuda *c,const float *q,const float *kv,uint64_t count,uint64_t masked_begin,uint64_t masked_end,const ria_tensor *sink,float *output,ria_error *e) {
+    if (!count || count>640 || masked_begin>masked_end || masked_end>count)
+        return ria_fail(e,RIA_INVALID_REQUEST,"source attention slots/mask outside admitted extent");
+    if (!ria_graph_cuda_tensor(c,sink,0,c->weights,64,e)) return false;
+    attention_kernel<<<64,256,0,c->stream>>>(q,kv,count,masked_begin,masked_end,c->weights,output,c->error);return launched(e,"source sparse attention/sink");
 }
 bool ria_graph_cuda_route(ria_graph_cuda *c,const float *scores,const ria_tensor *bias,uint16_t ids[6],float coefficients[6],ria_error *e) {
     if (!ria_graph_cuda_tensor(c,bias,0,c->weights,384,e)) return false;

@@ -496,8 +496,11 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
                           ria_remote_callbacks(r->remote), &r->graph, e);
   if (!ok) {
     ria_error cleanup = {0};
-    if (!ria_engine_close(r, &cleanup) && e && !e->message[0])
-      *e = cleanup;
+    if (!ria_engine_close(r, &cleanup)) {
+      fprintf(stderr, "engine construction cleanup failed; retaining owned backing (primary=%d cleanup=%d)\n",
+              e ? e->code : 0, cleanup.code);
+      _Exit(e && e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+    }
     return false;
   }
   *out = r;
@@ -506,12 +509,17 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
 bool ria_engine_close(ria_engine *r, ria_error *e) {
   if (!r)
     return true;
-  bool ok = !r->fatal;
-  if (!ok)
-    ria_error_set(e, RIA_EXECUTOR_ERROR,
-                  "graph owner unusable after failed teardown");
-  if (!ria_graph_destroy(r->graph, ok ? e : NULL))
-    ok = false;
+  /* A failed device drain retains the graph and all borrowed source backing.
+   * The serving owner must terminate before running any further cleanup. */
+  if (r->fatal)
+    return ria_fail(e, RIA_EXECUTOR_ERROR,
+                    "graph owner unusable after failed teardown");
+  if (!ria_graph_destroy(r->graph, e)) {
+    r->fatal = true;
+    return false;
+  }
+  r->graph = NULL;
+  bool ok = true;
   if (!ria_remote_close(r->remote, ok ? e : NULL))
     ok = false;
   ria_tokenizer_close(r->tokenizer);
@@ -571,11 +579,10 @@ void ria_engine_invalidate(ria_engine *r) {
 }
 static bool reconnect(ria_engine *r, ria_error *e) {
   r->valid = false;
-  ria_graph *previous = r->graph;
-  r->graph = NULL;
-  if (!ria_graph_destroy(previous, e)) {
+  if (!ria_graph_destroy(r->graph, e)) {
     r->fatal = true;
-    return false;
+    fprintf(stderr, "graph reconnect cleanup failed; retaining owned backing (code=%d)\n",e ? e->code : 0);
+    _Exit(e && e->code ? e->code : RIA_EXECUTOR_ERROR);
   }
   r->graph = NULL;
   if (!ria_remote_close(r->remote, e)) {

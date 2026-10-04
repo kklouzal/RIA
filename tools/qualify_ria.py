@@ -18,6 +18,8 @@ def main():
     freeze.add_argument("--output", required=True)
     matrix = commands.add_parser("matrix")
     matrix.add_argument("--output", required=True)
+    readiness = commands.add_parser("readiness", help="report supplied producers and missing release software; executes no workload")
+    readiness.add_argument("--output", required=True)
     compare = commands.add_parser("compare-logits")
     for name in ("reference", "candidate", "input", "policy", "output"):
         compare.add_argument("--" + name, required=True)
@@ -45,6 +47,10 @@ def main():
         elif args.command == "matrix":
             result = release_matrix()
             atomic_json(args.output, result)
+        elif args.command == "readiness":
+            from ria.qualification_readiness import qualification_readiness
+            result = qualification_readiness()
+            atomic_json(args.output, result)
         elif args.command == "calibration":
             result = calibration_report(read_json(args.evidence), Path(args.evidence).resolve().parent, read_json(args.policy))
             atomic_json(args.output, result)
@@ -70,6 +76,8 @@ def main():
         else:
             result = compare_files(args.reference, args.candidate, args.input, args.policy, args.axis, args.output)
         sys.stdout.buffer.write(canonical({"digest": result.get("digest", result.get("raw_digest")), "passed": result.get("passed", False)}) + b"\n")
+        if args.command == "readiness":
+            return 0 if result["release_ready"] else 1
         return 0 if args.command != "compare-logits" or result["passed"] else 1
     except (ArtifactError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(f"qualify_ria: {exc}", file=sys.stderr)

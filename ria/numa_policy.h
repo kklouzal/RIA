@@ -12,6 +12,7 @@ typedef struct ria_numa ria_numa;
 /* Exact values are shared with the generated reviewed seccomp policy. */
 #define RIA_NUMA_BIND_MODE 2u
 #define RIA_NUMA_QUERY_PAGES 64u
+#define RIA_NUMA_WORKER_BYTES UINT64_C(2097152)
 typedef struct {
   uint64_t canonical_bytes, replica_bytes, total_bytes;
   uint64_t node_bytes[RIA_NUMA_MAX_NODES];

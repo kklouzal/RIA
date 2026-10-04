@@ -57,6 +57,8 @@ ALLOCATION = obj({"id": U64, "name": TEXT, "resource": {"enum": ["host", "device
                   "phases": array(PHASE, maximum=6, minimum=1, unique=True)})
 INVENTORY = obj({"schema_revision": REV, "logical_model_digest": SHA, "operator_contract_digest": SHA,
                  "semantic_max_positions": POS, "allocations": array(ALLOCATION, minimum=1), "digest": SHA}, ("digest",))
+INVENTORY["properties"]["derivation"] = obj({"manifest_digest": SHA,"runtime_policy_digest": SHA,
+    "request_digest": SHA,"context_positions": POS})
 PROBE_REPORT = obj({"schema_revision": REV, "role": ROLE, "executor": EXECUTOR, "host_bytes": POS, "device_bytes": INT,
                     "pinned_bytes": INT, "numa": array(NUMA, maximum=64), "qualified": BOOL,
                     "environment_digest": SHA, "build_digest": SHA, "evidence_digest": SHA, "digest": SHA})

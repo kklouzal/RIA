@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <poll.h>
 #include <signal.h>
@@ -22,7 +23,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define WORKER_BYTES UINT64_C(2097152)
+#define WORKER_BYTES RIA_NUMA_WORKER_BYTES
 #define STACK_BYTES (1u<<20)
 typedef struct server server;
 typedef struct {
@@ -49,7 +50,7 @@ typedef struct {
 typedef struct {
   ria_transport transport; uint8_t header[64], *input;
   size_t received; ria_header frame; uint64_t frame_deadline, operation_deadline;
-  short read_event,write_event; bool decoded;
+  short read_event,write_event; bool decoded,write_retry;
   reply output[9]; unsigned output_count;
 } channel;
 struct server {
@@ -59,6 +60,8 @@ struct server {
   pthread_mutex_t mutex; pthread_cond_t condition;
   ria_server_queue queue; work requests[2]; worker workers[128]; unsigned worker_count,initialized;
   bool stopping,draining,ready,sticky,quiescent,startup_done,startup_ok; uint64_t drain_deadline;
+  uint64_t binding_deadline, retirement_deadline; bool binding_retiring;
+  uint64_t minimum_frame, minimum_bulk, minimum_expert_charge;
   ria_error worker_error; uint8_t peer_digest[32];
   void *network_arena; uint64_t network_bytes;
   /* Admin state is owned until the bounded admin thread has joined. */
@@ -141,6 +144,50 @@ bool ria_server_grants_chunk(const ria_server_grants *g,const ria_shard *a,uint6
   return (lo && g->ranges[lo-1].shard==a->id && g->ranges[lo-1].begin<=begin && g->ranges[lo-1].end>=end) ||
       ria_fail(e,RIA_UNAUTHORIZED,"whole verification chunk contains unauthorized server bytes");
 }
+/* Resolve immutable operation/granule minima once, before listener readiness.
+ * Whole chunks retain their manifest hash; lowering a limit never subchunks. */
+static bool server_minimum(server *s,ria_error *e) {
+  s->minimum_frame=RIA_ERROR_MAX; s->minimum_bulk=s->minimum_expert_charge=0;
+  for (unsigned i=0;i<RIA_LAYERS*2;i++) {
+    const ria_operation *op=&s->bank.operations[i]; uint64_t request,response,charge;
+    if (!op->handle) continue;
+    if (!ria_expert_lengths(1,1,op->input_width,op->output_width,op->quantizer_context_bytes,&request,&response,e) ||
+        !ria_request_charge(op->shared ? RIA_SHARED : RIA_EXPERT,request,response,&charge,e)) return false;
+    if (request>s->minimum_frame) s->minimum_frame=request;
+    if (response>s->minimum_frame) s->minimum_frame=response;
+    if (charge>s->minimum_expert_charge) s->minimum_expert_charge=charge;
+  }
+  for (unsigned i=0;i<2;i++) if (s->bank.tables[i].handle) {
+    uint64_t response;
+    if (!ria_u64_add(40,s->bank.tables[i].packed_row_stride,&response))
+      return ria_fail(e,RIA_RESOURCE_LIMIT,"minimum row reply overflow");
+    if (response>s->minimum_frame) s->minimum_frame=response;
+  }
+  for (size_t i=0;i<s->grants.count;i++) {
+    const ria_chunk_grant *g=&s->grants.ranges[i]; const ria_shard *a=ria_shard_id(&s->store,g->shard);
+    uint64_t start;
+    if (!a || !a->chunk_size || !ria_u64_add(g->begin,(a->chunk_size-g->begin%a->chunk_size)%a->chunk_size,&start))
+      return ria_fail(e,RIA_INTEGRITY_ERROR,"invalid immutable chunk grant granule");
+    if (start>=a->length || start>=g->end) continue;
+    uint64_t length=a->length-start; if (length>a->chunk_size) length=a->chunk_size;
+    if (length<=g->end-start && length>s->minimum_bulk) s->minimum_bulk=length;
+  }
+  uint64_t bulk_frame;
+  if (!ria_u64_add(s->minimum_bulk,64,&bulk_frame)) return ria_fail(e,RIA_RESOURCE_LIMIT,"minimum bulk frame overflow");
+  if (bulk_frame>s->minimum_frame) s->minimum_frame=bulk_frame;
+  return true;
+}
+static bool minimum_limits(const server *s,const ria_limits *l,ria_error *e) {
+  uint64_t control,row,bulk,progress,minimum;
+  if (l->frame_payload_bytes<s->minimum_frame || l->bulk_data_bytes<s->minimum_bulk)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"limits cannot hold a registered operation or whole verification chunk");
+  if (!ria_progress_charges(l,&control,&row,&bulk,e)) return false;
+  if (!ria_u64_add(control,row,&progress) || !ria_u64_add(progress,bulk,&progress) ||
+      !ria_u64_add(progress,s->minimum_expert_charge,&minimum) || minimum>l->inflight_payload_bytes ||
+      progress>=l->inflight_payload_bytes)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"limits leave no mandatory operation credit after protected progress");
+  return true;
+}
 static void notify(server *s) {
   uint64_t one=1; ssize_t n;
   do n=write(s->wake,&one,sizeof(one)); while (n<0 && errno==EINTR);
@@ -220,12 +267,13 @@ static bool queue_reply(server *s,unsigned channel_id,const ria_header *request,
   reply *r=&c->output[c->output_count]; memset(r,0,sizeof(*r)); r->header=*request;
   r->header.flags=1; r->header.status=(uint32_t)status; r->header.payload_length=length;
   memcpy(r->header.session,s->binding.session,16); r->header.epoch=s->binding.epoch;
+  if (request->kind==RIA_BIND && status) { memset(r->header.session,0,16); r->header.epoch=0; }
   r->payload=payload; r->deadline=deadline; r->terminal=terminal; r->retire=retire;
   if (!ria_header_encode(&r->header,r->encoded,e)) { free(payload); return false; }
   c->output_count++; return true;
 }
 static bool error_reply(server *s,unsigned channel_id,const ria_header *h,int status,bool terminal,
-                        uint64_t deadline,ria_error *e) {
+                        bool retire,uint64_t deadline,ria_error *e) {
   const char *message=status==RIA_CANCELLED ? "operation cancelled after quiescence" :
       status==RIA_DEADLINE_EXCEEDED ? "operation deadline exceeded" : "required operation failed";
   char json[256]; int n=snprintf(json,sizeof(json),"{\"code\":%d,\"message\":\"%s\"}",status,message);
@@ -233,18 +281,25 @@ static bool error_reply(server *s,unsigned channel_id,const ria_header *h,int st
   uint8_t *payload=malloc((size_t)n);
   if (!payload) return ria_fail(e,RIA_RESOURCE_LIMIT,"error reply allocation");
   memcpy(payload,json,(size_t)n);
-  return queue_reply(s,channel_id,h,payload,(size_t)n,status,terminal,false,deadline,e);
+  return queue_reply(s,channel_id,h,payload,(size_t)n,status,terminal,retire,deadline,e);
+}
+static void abandon_requests(server *s) {
+  pthread_mutex_lock(&s->mutex);
+  for (unsigned i=0;i<2;i++) if (s->requests[i].used) {
+    s->requests[i].cancelled=true;
+    if (!s->retirement_deadline) s->retirement_deadline=end_after(s->service.expert.drain_timeout_ms);
+  }
+  pthread_cond_broadcast(&s->condition); pthread_mutex_unlock(&s->mutex);
 }
 static void invalidate(server *s) {
   ria_binding_invalidate(&s->binding);
-  pthread_mutex_lock(&s->mutex);
-  for (unsigned i=0;i<2;i++) if (s->requests[i].used) s->requests[i].cancelled=true;
-  pthread_cond_broadcast(&s->condition); pthread_mutex_unlock(&s->mutex);
+  abandon_requests(s); s->binding_deadline=0; s->binding_retiring=false;
   for (unsigned i=0;i<2;i++) {
     channel *c=&s->channels[i];
+    if (c->received || c->write_retry) c->transport.unusable=true;
     ria_transport_close(&c->transport);
     for (unsigned j=0;j<c->output_count;j++) free(c->output[j].payload);
-    c->output_count=0; c->received=0; c->decoded=false;
+    c->output_count=0; c->received=0; c->decoded=false; c->write_retry=false;
   }
 }
 static bool work_active(server *s) {
@@ -266,13 +321,20 @@ static bool completed(server *s,ria_error *e) {
     free(r->input); r->input=NULL; r->used=false;
     pthread_mutex_unlock(&s->mutex);
     bool ok=true;
-    if (!s->binding.valid || sticky) free(result);
+    /* A completion belongs to its original binding even if a new authenticated
+     * pair was installed after the old executor became quiescent. */
+    if (!s->binding.valid || !s->binding.bound || s->binding_retiring || sticky || h.epoch!=s->binding.epoch ||
+        memcmp(h.session,s->binding.session,16)) free(result);
     else if (status) {
       free(result);
       /* The operation deadline includes execution and publication. If it is
        * already expired, invalidate rather than extending it to emit a reply. */
       if (ria_monotonic_ms()>=deadline) invalidate(s);
-      else ok=error_reply(s,0,&h,status,true,deadline,e);
+      else {
+        bool retire=status!=RIA_CANCELLED;
+        if (retire) { s->binding_retiring=true; s->binding.draining=true; abandon_requests(s); }
+        ok=error_reply(s,0,&h,status,true,retire,deadline,e);
+      }
     } else ok=queue_reply(s,0,&h,result,(size_t)response_bytes,0,true,false,deadline,e);
     if (!ok) return false;
     pthread_mutex_lock(&s->mutex);
@@ -303,7 +365,7 @@ static bool bind_frame(server *s,unsigned ch,ria_header *h,const uint8_t *p,uint
     if (ok) {
       pthread_mutex_lock(&s->mutex); s->quiescent=false; pthread_mutex_unlock(&s->mutex);
       ria_binding_init(&s->binding,&requested);
-      ok=ria_progress_charges(&requested,&control,&row,&bulk,e) &&
+      ok=minimum_limits(s,&requested,e) && ria_progress_charges(&requested,&control,&row,&bulk,e) &&
          ria_binding_protect(&s->binding,control,row,bulk,e) && ria_binding_fresh(&s->binding,e);
     }
     uint8_t layout[32]; char *json=NULL; size_t length=0;
@@ -384,7 +446,7 @@ static bool cancel_frame(server *s,const ria_header *h,const uint8_t *p,uint64_t
     if (c->output[i].write_started) return ria_fail(e,RIA_CANCELLED,"cancel races a started TLS reply; retire pair");
     reply old=c->output[i]; free(old.payload);
     memmove(c->output+i,c->output+i+1,(c->output_count-i-1)*sizeof(*c->output)); c->output_count--;
-    if (!error_reply(s,0,&old.header,RIA_CANCELLED,true,old.deadline,e)) return false;
+    if (!error_reply(s,0,&old.header,RIA_CANCELLED,true,false,old.deadline,e)) return false;
     break;
   }
   uint8_t *result=calloc(1,24);
@@ -392,10 +454,7 @@ static bool cancel_frame(server *s,const ria_header *h,const uint8_t *p,uint64_t
   ria_write_u64(result,target); ria_write_u64(result+8,h->epoch); ria_write_u32(result+16,state);
   return queue_reply(s,0,h,result,24,0,true,false,start+s->binding.limits.operation_timeout_ms,e);
 }
-static bool dispatch(server *s,unsigned ch,ria_header *h,uint8_t *p,uint64_t start,ria_error *e) {
-  pthread_mutex_lock(&s->mutex); bool unavailable=s->draining || s->sticky; pthread_mutex_unlock(&s->mutex);
-  if (unavailable) return ria_fail(e,RIA_NOT_READY,"service drain forbids new admissions");
-  if (!ria_binding_receive(&s->binding,h,ch!=0,e)) return false;
+static bool dispatch_operation(server *s,unsigned ch,ria_header *h,uint8_t *p,uint64_t start,ria_error *e) {
   if (h->kind==RIA_BIND || h->kind==RIA_BIND_BULK) return bind_frame(s,ch,h,p,start,e);
   if (!s->binding.bulk_bound && h->kind!=RIA_HEALTH && h->kind!=RIA_CLOSE)
     return ria_fail(e,RIA_NOT_READY,"both authenticated channels required before work");
@@ -436,16 +495,43 @@ static bool dispatch(server *s,unsigned ch,ria_header *h,uint8_t *p,uint64_t sta
   if (h->kind==RIA_CLOSE) return !h->payload_length && admit(s,h,0,start,e);
   return ria_fail(e,RIA_INVALID_REQUEST,"unsupported bound operation");
 }
+static bool dispatch(server *s,unsigned ch,ria_header *h,uint8_t *p,uint64_t start,ria_error *e) {
+  pthread_mutex_lock(&s->mutex); bool unavailable=s->draining || s->sticky; pthread_mutex_unlock(&s->mutex);
+  if (unavailable || s->binding_retiring) return ria_fail(e,RIA_NOT_READY,"service drain forbids new admissions");
+  /* Corrupt direction, identity and request ordering close without admission. */
+  if (!ria_binding_receive(&s->binding,h,ch!=0,e)) return false;
+  if (dispatch_operation(s,ch,h,p,start,e)) return true;
+  int status=e->code;
+  bool initial=h->kind==RIA_BIND;
+  if (!initial && (status==RIA_INVALID_REQUEST || status==RIA_IDENTITY_MISMATCH || !status)) return false;
+  if (!status) status=RIA_INTERNAL_ERROR;
+  bool accepted=false;
+  for (unsigned i=0;i<9;i++) accepted|=s->binding.pending[i].used &&
+    s->binding.pending[i].id==h->request_id && s->binding.pending[i].bulk==(ch!=0);
+  bool retire=initial || h->kind==RIA_BIND_BULK || h->kind==RIA_EXPERT || h->kind==RIA_SHARED || h->kind==RIA_ROWS;
+  if (retire) { s->binding_retiring=true; s->binding.draining=true; abandon_requests(s); }
+  uint64_t deadline;
+  if (!ria_u64_add(start,s->binding.limits.operation_timeout_ms,&deadline)) return false;
+  memset(e,0,sizeof(*e));
+  /* A pre-admission refusal has no pending slot and returns no server credit. */
+  return error_reply(s,ch,h,status,accepted,retire,deadline,e);
+}
 /* Incremental TLS I/O: one owner, fixed read buffers and bounded reply slots.
  * SSL retry arguments stay stable until that operation makes progress. */
 static bool ssl_step(channel *c,bool writing,void *buffer,size_t length,size_t *done,ria_error *e) {
   size_t amount=0;
+  ERR_clear_error();
   int rc=writing ? SSL_write_ex(c->transport.ssl,buffer,length,&amount) : SSL_read_ex(c->transport.ssl,buffer,length,&amount);
-  if (rc==1) { if (!amount || amount>length) return ria_fail(e,RIA_INTERNAL_ERROR,"TLS made invalid progress"); *done+=amount; return true; }
+  if (rc==1) {
+    if (!amount || amount>length) { c->transport.unusable=true; return ria_fail(e,RIA_INTERNAL_ERROR,"TLS made invalid progress"); }
+    if (writing) c->write_retry=false;
+    *done+=amount; return true;
+  }
   int code=SSL_get_error(c->transport.ssl,rc); short event=code==SSL_ERROR_WANT_WRITE ? POLLOUT : POLLIN;
   if (code==SSL_ERROR_WANT_READ || code==SSL_ERROR_WANT_WRITE) {
-    if (writing) c->write_event=event; else c->read_event=event; return true;
+    if (writing) { c->write_event=event; c->write_retry=true; } else c->read_event=event; return true;
   }
+  c->transport.unusable=true;
   return ria_fail(e,RIA_NOT_READY,"authenticated channel disconnected/failed");
 }
 static bool channel_read(server *s,unsigned id,ria_error *e) {
@@ -476,6 +562,7 @@ static bool channel_read(server *s,unsigned id,ria_error *e) {
       uint64_t started=c->operation_deadline-s->binding.limits.operation_timeout_ms;
       if (!dispatch(s,id,&c->frame,c->input,started,e)) return false;
       c->received=0; c->decoded=false;
+      if (s->binding_retiring) return true;
       if (!SSL_pending(c->transport.ssl)) return true;
     }
   }
@@ -499,6 +586,7 @@ static bool channel_write(server *s,unsigned id,ria_error *e) {
   }
   bool retire=r->retire;
   if (r->terminal && !ria_binding_terminal_channel(&s->binding,r->header.request_id,id!=0,true,e)) return false;
+  if (r->header.kind==RIA_BIND_BULK && !r->header.status) s->binding_deadline=0;
   free(r->payload); memmove(c->output,c->output+1,(c->output_count-1)*sizeof(*c->output)); c->output_count--;
   if (retire) invalidate(s);
   return true;
@@ -530,9 +618,22 @@ static bool accept_channel(server *s,unsigned id,ria_error *e) {
   /* No execution is admitted until both handshakes finish. Subsequent new
    * connections cannot interrupt an established pair or create another client. */
   channel *c=&s->channels[id];
+  pthread_mutex_lock(&s->mutex);
+  bool retained=false;
+  for (unsigned i=0;i<2;i++) retained|=s->requests[i].used;
+  pthread_mutex_unlock(&s->mutex);
   if (c->transport.fd>=0 || (id && (!s->binding.bound || s->binding.bulk_capability_used)) ||
-      (!id && (s->binding.bound || work_active(s)))) { close(fd); return true; }
-  if (!id) ria_binding_init(&s->binding,&s->service.limits);
+      (!id && (s->binding.bound || retained))) { close(fd); return true; }
+  if (!id) {
+    uint64_t interval;
+    if (!ria_u64_add(s->service.tls.handshake_timeout_ms,s->service.limits.operation_timeout_ms,&interval) ||
+        !ria_u64_add(ria_monotonic_ms(),interval,&s->binding_deadline)) {
+      close(fd); return ria_fail(e,RIA_INVALID_REQUEST,"initial pair deadline overflow");
+    }
+    /* The initial pair has one finite handshake+operation budget, including
+     * silence before Bind and absence of the required bulk connection. */
+    ria_binding_init(&s->binding,&s->service.limits);
+  }
   pthread_mutex_lock(&s->mutex); s->quiescent=false; pthread_mutex_unlock(&s->mutex);
   if (!ria_transport_accept(&c->transport,&s->tls,fd,e)) { close(fd); return false; }
   c->read_event=POLLIN; c->write_event=POLLOUT; c->received=0; c->decoded=false;
@@ -541,7 +642,7 @@ static bool accept_channel(server *s,unsigned id,ria_error *e) {
 }
 static bool admin_health(void *context,bool *ready,bool *active,ria_error *e) {
   (void)e; server *s=context; pthread_mutex_lock(&s->mutex);
-  *ready=s->ready && !s->draining && !s->sticky; *active=!s->quiescent;
+  *ready=s->ready && !s->draining && !s->sticky && !s->retirement_deadline; *active=!s->quiescent;
   pthread_mutex_unlock(&s->mutex); return true;
 }
 static bool admin_drain(void *context,uint64_t deadline,ria_error *e) {
@@ -601,7 +702,8 @@ static void *startup_main(void *context) {
   bool ok=ria_tensor_store_open_controlled(&s->store,s->service.manifest_path,&load,place_shard,s,startup_progress,s,&e) &&
       startup_progress(s,&e) && runtime_budget(s,&e) && ria_bank_open(&s->bank,&s->store,&e) && startup_progress(s,&e) &&
       ria_numa_open_controlled(&s->numa,&s->bank,&s->service.expert,startup_progress,s,&e) &&
-      ria_server_grants_open(&s->grants,&s->store,&e) && ria_tls_create(&s->tls,&s->service.tls,&e);
+      ria_server_grants_open(&s->grants,&s->store,&e) && server_minimum(s,&e) &&
+      minimum_limits(s,&s->service.limits,&e) && ria_tls_create(&s->tls,&s->service.tls,&e);
   pthread_mutex_lock(&s->mutex); s->startup_done=true; s->startup_ok=ok;
   if (!ok) s->worker_error=e;
   pthread_cond_broadcast(&s->condition); pthread_mutex_unlock(&s->mutex); notify(s); return NULL;
@@ -668,8 +770,17 @@ static bool event_loop(server *s,ria_error *e) {
     if (sticky && !drain_deadline) { drain_deadline=end_after(s->service.expert.drain_timeout_ms); s->drain_deadline=drain_deadline; }
     pthread_mutex_unlock(&s->mutex);
     if (draining) invalidate(s);
+    if (s->binding_deadline && ria_monotonic_ms()>=s->binding_deadline) invalidate(s);
     if (!completed(s,e)) return false;
     bool active=work_active(s);
+    pthread_mutex_lock(&s->mutex);
+    if (!active) s->retirement_deadline=0;
+    uint64_t retirement_deadline=s->retirement_deadline;
+    pthread_mutex_unlock(&s->mutex);
+    if (active && retirement_deadline && ria_monotonic_ms()>=retirement_deadline) {
+      fputs("expert disconnected-binding drain exceeded deadline with live executor; terminating\n",stderr);
+      _Exit(RIA_DEADLINE_EXCEEDED);
+    }
     if (!s->binding.valid && !active) {
       pthread_mutex_lock(&s->mutex); s->quiescent=true; pthread_cond_broadcast(&s->condition); pthread_mutex_unlock(&s->mutex);
       if (terminate || sticky) return !sticky || ria_fail(e,RIA_EXECUTOR_ERROR,"sticky CUDA failure retired service");
@@ -688,9 +799,11 @@ static bool event_loop(server *s,ria_error *e) {
       {s->listeners[0],draining?0:POLLIN,0},{s->listeners[1],draining?0:POLLIN,0},
       {s->channels[0].transport.fd,POLLIN,0},{s->channels[1].transport.fd,POLLIN,0}};
     for (unsigned i=0;i<2;i++) {
-      channel *c=&s->channels[i]; fds[4+i].events=c->read_event;
+      channel *c=&s->channels[i]; fds[4+i].events=s->binding_retiring || c->write_retry ? 0 : c->read_event;
       if (c->output_count) fds[4+i].events|=c->write_event;
       if (c->received && ria_monotonic_ms()>=c->frame_deadline) { invalidate(s); break; }
+      if (c->output_count && (ria_monotonic_ms()>=c->output[0].deadline ||
+          (c->output[0].write_started && ria_monotonic_ms()>=c->output[0].write_deadline))) { invalidate(s); break; }
     }
     int n=poll(fds,6,10);
     if (n<0 && errno==EINTR) continue;
@@ -709,11 +822,16 @@ static bool event_loop(server *s,ria_error *e) {
       channel *c=&s->channels[i]; short events=fds[4+i].revents;
       if (c->transport.fd<0) continue;
       bool ok=true;
-      if (events&(POLLERR|POLLHUP|POLLNVAL)) ok=false;
-      if (ok && ((events&c->read_event) || SSL_pending(c->transport.ssl))) ok=channel_read(s,i,e);
+      if (events&(POLLERR|POLLHUP|POLLNVAL)) { c->transport.unusable=true; ok=false; }
+      /* OpenSSL requires a WANT_WRITE operation to be retried before another
+       * operation can trigger I/O. Keep its borrowed buffer and arguments. */
+      bool retried=c->write_retry;
+      if (ok && retried && (events&c->write_event)) ok=channel_write(s,i,e);
+      if (ok && c->transport.fd>=0 && !s->binding_retiring && !c->write_retry &&
+          ((events&c->read_event) || SSL_pending(c->transport.ssl))) ok=channel_read(s,i,e);
       pthread_mutex_lock(&s->mutex); bool stopped=s->sticky || s->draining; pthread_mutex_unlock(&s->mutex);
       if (stopped) ok=false;
-      if (ok && c->transport.fd>=0 && c->output_count && (events&c->write_event)) ok=channel_write(s,i,e);
+      if (ok && !retried && c->transport.fd>=0 && c->output_count && (events&c->write_event)) ok=channel_write(s,i,e);
       if (!ok) { invalidate(s); memset(e,0,sizeof(*e)); break; }
     }
     active=work_active(s);
@@ -783,7 +901,12 @@ finish:
     ria_expert_cpu_destroy(w->cpu);
 #ifdef RIA_WITH_CUDA
     ria_error cleanup={0};
-    if (w->cuda && !ria_expert_cuda_destroy(w->cuda,&cleanup)) { if (ok) *e=cleanup; ok=false; }
+    if (w->cuda && !ria_expert_cuda_destroy(w->cuda,&cleanup)) {
+      /* Failed synchronization does not prove DMA has released host/model
+       * ownership. Process teardown retains every borrowed arena until exit. */
+      fprintf(stderr,"expert CUDA cleanup could not prove quiescence (primary=%d cleanup=%d); terminating\n",e->code,cleanup.code);
+      _Exit(e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+    }
 #endif
     ria_numa_release(w->arena,w->arena_bytes);
   }

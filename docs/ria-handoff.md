@@ -1,6 +1,6 @@
 # RIA hardware handoff
 
-RIA is implemented on the pinned `antirez/ds4` source in this fork. The native
+RIA is being implemented on the pinned `antirez/ds4` source in this fork. The native
 serving path is C/CUDA; Python handles artifact preparation, deployment and
 supervised qualification. Select RIA with `--config service.json`. Existing
 donor execution remains available when no RIA configuration is supplied.
@@ -15,7 +15,13 @@ does not establish GPU numerical correctness.
 
 ## Read and provision
 
-Use source branch `codex/ria-implementation`. Its tested implementation commit is
+Use source branch `codex/ria-implementation` and read the
+[independent review](ria-implementation-review.md) before hardware handoff.
+The corrected sources have passed the local frozen offline gates; grouped
+prefill and full semantic physical qualification producers are still missing.
+
+The following publication is the historical pre-review baseline, with defects
+identified by the audit. It is not the corrected implementation. Its commit is
 `c987a34618efe6ccc4aca5fed26e3db0aac863be`; later verification-document commits
 leave those runtime sources unchanged. The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37181861323)
 passed and published these Linux amd64 images:
@@ -39,7 +45,7 @@ Use these operational guides:
 | Independent expert, graph and transfer fixtures | [Native fixtures](ria-native-fixtures.md) |
 | CLI, authenticated HTTP, images, tools, continuation, saved logits | [Frontend](ria-frontend.md) |
 | Preregistered HTTP replay, token timing and measured soak | [Replay and soak](ria-release-replay.md) |
-| Measured physical matrix and gate proofs | [Physical contracts](ria-physical-contracts.md) |
+| Missing physical qualification software and bounded diagnostics | [Physical contracts](ria-physical-contracts.md) |
 
 Provision Linux x86-64 hosts, rootful Docker with Compose v2 and cgroup v2,
 the pinned image digests, CPU/NUMA masks and measured memory/lock limits. The
@@ -89,9 +95,10 @@ in an image, command argument or evidence record.
 
 Provision mount ownership explicitly: the runtime UID10001 must be able to
 read the immutable model/config/credential files and write only its report
-directory. Atomic host-tool output defaults to private0600 files and0700
-directories. Provision the required owner/group access before launch; these
-host-tool defaults do not imply that another UID can read the package.
+directory. General atomic host-tool files default to 0644; deployment staging
+directories are 0700 and explicitly private checkpoints/credentials have stricter
+modes. Set the intended owner/group and private report-directory permissions
+before launch; a readable package does not grant runtime write access.
 
 Missing proofs, source/hash changes, cgroup or mask changes, changed images,
 nonfinite results, insufficient resource headroom and failed quiescence stop
@@ -113,12 +120,21 @@ three NUMA policies. Complete G01–G28 under their specified contracts and
 retain the measurements. The replay harness observes HTTP features, prefix
 reuse and exact token boundaries. It leaves placement/residency/NUMA cells
 uncredited because HTTP observations alone do not prove those paths.
-Instrumented placement/resource tests must supply their separate physical
-evidence, preregistered checks and authenticated raw measurements. The validator
-recomputes every credited bound and stages the plan, runtime witness and raw
-records. A sealed document establishes content integrity; it does not attest
-that a producer actually performed a hardware test. Configured settings cannot
-stand in for observed execution.
+The complete matrix/gate producer software is currently missing. This is an
+implementation blocker in addition to unavailable hardware, not an operator
+provisioning task. Run `tools/qualify_ria.py readiness --output
+/artifacts/qualification-readiness.json` for the fixed obligations, partial
+producer commands and precise blockers; exit1 prevents full qualification.
+Generic numeric reports are revision2 unqualified diagnostics and grant no
+cell/gate coverage. Their validator authenticates bytes and recomputes numeric
+bounds but cannot prove routing, residency, NUMA execution, fault safety or
+the full gate semantics. See [physical qualification](ria-physical-contracts.md).
+
+The required prefill scheduler that groups prompt rows by expert is also
+missing. The current graph processes causal positions sequentially and has
+no multirow client expert callback. That path preserves a reference schedule,
+but does not implement the grouping requirement in specification section7.3.
+These software gaps must be resolved before claiming complete implementation.
 
 Register and execute the release replay plan for at least the accepted soak
 duration, minimum one hour. Use actual monotonic durations, failure counts,

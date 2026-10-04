@@ -1,9 +1,9 @@
-"""Validate independent instrumented physical reports; hashes are not attestation.
+"""Authenticate bounded diagnostic measurements without granting release gates.
 
-This module does not execute workloads or establish that a report describes real
-hardware. The independent producer owns that obligation. It authenticates the
-reported bytes, preregistered bounds and identities, and measurement-backed
-coverage before the release aggregator may use a physical report.
+Numeric bounds do not prove the fixed gate or physical matrix semantics. No
+complete gate/cell-specific producer and semantic validator is currently supplied,
+so release coverage fails closed. Revision 2 quarantines these reports as
+unqualified diagnostics; selfhash integrity still is not execution attestation.
 """
 
 import math
@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from .identity import ArtifactError, canonical, check_json, loads, u64, verify_identity
 from .qualification_schema import MATRIX_AXES, POLICY, record
+from .qualification_readiness import gate_catalog
 
 MAX_CHECKS = 4096
 MAX_REFERENCES = 4096
@@ -41,20 +42,24 @@ def _array(items, maximum, minimum=0):
             "maxItems": maximum, "uniqueItems": True}
 
 
-CELLS = _array(CELL, 540)
-GATES = _array(GATE, 28)
+# These fields remain explicit so no consumer can mistake a numeric diagnostic
+# for cell/gate evidence. Opening coverage requires actual semantic producers and
+# validators, not merely widening a schema or trusting a producer-supplied flag.
+CELLS = _array(CELL, 0)
+GATES = _array(GATE, 0)
 IDENTITY_FIELDS = ("policy_digest", "logical_model_digest", "source_lock_digest",
     "environment_digest", "build_digest", "operator_contract_digest", "runtime_config_digest",
     "profile", "server_executor")
 COMMON = {**{key: SHA for key in IDENTITY_FIELDS[:-2]},
     "profile": {"enum": ["nvfp4", "fp8", "bf16"]},
     "server_executor": {"enum": ["cpu", "cuda"]}}
-RUNTIME_IDENTITY = record({"schema_revision": {"const": 1},
+RUNTIME_IDENTITY = record({"schema_revision": {"const": 2},
     "kind": {"const": "physical_runtime_identity"}, **COMMON, "digest": SHA})
 PLANNED_CHECK = record({"id": ID, "unit": UNIT, "domain": {"enum": ["number", "u64"]},
     "minimum": BOUND, "maximum": BOUND, "cells": CELLS, "gates": GATES})
-PLAN = record({"schema_revision": {"const": 1}, "kind": {"const": "physical_contract_plan"},
-    "qualification_scope": {"const": "final_release"}, **COMMON,
+PLAN = record({"schema_revision": {"const": 2}, "kind": {"const": "physical_contract_plan"},
+    "qualification_scope": {"const": "unqualified_diagnostic"}, **COMMON,
+    "gate_catalog_digest": {"const": gate_catalog()["digest"]},
     "registered_at": UTC, "binary_sha256": SHA, "max_elapsed_ns": U64,
     "runtime_reference": REFERENCE, "required_cells": CELLS, "required_gates": GATES,
     "checks": _array(PLANNED_CHECK, MAX_CHECKS, 1), "digest": SHA})
@@ -65,15 +70,15 @@ EXECUTION = record({"run_id": SHA, "started_at": UTC,
     "child_signal": {"type": "null"}, "binary_sha256": SHA})
 MEASUREMENT = record({"check_id": ID, "measurement_id": ID, "unit": UNIT,
     "value": VALUE, "cells": CELLS, "gates": GATES})
-MEASUREMENTS = record({"schema_revision": {"const": 1},
-    "kind": {"const": "physical_contract_measurements"}, "classification": {"const": "physical"},
+MEASUREMENTS = record({"schema_revision": {"const": 2},
+    "kind": {"const": "physical_contract_measurements"}, "classification": {"const": "unqualified_measurements"},
     **COMMON, "plan_digest": SHA, "execution": EXECUTION,
     "measurements": _array(MEASUREMENT, MAX_CHECKS, 1), "digest": SHA})
 RESULT = record({"id": ID, "measurement_id": ID, "raw_digest": SHA,
     "passed": {"type": "boolean"}})
-EVIDENCE = record({"schema_revision": {"const": 1},
-    "kind": {"const": "physical_contract_evidence"}, "classification": {"const": "physical"},
-    "qualification_scope": {"const": "final_release"}, **COMMON,
+EVIDENCE = record({"schema_revision": {"const": 2},
+    "kind": {"const": "physical_contract_evidence"}, "classification": {"const": "unqualified_measurements"},
+    "qualification_scope": {"const": "unqualified_diagnostic"}, **COMMON,
     "plan_reference": REFERENCE, "raw_evidence": _array(REFERENCE, MAX_REFERENCES, 1),
     "covered_cells": CELLS, "covered_gates": GATES,
     "checks": _array(RESULT, MAX_CHECKS, 1), "passed": {"type": "boolean"}, "digest": SHA})
@@ -202,16 +207,16 @@ def validate_physical_contract(proof, evidence_dir, frozen_policy):
 
     Accept a complete report whose pass bits equal recomputed inclusive bounds;
     a measured failing report remains valid evidence with ``passed=False``.
-    Callers require ``passed=True`` before crediting release coverage. All
-    referenced JSON is selfsealed and bounded. Selfhash integrity is not hardware
-    attestation, independent provenance verification, or a substitute for the
-    producer actually running every instrumented obligation.
-
-    A proof covers one profile/server-executor realization. Matrix aggregation
-    can combine distinct proofs for other candidates; each proof binds its own
-    environment, build, operator and runtime identities throughout.
+    ``passed=True`` means only that the numeric diagnostics met their declared
+    bounds. It grants no gate or matrix coverage. Fixed obligations are recorded
+    in qualification_readiness; no supplied complete semantic producer validates
+    them yet. A claimed full release proof is a missing-software error, regardless
+    of how many unrelated numeric measurements are attached.
     """
     _document(frozen_policy, POLICY)
+    if isinstance(proof, dict) and (proof.get("covered_cells") or proof.get("covered_gates") or
+            proof.get("qualification_scope") == "final_release"):
+        raise ArtifactError("release coverage requires missing gate/cell-specific semantic producer software; numeric measurements are diagnostics only")
     _document(proof, EVIDENCE)
     if any(proof[key] != frozen_policy[key] for key in ("logical_model_digest", "source_lock_digest")) or \
             proof["policy_digest"] != frozen_policy["digest"]:
@@ -231,8 +236,6 @@ def validate_physical_contract(proof, evidence_dir, frozen_policy):
     runtime = references.read(plan["runtime_reference"], RUNTIME_IDENTITY)
     _same_identity(runtime, plan)
     required_cells, required_gates = _coverage(plan["required_cells"], plan["required_gates"], plan)
-    if not required_cells and not required_gates:
-        raise ArtifactError("physical plan requires at least one matrix cell or gate")
     if _coverage(proof["covered_cells"], proof["covered_gates"], proof) != (required_cells, required_gates):
         raise ArtifactError("physical proof coverage differs from its preregistered obligations")
 
@@ -246,7 +249,7 @@ def validate_physical_contract(proof, evidence_dir, frozen_policy):
         if minimum is None and maximum is None or minimum is not None and maximum is not None and minimum > maximum:
             raise ArtifactError("physical check must declare consistent nonempty bounds")
         cells, gates = _coverage(check["cells"], check["gates"], plan)
-        if not cells and not gates or not cells <= required_cells or not gates <= required_gates:
+        if not cells <= required_cells or not gates <= required_gates:
             raise ArtifactError("physical check assignments must cover only planned obligations")
         assigned_cells.update(cells)
         assigned_gates.update(gates)

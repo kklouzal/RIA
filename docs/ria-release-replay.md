@@ -100,8 +100,10 @@ from every frozen bound; `qualified` and `hardware_qualified` stay false.
 coverage and bound judgments. `observed_workload_cells` records real phases
 under the configured realization; `observed_cells` stays empty because current
 HTTP diagnostics do not observe route/cache placement hits or actual
-NUMA/residency execution. Independent instrumented evidence is required to
-credit those release matrix cells. No 540-cell or G01–G28 blanket pass is made.
+NUMA/residency execution. The complete instrumented matrix/gate producer and
+semantic validator software is currently missing; see
+[qualification software readiness](ria-physical-contracts.md). Generic numeric
+diagnostics cannot credit those cells. No 540-cell or G01–G28 blanket pass is made.
 Source/native model parity, model quality, all other release gates and physical
 hardware/resource qualification remain separate required proofs.
 

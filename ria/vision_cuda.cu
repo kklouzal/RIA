@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include "numeric.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 struct ria_vision_cuda {
@@ -134,14 +135,23 @@ bool ria_vision_cuda_create(const ria_vision_parameters *p,int device,uint32_t p
         !allocate(v,(void **)&v->weights,5120,sizeof(float),e) || !allocate(v,(void **)&v->packed,5120*4,1,e) ||
         !allocate(v,(void **)&v->error,1,sizeof(int),e)) goto bad;
     *out=v;return true;
-bad:{ria_error cleanup;(void)ria_vision_cuda_destroy(v,&cleanup);return false;}
+bad:{ria_error cleanup={0,{0}};
+    if (!ria_vision_cuda_destroy(v,&cleanup)) {
+        fprintf(stderr,"CUDA vision construction cleanup failed; retaining owned buffers (primary=%d cleanup=%d)\n",e ? e->code : 0,cleanup.code);
+        _Exit(e && e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+    }
+    return false;}
 }
 bool ria_vision_cuda_destroy(ria_vision_cuda *v,ria_error *e) {
-    if (!v) return true;bool ok=check(cudaSetDevice(v->device),e,"select vision cleanup device");
-    if (v->stream && !check(cudaStreamSynchronize(v->stream),ok ? e : NULL,"drain vision kernels")) ok=false;
-    void *owned[]={v->input,v->h,v->normalized,v->qkv,v->attention,v->gate_up,v->mid,v->downsampled,v->aligned,v->output,v->weights,v->packed,v->error};
-    for (unsigned i=0;i<sizeof(owned)/sizeof(owned[0]);++i) if (owned[i] && !check(cudaFree(owned[i]),ok ? e : NULL,"release vision workspace")) ok=false;
-    if (!ria_expert_cuda_destroy(v->projection,ok ? e : NULL)) ok=false;free(v);return ok;
+    if (!v) return true;
+    if (!check(cudaSetDevice(v->device),e,"select vision cleanup device") ||
+        (v->stream && !check(cudaStreamSynchronize(v->stream),e,"drain vision kernels"))) return false;
+#define RELEASE(member) do { if (v->member && !check(cudaFree(v->member),e,"release vision workspace")) return false;v->member=NULL; } while (0)
+    RELEASE(input);RELEASE(h);RELEASE(normalized);RELEASE(qkv);RELEASE(attention);RELEASE(gate_up);RELEASE(mid);
+    RELEASE(downsampled);RELEASE(aligned);RELEASE(output);RELEASE(weights);RELEASE(packed);RELEASE(error);
+#undef RELEASE
+    if (!ria_expert_cuda_destroy(v->projection,e)) return false;
+    free(v);return true;
 }
 uint64_t ria_vision_cuda_bytes(const ria_vision_cuda *v) { return v ? v->bytes : 0; }
 uint64_t ria_vision_cuda_pinned_bytes(const ria_vision_cuda *v) { return v ? ria_expert_cuda_pinned_bytes(v->projection) : 0; }

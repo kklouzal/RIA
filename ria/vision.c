@@ -259,9 +259,18 @@ bool ria_vision_create_pooled(const ria_tensor_store *s,int device,uint32_t patc
     }
     if (!ria_vision_cuda_create(p,device,patches,budget,pinned_budget,&v->cuda,e)) goto bad;
     *out=v;return true;
-bad:{ria_error cleanup;(void)ria_vision_destroy(v,&cleanup);return false;}
+bad:{ria_error cleanup={0};
+    if (!ria_vision_destroy(v,&cleanup)) {
+        fprintf(stderr,"vision construction cleanup failed; terminating with owned backing intact (primary=%d cleanup=%d)\n",e ? e->code : 0,cleanup.code);
+        _Exit(e && e->code ? e->code : cleanup.code ? cleanup.code : RIA_EXECUTOR_ERROR);
+    }
+    return false;}
 }
-bool ria_vision_destroy(ria_vision *v,ria_error *e) { if (!v) return true;bool ok=ria_vision_cuda_destroy(v->cuda,e);free(v);return ok; }
+bool ria_vision_destroy(ria_vision *v,ria_error *e) {
+    if (!v) return true;
+    if (!ria_vision_cuda_destroy(v->cuda,e)) return false;
+    free(v);return true;
+}
 uint64_t ria_vision_device_bytes(const ria_vision *v) { return v ? ria_vision_cuda_bytes(v->cuda) : 0; }
 uint64_t ria_vision_pinned_bytes(const ria_vision *v) { return v ? ria_vision_cuda_pinned_bytes(v->cuda) : 0; }
 bool ria_vision_encode(ria_vision *v,const float *patches,uint32_t h,uint32_t w,float *output,uint64_t rows,ria_error *e) {

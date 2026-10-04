@@ -39,6 +39,24 @@ def publisher_geometry():
     return namespace["plan_image_grid"]
 
 
+def publisher_window_slots():
+    # Execute the publisher's actual index-order/mask body against NumPy;
+    # only its final tensor dtype/batch materialization is omitted here.
+    tree = ast.parse((SOURCE / "model.py").read_text())
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_window_topk_idxs")
+    function.decorator_list = []
+    function.body[-1] = ast.Return(ast.Name("idxs", ast.Load()))
+    class Array(np.ndarray):
+        def unsqueeze(self, dim):
+            return np.expand_dims(self, dim)
+        def clamp(self, lower):
+            return np.maximum(self, lower)
+    namespace = {"torch": SimpleNamespace(arange=lambda *args: np.arange(*args).view(Array), cat=np.concatenate, where=np.where)}
+    module = ast.fix_missing_locations(ast.Module([function], []))
+    exec(compile(module, str(SOURCE / "model.py"), "exec"), namespace)
+    return namespace["get_window_topk_idxs"]
+
+
 def widened_bf16(array):
     bits = np.asarray(array, dtype=np.float32).view(np.uint32)
     rounded = ((bits + np.uint32(32767) + ((bits >> 16) & 1)) & np.uint32(0xffff0000))
@@ -76,10 +94,38 @@ class GraphReference(unittest.TestCase):
         ], check=True)
         subprocess.run([cls.binary], check=True)
         cls.report = json.loads(subprocess.check_output([cls.binary, "--report"], text=True))
+        cls.step_binary = Path(cls.directory.name) / "graph-step"
+        subprocess.run([
+            "gcc", "-std=c11", "-O2", "-ffp-contract=off", "-Wall", "-Wextra", "-Wconversion", "-Werror",
+            "-ffunction-sections", "-I", str(ROOT), str(ROOT / "tests/ria/test_graph_step.c"),
+            str(ROOT / "ria/common.c"), "-Wl,--gc-sections", "-lcrypto", "-lm", "-o", str(cls.step_binary),
+        ], check=True)
 
     @classmethod
     def tearDownClass(cls):
         cls.directory.cleanup()
+
+    def test_each_token_starts_identity_pre_mix_and_retains_history(self):
+        # Independently inspect the source per-forward boundary, then execute
+        # the actual native graph caller twice with a CUDA command recorder.
+        source = ast.parse((SOURCE / "model.py").read_text())
+        transformer = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "Transformer")
+        forward = next(node for node in transformer.body if isinstance(node, ast.FunctionDef) and node.name == "forward")
+        assignment = next(node for node in forward.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == "pre_mix" for target in node.targets))
+        self.assertEqual(assignment.value.func.id, "make_identity_pre_mix")
+        subprocess.run([self.step_binary], check=True)
+
+    def test_native_sparse_slots_match_publisher_initial_partial_and_full_ring(self):
+        actual = json.loads(subprocess.check_output([self.step_binary, "--report"], text=True))
+        source = publisher_window_slots()
+        ring = [0] * 128
+        expected = []
+        for position in range(130):
+            ring[position % 128] = position + 1
+            slots = np.asarray(source(128, 1, 1, position)).reshape(-1).tolist()
+            expected.append([0 if slot < 0 else ring[slot] for slot in slots])
+        self.assertEqual(actual, expected)
 
     def check_encoded(self, image, format_, **options):
         encoded = io.BytesIO()

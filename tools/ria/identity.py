@@ -120,6 +120,19 @@ def read_json(path, **kwargs):
     return loads(raw, **kwargs)
 
 
+def read_verified_bytes(path, *, expected_sha256=None, max_bytes=16 << 20):
+    """Authenticate the exact bounded bytes a caller parses or publishes."""
+    if expected_sha256 is not None and (not isinstance(expected_sha256, str) or not DIGEST.fullmatch(expected_sha256)):
+        raise ArtifactError("invalid expected byte identity")
+    with open_regular(path) as stream:
+        raw = stream.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise ArtifactError("compact metadata byte cap exceeded")
+    if expected_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ArtifactError("compact metadata source hash mismatch")
+    return raw
+
+
 def canonical(value):
     check_json(value)
     try:

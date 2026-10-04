@@ -86,6 +86,8 @@ bool ria_graph_hash(const ria_graph_options *options,uint32_t engram_index,
                      const int64_t history[4],uint64_t ids[RIA_GRAPH_HASH_COLUMNS],ria_error *error);
 bool ria_graph_create(const ria_tensor_store *store,const ria_graph_options *options,
                        ria_graph_remote remote,ria_graph **out,ria_error *error);
+/* On failed CUDA drain/release, retains the poisoned owner/backing. The
+ * serving owner must terminate before freeing borrowed TensorStore operands. */
 bool ria_graph_destroy(ria_graph *graph,ria_error *error);
 /* Reset drains CUDA, clears all private source caches/partial groups/history;
  * no snapshot or truncated replay. Epoch/generation identify this session. */
@@ -107,7 +109,11 @@ uint64_t ria_graph_pinned_bytes(const ria_graph *graph);
 bool ria_graph_step(ria_graph *graph,uint32_t token,bool image_span,
                      const float *image_embedding,float logits[RIA_GRAPH_VOCAB],ria_error *error);
 /* Exact causal token-at-a-time prefill; rows are bounded within one session.
- * Optional logits receives every position for teacher-forced validation. */
+ * Its operator schedule matches source seqlen=1 forwards: an initial one-slot
+ * window, then decode-form 128 sparse ring slots with invalid holes retained
+ * through the 64-slot BF16 attention probability boundary. Optional logits
+ * receives every position for teacher-forced validation. This does not yet
+ * implement the required bounded per-layer grouped-row prefill scheduler. */
 bool ria_graph_prefill(ria_graph *graph,const uint32_t *tokens,uint64_t count,
                         float *last_logits,float *all_logits,ria_error *error);
 /* patches are source-normalized [n_vit_h*n_vit_w,3*14*14] host floats.

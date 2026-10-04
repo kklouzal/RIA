@@ -32,6 +32,9 @@ bool ria_api_header(const char *bytes, size_t length, const char *bearer,
 uint64_t ria_engine_frontend_budget(const ria_engine *);
 bool ria_engine_open(const char *service_path, uint64_t frontend_owner_bytes,
                      ria_engine **, ria_error *);
+/* Failure may retain a graph with unproved CUDA completion and its borrowed
+ * TensorStore/backing. The serving owner must terminate the process; it must
+ * not release external graph users/operands or attempt engine recovery. */
 bool ria_engine_close(ria_engine *, ria_error *);
 bool ria_engine_claim(ria_engine *, uint64_t context, ria_error *);
 void ria_engine_release(ria_engine *);

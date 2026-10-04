@@ -242,11 +242,11 @@ bool ria_numa_account_store(const ria_tensor_store *s,const ria_expert_config *c
   /* Worker arenas are physically bound to their pool's node. Network, TLS,
    * metadata and the lifecycle owner live on the first selected node. */
   uint64_t worker_bytes;
-  if (!ria_u64_mul(c->worker_count,UINT64_C(2097152),&worker_bytes) || worker_bytes>c->host_runtime_bytes)
+  if (!ria_u64_mul(c->worker_count,RIA_NUMA_WORKER_BYTES,&worker_bytes) || worker_bytes>c->host_runtime_bytes)
     return ria_fail(e,RIA_RESOURCE_LIMIT,"host runtime reserve cannot hold fixed node-local worker arenas");
   for (unsigned i=0;i<c->node_count;i++) {
     uint64_t n;
-    if (!ria_u64_mul(c->nodes[i].workers,UINT64_C(2097152),&n)) goto overflow;
+    if (!ria_u64_mul(c->nodes[i].workers,RIA_NUMA_WORKER_BYTES,&n)) goto overflow;
     if (!i && !ria_u64_add(n,c->host_runtime_bytes-worker_bytes,&n)) goto overflow;
     if (!ria_u64_add(a->node_bytes[i],n,&a->node_bytes[i]) || a->node_bytes[i]>c->nodes[i].local_bytes)
       return ria_fail(e,RIA_RESOURCE_LIMIT,"physical NUMA population/reserve exceeds local admitted budget");

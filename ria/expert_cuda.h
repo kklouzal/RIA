@@ -25,6 +25,8 @@ bool ria_expert_cuda_resident_required_bytes(const ria_expert *,uint64_t *bytes,
  * pinned pool, no full-bank registration or mutable automatic eviction. */
 bool ria_expert_cuda_resident_create(ria_expert_cuda *,const ria_expert *,uint64_t budget,
                                     ria_expert_cuda_resident *,ria_error *);
+/* A failed wait/release preserves the view for process termination; callers
+ * must not release borrowed host operands or attempt executor recovery. */
 bool ria_expert_cuda_resident_destroy(ria_expert_cuda_resident *,ria_error *);
 uint64_t ria_expert_cuda_resident_bytes(const ria_expert_cuda_resident *);
 /* DEVICE input/output [5120] generic selected expert, coefficient host scalar.
@@ -57,6 +59,8 @@ bool ria_expert_cuda_create_pooled(int device,uint64_t max_input,uint64_t max_in
                                   uint64_t max_output,uint64_t max_rows,uint64_t tile_rows,
                                   uint64_t workspace_budget,uint64_t pinned_budget,
                                   ria_expert_cuda **out,ria_error *error);
+/* A failed drain/release retains the context and live pinned/device owners.
+ * The policy owner terminates the process before releasing source operands. */
 bool ria_expert_cuda_destroy(ria_expert_cuda *context,ria_error *error);
 uint64_t ria_expert_cuda_workspace_bytes(const ria_expert_cuda *context);
 uint64_t ria_expert_cuda_metadata_bytes(void);

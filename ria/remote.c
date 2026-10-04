@@ -14,6 +14,9 @@ struct ria_remote {
   ria_binding binding;
   pthread_mutex_t lifecycle;
   uint64_t generation, invocation;
+  unsigned expert_group_limit, row_group_limit;
+  float *expert_results;
+  uint8_t *row_results;
   bool aborted;
 };
 bool ria_request_charge(uint16_t kind, uint64_t request, uint64_t response,
@@ -21,9 +24,12 @@ bool ria_request_charge(uint16_t kind, uint64_t request, uint64_t response,
   /* Schema-v1 fixed credit table. The 8MiB expert allowance covers the
    * selected executor's admitted <=64x5120 / intermediate2304 tile64
    * workspace, descriptors, FP32 host row/output staging and quantizers.
-   * Actual endpoint pools are separately checked against the memory plan. */
+   * A typed terminal error may exceed a small successful reply; reserve the
+   * larger payload at both endpoints. Actual endpoint pools are separately
+   * checked against the memory plan. */
   uint64_t workspace =
       (kind == RIA_EXPERT || kind == RIA_SHARED) ? UINT64_C(8388608) : 0;
+  if (response<RIA_ERROR_MAX) response=RIA_ERROR_MAX;
   return (ria_u64_add(request, response, charge) &&
           ria_u64_add(*charge, workspace, charge) &&
           ria_u64_add(*charge, 2 * RIA_HEADER_BYTES, charge)) ||
@@ -65,6 +71,51 @@ static bool canonical(const char *input, size_t bytes, char **output,
   ria_json_free(&d);
   return ok;
 }
+static bool remote_error(const ria_header *h,const uint8_t *payload,ria_error *e) {
+  ria_json_doc d={0};
+  if (!ria_control_json(payload,(size_t)h->payload_length,h,&d,e)) { ria_json_free(&d); return false; }
+  const char *message=NULL; size_t n=0;
+  bool ok=ria_json_string(&d,ria_json_get(&d,0,"message"),&message,&n,e);
+  if (ok) {
+    size_t limit=n>192 ? 192 : n;
+    while (limit && limit<n && ((unsigned char)message[limit]&0xc0)==0x80) limit--;
+    ria_error_set(e,(int)h->status,"remote operation failed: %.*s",(int)limit,message);
+  }
+  ria_json_free(&d); return false;
+}
+static bool group_limits(ria_remote *r,ria_error *e) {
+  const ria_limits *l=&r->binding.limits; uint64_t progress,room;
+  if (!ria_u64_add(r->binding.progress_bytes[0],r->binding.progress_bytes[1],&progress) ||
+      !ria_u64_add(progress,r->binding.progress_bytes[2],&progress) || progress>=l->inflight_payload_bytes)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"protected progress leaves no expert unit");
+  room=l->inflight_payload_bytes-progress;
+  for (unsigned entries=1;entries<=RIA_GRAPH_SELECTED;entries++) {
+    uint64_t request,response,charge;
+    if (!ria_expert_lengths(1,entries,RIA_GRAPH_DIM,RIA_GRAPH_DIM,0,&request,&response,e) ||
+        !ria_request_charge(RIA_EXPERT,request,response,&charge,e)) return false;
+    if (request>l->frame_payload_bytes || response>l->frame_payload_bytes || charge>room) break;
+    r->expert_group_limit=entries;
+  }
+  uint64_t rows=(l->frame_payload_bytes-24)/(264+16);
+  uint64_t request_rows=(l->frame_payload_bytes-16)/16;
+  if (rows>request_rows) rows=request_rows;
+  if (rows>l->row_lookup_rows) rows=l->row_lookup_rows;
+  if (rows>RIA_GRAPH_HASH_COLUMNS) rows=RIA_GRAPH_HASH_COLUMNS;
+  r->row_group_limit=(unsigned)rows;
+  if (l->frame_payload_bytes<RIA_ERROR_MAX || !r->expert_group_limit || !r->row_group_limit)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"binding cannot hold one native expert/Engram/error unit");
+  /* Only split realizations need an extra atomic-publication staging pool.
+   * Fixed sizes are included in endpoint runtime admission; no HOT allocation. */
+  if (r->expert_group_limit<RIA_GRAPH_SELECTED) {
+    r->expert_results=calloc(RIA_GRAPH_SELECTED*RIA_GRAPH_DIM,sizeof(float));
+    if (!r->expert_results) return ria_fail(e,RIA_RESOURCE_LIMIT,"split expert publication pool unavailable");
+  }
+  if (r->row_group_limit<RIA_GRAPH_HASH_COLUMNS) {
+    r->row_results=calloc(RIA_GRAPH_HASH_COLUMNS,264);
+    if (!r->row_results) return ria_fail(e,RIA_RESOURCE_LIMIT,"split row publication pool unavailable");
+  }
+  return true;
+}
 static bool exchange(ria_remote *r, uint16_t kind, const void *request,
                      uint64_t request_bytes, uint64_t response_bytes,
                      ria_header *reply_header, uint8_t **reply, ria_error *e) {
@@ -97,26 +148,16 @@ static bool exchange(ria_remote *r, uint16_t kind, const void *request,
     goto fail;
   if (write_deadline > deadline)
     write_deadline = deadline;
+  uint64_t receive_limit=response_bytes>RIA_ERROR_MAX ? response_bytes : RIA_ERROR_MAX;
+  if (receive_limit>r->binding.limits.frame_payload_bytes) receive_limit=r->binding.limits.frame_payload_bytes;
   if (!ria_transport_send(t, &h, request, write_deadline, e) ||
       !ria_transport_frame(t, deadline, r->binding.limits.frame_io_timeout_ms,
-                           r->binding.limits.frame_payload_bytes, reply_header,
+                           receive_limit, reply_header,
                            reply, e) ||
       !ria_binding_response(&r->binding, reply_header, e))
     goto fail;
   if (reply_header->status) {
-    ria_json_doc d = {0};
-    if (!ria_control_json(*reply, (size_t)reply_header->payload_length,
-                          reply_header, &d, e)) {
-      ria_json_free(&d);
-      goto fail;
-    }
-    const char *message = NULL;
-    size_t n = 0;
-    if (ria_json_string(&d, ria_json_get(&d, 0, "message"), &message, &n, e))
-      ria_error_set(e, (int)reply_header->status,
-                    "remote operation failed: %.*s", (int)(n > 180 ? 180 : n),
-                    message);
-    ria_json_free(&d);
+    remote_error(reply_header,*reply,e);
     goto fail;
   }
   return true;
@@ -177,6 +218,13 @@ static bool bind_control(ria_remote *r, const ria_remote_options *o,
                           RIA_CONTROL_MAX, &reply, &payload, e);
   ria_json_doc response = {0}, original = {0};
   ria_limits agreed;
+  if (ok && reply.status) {
+    uint8_t session_bits=0;
+    for (unsigned i=0;i<16;i++) session_bits|=reply.session[i];
+    if (reply.kind!=RIA_BIND || reply.flags!=1 || reply.request_id!=1 || reply.epoch || session_bits)
+      ok=ria_fail(e,RIA_IDENTITY_MISMATCH,"failed initial Bind changed association/session");
+    else ok=remote_error(&reply,payload,e);
+  }
   if (ok)
     ok = reply.kind == RIA_BIND && reply.flags == 1 && reply.request_id == 1 &&
          !reply.status &&
@@ -235,7 +283,7 @@ static bool bind_control(ria_remote *r, const ria_remote_options *o,
     ria_binding_init(&r->binding, &agreed);
     ok = ria_progress_charges(&agreed, &control, &row, &bulk, e) &&
          ria_binding_protect(&r->binding, control, row, bulk, e) &&
-         ria_binding_install(&r->binding, session, epoch, cap, e);
+         ria_binding_install(&r->binding, session, epoch, cap, e) && group_limits(r,e);
   }
   OPENSSL_cleanse(cap, sizeof(cap));
   free(json);
@@ -280,10 +328,11 @@ static bool bind_bulk(ria_remote *r, ria_error *e) {
             ria_transport_frame(&r->bulk, deadline,
                                 r->service->limits.frame_io_timeout_ms,
                                 RIA_CONTROL_MAX, &reply, &payload, e) &&
-            reply.kind == RIA_BIND_BULK && reply.flags == 1 && !reply.status &&
+            reply.kind == RIA_BIND_BULK && reply.flags == 1 &&
             reply.request_id == 1 && reply.epoch == h.epoch &&
             !memcmp(reply.session, h.session, 16);
   ria_json_doc d = {0};
+  if (ok && reply.status) ok=remote_error(&reply,payload,e);
   if (ok)
     ok = ria_control_json(payload, (size_t)reply.payload_length, &reply, &d,
                           e) &&
@@ -345,6 +394,7 @@ bool ria_remote_open(ria_remote **out, const ria_remote_options *o,
     ria_transport_close(&r->bulk);
     ria_tls_destroy(&r->tls);
     pthread_mutex_destroy(&r->lifecycle);
+    free(r->expert_results); free(r->row_results);
     free(r);
     return false;
   }
@@ -386,11 +436,14 @@ bool ria_remote_evaluate(ria_remote *r, uint32_t layer, uint64_t invocation,
       !experts || !slots || !coefficients || !output)
     return ria_fail(e, RIA_INVALID_REQUEST, "invalid remote expert invocation");
   uint32_t entries = offsets[rows];
+  if (!entries || entries>rows*(shared ? 1u : RIA_GRAPH_SELECTED))
+    return ria_fail(e,RIA_INVALID_REQUEST,"remote selection exceeds declared row contract");
   uint64_t request_bytes, response_bytes;
   if (!ria_expert_lengths(rows, entries, 5120, 5120, 0, &request_bytes,
                           &response_bytes, e) ||
-      request_bytes > SIZE_MAX)
-    return false;
+      request_bytes > SIZE_MAX || request_bytes>r->binding.limits.frame_payload_bytes ||
+      response_bytes>r->binding.limits.frame_payload_bytes || rows>r->binding.limits.expert_rows)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"expert unit exceeds agreed frame/row limit");
   uint8_t *p = calloc(1, (size_t)request_bytes);
   if (!p)
     return ria_fail(e, RIA_RESOURCE_LIMIT, "expert request allocation failed");
@@ -451,7 +504,13 @@ bool ria_remote_rows(ria_remote *r, uint32_t layer, const uint64_t *rows,
       count > r->binding.limits.row_lookup_rows)
     return ria_fail(e, RIA_INVALID_REQUEST, "invalid remote Engram rows");
   uint64_t handle = layer == 1 ? 1 : 2;
-  size_t length = 16 + (size_t)count * 16;
+  uint64_t pairs,request_bytes,response_bytes;
+  if (!ria_u64_mul(count,16,&pairs) || !ria_u64_add(16,pairs,&request_bytes) ||
+      !ria_u64_mul(count,280,&response_bytes) || !ria_u64_add(24,response_bytes,&response_bytes) ||
+      request_bytes>r->binding.limits.frame_payload_bytes || response_bytes>r->binding.limits.frame_payload_bytes ||
+      request_bytes>SIZE_MAX)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"Engram unit exceeds agreed frame limit");
+  size_t length=(size_t)request_bytes;
   uint8_t *p = calloc(1, length);
   if (!p)
     return ria_fail(e, RIA_RESOURCE_LIMIT, "Engram request allocation failed");
@@ -485,16 +544,27 @@ static bool callback_experts(void *c, uint32_t layer, const float *input,
                              const uint16_t *slots, uint32_t count, float *out,
                              ria_error *e) {
   ria_remote *r = c;
-  if (r->invocation == UINT64_MAX)
+  if (count>RIA_GRAPH_SELECTED || !count || !input || !ids || !weights || !slots || !out || !r->expert_group_limit)
+    return ria_fail(e,RIA_INVALID_REQUEST,"selected expert count exceeds native graph contract");
+  unsigned groups=(count+r->expert_group_limit-1)/r->expert_group_limit;
+  if (UINT64_MAX-r->invocation<groups) {
+    retire(r);
     return ria_fail(e, RIA_RESOURCE_LIMIT,
                     "logical invocation counter exhausted");
-  uint64_t id = ++r->invocation;
-  uint32_t offsets[2] = {0, count};
-  if (count > 6)
-    return ria_fail(e, RIA_INVALID_REQUEST,
-                    "selected expert count exceeds native graph contract");
-  return ria_remote_evaluate(r, layer, id, 1, &id, offsets, ids, slots, weights,
-                             input, false, out, e);
+  }
+  uint64_t row_id=r->invocation+1;
+  if (count<=r->expert_group_limit) {
+    uint64_t invocation=++r->invocation; uint32_t offsets[2]={0,count};
+    return ria_remote_evaluate(r,layer,invocation,1,&row_id,offsets,ids,slots,weights,input,false,out,e);
+  }
+  for (unsigned begin=0;begin<count;) {
+    unsigned n=count-begin; if (n>r->expert_group_limit) n=r->expert_group_limit;
+    uint64_t invocation=++r->invocation; uint32_t offsets[2]={0,n};
+    if (!ria_remote_evaluate(r,layer,invocation,1,&row_id,offsets,ids+begin,slots+begin,weights+begin,
+                            input,false,r->expert_results+(size_t)begin*RIA_GRAPH_DIM,e)) return false;
+    begin+=n;
+  }
+  memcpy(out,r->expert_results,(size_t)count*RIA_GRAPH_DIM*sizeof(float)); return true;
 }
 static bool callback_engram(void *c, uint32_t layer, const uint64_t *ids,
                             uint32_t count, uint8_t *out, ria_error *e) {
@@ -503,9 +573,16 @@ static bool callback_engram(void *c, uint32_t layer, const uint64_t *ids,
   if (count > 24)
     return ria_fail(e, RIA_INVALID_REQUEST,
                     "Engram columns exceed source graph contract");
+  if (!count || !ids || !out || !r->row_group_limit) return ria_fail(e,RIA_INVALID_REQUEST,"invalid Engram callback unit");
   for (uint32_t i = 0; i < count; i++)
     associations[i] = i;
-  return ria_remote_rows(r, layer, ids, associations, count, out, e);
+  if (count<=r->row_group_limit) return ria_remote_rows(r,layer,ids,associations,count,out,e);
+  for (unsigned begin=0;begin<count;) {
+    unsigned n=count-begin; if (n>r->row_group_limit) n=r->row_group_limit;
+    if (!ria_remote_rows(r,layer,ids+begin,associations+begin,n,r->row_results+(size_t)begin*264,e)) return false;
+    begin+=n;
+  }
+  memcpy(out,r->row_results,(size_t)count*264); return true;
 }
 ria_graph_remote ria_remote_callbacks(ria_remote *r) {
   return (ria_graph_remote){r, callback_experts, callback_engram};
@@ -570,6 +647,7 @@ bool ria_remote_close(ria_remote *r, ria_error *e) {
   pthread_mutex_unlock(&r->lifecycle);
   ria_tls_destroy(&r->tls);
   pthread_mutex_destroy(&r->lifecycle);
+  free(r->expert_results); free(r->row_results);
   free(r);
   return ok;
 }

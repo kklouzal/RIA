@@ -34,6 +34,12 @@ typedef struct {
   uint8_t manifest_digest[32], logical_model_digest[32],
       operator_contract_digest[32];
 } ria_service;
+/* Pure configuration parsing shared by metadata-only inventory and serving.
+ * It checks chosen reservations/affinities against caps, without requiring an
+ * admitted model or inspecting physical topology. Serving additionally checks
+ * the immutable plan and actual placement before readiness. */
+bool ria_expert_config_parse(const ria_json_doc *,uint32_t,const char *,
+                             uint64_t,uint64_t,uint64_t,ria_expert_config *,ria_error *);
 bool ria_service_read(ria_service *service, const char *path, ria_error *error);
 void ria_service_free(ria_service *service);
 bool ria_service_grant(const ria_service *service,

@@ -28,10 +28,11 @@ def fixture_bundle(tmp_path, domain="number"):
     cell = {"profile": "nvfp4", "server_executor": "cpu",
         "client_residency": "resident_reference", "placement": "all_remote",
         "phase": "prefill", "numa_policy": "sharded"}
-    cells, gates = [cell], ["G01"]
-    runtime = {"schema_revision": 1, "kind": "physical_runtime_identity", **common}
-    plan = {"schema_revision": 1, "kind": "physical_contract_plan", **common,
-        "qualification_scope": "final_release", "registered_at": "2026-01-01T00:00:01Z",
+    cells, gates = [], []
+    runtime = {"schema_revision": 2, "kind": "physical_runtime_identity", **common}
+    plan = {"schema_revision": 2, "kind": "physical_contract_plan", **common,
+        "qualification_scope": "unqualified_diagnostic", "registered_at": "2026-01-01T00:00:01Z",
+        "gate_catalog_digest": physical.gate_catalog()["digest"],
         "binary_sha256": "7" * 64, "max_elapsed_ns": "1000",
         "runtime_reference": {"path": "runtime.json", "digest": "0" * 64},
         "required_cells": copy.deepcopy(cells), "required_gates": gates[:],
@@ -39,8 +40,8 @@ def fixture_bundle(tmp_path, domain="number"):
             "minimum": "1" if domain == "u64" else 1,
             "maximum": "10" if domain == "u64" else 10,
             "cells": copy.deepcopy(cells), "gates": gates[:]}]}
-    raw = {"schema_revision": 1, "kind": "physical_contract_measurements", **common,
-        "classification": "physical", "plan_digest": "0" * 64,
+    raw = {"schema_revision": 2, "kind": "physical_contract_measurements", **common,
+        "classification": "unqualified_measurements", "plan_digest": "0" * 64,
         "execution": {"run_id": "8" * 64, "started_at": "2026-01-01T00:00:02Z",
             "clock": "CLOCK_MONOTONIC", "elapsed_ns": "50", "pid": 123,
             "complete_child_lifetime": True, "child_exit_code": 0, "child_signal": None,
@@ -48,14 +49,15 @@ def fixture_bundle(tmp_path, domain="number"):
         "measurements": [{"check_id": "synthetic_latency", "measurement_id": "synthetic_run_latency",
             "unit": "ns", "value": "5" if domain == "u64" else 5,
             "cells": copy.deepcopy(cells), "gates": gates[:]}]}
-    proof = {"schema_revision": 1, "kind": "physical_contract_evidence", **common,
-        "classification": "physical", "qualification_scope": "final_release",
+    proof = {"schema_revision": 2, "kind": "physical_contract_evidence", **common,
+        "classification": "unqualified_measurements", "qualification_scope": "unqualified_diagnostic",
         "plan_reference": {"path": "plan.json", "digest": "0" * 64},
         "raw_evidence": [{"path": "raw.json", "digest": "0" * 64}],
         "covered_cells": copy.deepcopy(cells), "covered_gates": gates[:],
         "checks": [{"id": "synthetic_latency", "measurement_id": "synthetic_run_latency",
                     "raw_digest": "0" * 64, "passed": True}], "passed": True}
-    bundle = {"policy": policy, "runtime": runtime, "plan": plan, "raw": raw, "proof": proof}
+    bundle = {"policy": policy, "runtime": runtime, "plan": plan, "raw": raw, "proof": proof,
+              "synthetic_cell": cell}
     publish(tmp_path, bundle)
     return bundle
 
@@ -116,7 +118,7 @@ def test_number_bounds_are_inclusive(tmp_path, value):
     assert validate(bundle, tmp_path)
 
 
-def test_one_sided_bound_and_gate_only_report(tmp_path):
+def test_one_sided_bound_diagnostic_grants_no_coverage(tmp_path):
     bundle = fixture_bundle(tmp_path)
     bundle["plan"]["checks"][0]["minimum"] = None
     for document, field in [("plan", "required_cells"), ("proof", "covered_cells")]:
@@ -206,9 +208,7 @@ def test_malformed_physical_reports_fail_closed(tmp_path, case):
         extra["value"] = 6
         raw["measurements"].append(extra)
     elif case == "no_coverage":
-        plan.update(required_cells=[], required_gates=[])
-        proof.update(covered_cells=[], covered_gates=[])
-        check.update(cells=[], gates=[])
+        proof["qualification_scope"] = "final_release"
     elif case == "unassigned_gate":
         plan["required_gates"].append("G02")
         proof["covered_gates"].append("G02")
@@ -217,11 +217,11 @@ def test_malformed_physical_reports_fail_closed(tmp_path, case):
     elif case == "unplanned_gate":
         measured["gates"].append("G02")
     elif case == "unplanned_cell":
-        measured["cells"][0]["placement"] = "vram_hit"
+        measured["cells"].append({**bundle["synthetic_cell"], "placement": "vram_hit"})
     elif case == "mismatched_profile_cell":
-        proof["covered_cells"][0]["profile"] = "fp8"
+        proof["covered_cells"].append({**bundle["synthetic_cell"], "profile": "fp8"})
     elif case == "mismatched_executor_cell":
-        proof["covered_cells"][0]["server_executor"] = "cuda"
+        proof["covered_cells"].append({**bundle["synthetic_cell"], "server_executor": "cuda"})
     elif case == "wrong_unit":
         measured["unit"] = "ms"
     elif case == "wrong_domain":
@@ -351,5 +351,42 @@ def test_more_than_4096_raw_references_is_rejected_before_io(tmp_path):
     bundle["proof"]["raw_evidence"] = [{"path": f"raw{index}.json", "digest": "a" * 64}
                                        for index in range(4097)]
     bundle["proof"] = seal(bundle["proof"])
+    with pytest.raises(ArtifactError, match="strict schema"):
+        validate(bundle, tmp_path)
+
+
+@pytest.mark.parametrize("claim", ["all_gates", "one_gate", "one_cell", "final_release"])
+def test_numeric_diagnostic_cannot_claim_release_obligations(tmp_path, claim):
+    bundle = fixture_bundle(tmp_path)
+    proof = bundle["proof"]
+    if claim == "all_gates":
+        proof["covered_gates"] = [f"G{index:02}" for index in range(1, 29)]
+    elif claim == "one_gate":
+        proof["covered_gates"] = ["G01"]
+    elif claim == "one_cell":
+        proof["covered_cells"] = [bundle["synthetic_cell"]]
+    else:
+        proof["qualification_scope"] = "final_release"
+    publish(tmp_path, bundle)
+    with pytest.raises(ArtifactError, match="missing gate/cell-specific semantic producer software"):
+        validate(bundle, tmp_path)
+
+
+@pytest.mark.parametrize("document,field", [("plan", "required_cells"), ("plan", "required_gates"),
+    ("raw", "cells"), ("raw", "gates"), ("check", "cells"), ("check", "gates")])
+def test_release_assignment_cannot_be_hidden_below_diagnostic_proof(tmp_path, document, field):
+    bundle = fixture_bundle(tmp_path)
+    target = bundle["plan"]["checks"][0] if document == "check" else \
+             bundle["raw"]["measurements"][0] if document == "raw" else bundle[document]
+    target[field] = [bundle["synthetic_cell"]] if "cells" in field else ["G01"]
+    publish(tmp_path, bundle)
+    with pytest.raises(ArtifactError, match="strict schema"):
+        validate(bundle, tmp_path)
+
+
+def test_numeric_plan_binds_fixed_specification_obligation_catalog(tmp_path):
+    bundle = fixture_bundle(tmp_path)
+    bundle["plan"]["gate_catalog_digest"] = "0" * 64
+    publish(tmp_path, bundle)
     with pytest.raises(ArtifactError, match="strict schema"):
         validate(bundle, tmp_path)

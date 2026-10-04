@@ -594,6 +594,14 @@ def finalize(request, probe, inventory, calibration, output, *, probe_evidence=N
         raise ArtifactError("provisioned model differs from planning identity")
     if model_manifest["role"] != ("client" if planning["role"] == "client" else "server"):
         raise ArtifactError("provisioned model role differs from local service")
+    # Re-derive with the serving metadata/NUMA accountant. A selfsealed caller
+    # inventory cannot omit allocations, replicas or phases to gain admission.
+    from .inventory import build_inventory
+    with tempfile.TemporaryDirectory(prefix="ria-finalize-inventory-") as temporary:
+        actual_inventory = build_inventory(request, Path(request["environment"]["model_dir"]) / "manifest.json",
+            Path(temporary) / "inventory.json", runner=runner)
+    if inventory != actual_inventory:
+        raise ArtifactError("inventory differs from authenticated native population/runtime derivation; regenerate it")
     if placement is not None:
         if placement["runtime"]["tokenizer_sha256"] != model_manifest["tokenizer_digest"]:
             raise ArtifactError("client placement tokenizer identity differs from prepared model")

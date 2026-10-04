@@ -28,6 +28,9 @@ uint64_t ria_graph_cuda_pinned_bytes(const ria_graph_cuda *);
 float *ria_graph_cuda_buffer(ria_graph_cuda *,unsigned buffer);
 void *ria_graph_cuda_stream(ria_graph_cuda *);
 bool ria_graph_cuda_reset(ria_graph_cuda *,ria_error *);
+/* Every source forward starts from an identity pre-mix. This resets only
+ * per-token mHC coefficients, retaining attention/index/compressor history. */
+bool ria_graph_cuda_begin_step(ria_graph_cuda *,ria_error *);
 bool ria_graph_cuda_drain(ria_graph_cuda *,ria_error *);
 bool ria_graph_cuda_copy(ria_graph_cuda *,float *destination,const float *source,uint64_t count,ria_error *);
 bool ria_graph_cuda_upload(ria_graph_cuda *,float *destination,const float *source,uint64_t count,ria_error *);
@@ -56,7 +59,9 @@ bool ria_graph_cuda_index_scores(ria_graph_cuda *,const float *q,const float *we
 bool ria_graph_cuda_index_download(ria_graph_cuda *,uint64_t first,uint64_t count,float *host,ria_error *);
 bool ria_graph_cuda_select(ria_graph_cuda *,uint64_t count,bool candidate_source,bool uses_candidates,
                            uint32_t *selected,uint32_t *selected_count,ria_error *);
-bool ria_graph_cuda_attention(ria_graph_cuda *,const float *q,const float *kv,uint64_t count,
+/* Preserve source sparse-slot order, including [masked_begin,masked_end)
+ * holes: its online-softmax BF16 boundary is scoped to each 64-slot tile. */
+bool ria_graph_cuda_attention(ria_graph_cuda *,const float *q,const float *kv,uint64_t count,uint64_t masked_begin,uint64_t masked_end,
                               const ria_tensor *sink,float *output,ria_error *);
 bool ria_graph_cuda_route(ria_graph_cuda *,const float *scores,const ria_tensor *bias,
                           uint16_t ids[6],float coefficients[6],ria_error *);

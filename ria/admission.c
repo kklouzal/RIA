@@ -122,7 +122,7 @@ bool ria_admission_compute(const ria_json_doc *request, const ria_json_doc *inve
                                              "digest"};
     static const char *const inv_fields[] = {
         "schema_revision",        "logical_model_digest", "operator_contract_digest",
-        "semantic_max_positions", "allocations",          "digest"};
+        "semantic_max_positions", "allocations",          "digest", "derivation"};
     static const char *const probe_fields[] = {
         "schema_revision", "role", "executor",  "host_bytes", "device_bytes",
         "pinned_bytes",    "numa", "qualified", "environment_digest", "build_digest", "evidence_digest", "digest"};
@@ -132,7 +132,7 @@ bool ria_admission_compute(const ria_json_doc *request, const ria_json_doc *inve
     if (!ria_json_fields(request, 0, req_fields, COUNT(req_fields), req_fields,
                          COUNT(req_fields) - 1, e) ||
         !ria_json_fields(inventory, 0, inv_fields, COUNT(inv_fields), inv_fields,
-                         COUNT(inv_fields) - 1, e) ||
+                         COUNT(inv_fields) - 2, e) ||
         !ria_json_fields(probe, 0, probe_fields, COUNT(probe_fields), probe_fields,
                          COUNT(probe_fields), e) ||
         !ria_json_fields(calibration, 0, cal_fields, COUNT(cal_fields), cal_fields,
@@ -224,6 +224,16 @@ bool ria_admission_compute(const ria_json_doc *request, const ria_json_doc *inve
         !integer(inventory, 0, "semantic_max_positions", &semantic, e) ||
         !plan->context_positions || plan->context_positions > semantic)
         return ria_fail(e, RIA_RESOURCE_LIMIT, "context exceeds semantic position contract");
+    uint32_t derivation=ria_json_get(inventory,0,"derivation");
+    if (derivation!=RIA_JSON_NONE) {
+        const char *const fields[]={"manifest_digest","runtime_policy_digest","request_digest","context_positions"};
+        uint8_t derived_digest[32];uint64_t derived_context;
+        if (!ria_json_fields(inventory,derivation,fields,4,fields,4,e)) return false;
+        for (unsigned i=0;i<3;i++)
+            if (!ria_json_digest_field(inventory,ria_json_get(inventory,derivation,fields[i]),derived_digest,e)) return false;
+        if (!integer(inventory,derivation,"context_positions",&derived_context,e) || derived_context!=semantic)
+            return ria_fail(e,RIA_IDENTITY_MISMATCH,"inventory derivation context differs from semantic bound");
+    }
     const ria_json_node *allocations =
         ria_json_at(inventory, ria_json_get(inventory, 0, "allocations"));
     if (!allocations || allocations->type != RIA_JSON_ARRAY || allocations->child == RIA_JSON_NONE)
