@@ -26,7 +26,7 @@ The recommended workflow uses **one `ria-setup` administrative container per hos
 
 Follow the [complete automated setup guide](docs/ria-container-setup.md) for templates, every configuration group, canonical mounts, CPU/CUDA launches, flags, status, shutdown and recovery. Host driver/Engine installation and reviewed resource/numerical/workload policies remain explicit. The setup image contains its Python/preparation/native inventory/Docker/Compose dependencies; the host build/tools and manual file transfer steps below belong to the **advanced manual workflow**.
 
-The new setup image and matching role images are awaiting the final automated-build publication for this source change. The existing immutable CPU/CUDA pins below remain valid for the preceding manual workflow and do not contain this automation. This paragraph will be replaced with actual verified matching three-image pins after CI completes. No setup or image build establishes final release qualification; the existing software/hardware limits below remain.
+The three matching immutable images are published and listed below. Use `SETUP_IMAGE` for administration, `CPU_IMAGE` for a CPU expert, and `CUDA_IMAGE` for the client or a CUDA expert. All three come from the same verified source. The setup image is a distinct image in the existing public `ria-cpu` package. No setup or image build establishes final release qualification; the existing software/hardware limits below remain.
 
 ## Machines, images and prerequisites
 
@@ -38,16 +38,17 @@ The new setup image and matching role images are awaiting the final automated-bu
 
 The client always uses CUDA, including when the expert uses CPU. CUDA binaries contain `sm_120a` AOT code, with no PTX fallback. Do not substitute ARM64, another GPU architecture, MIG identities or an arbitrary device ordinal. The selected physical UUID becomes the sole visible device, addressed as container device index `0`. Use the `GPU-` prefix and lowercase hexadecimal UUID consistently in preflight, requests and registration; the native fixture schema requires that spelling.
 
-Use these immutable, published `linux/amd64` images with optional certificates and NVIDIA NGC CUDA **13.4.2** for GPU roles. Their runtime source is `d9d0b6e1692c005772358abdd5ed01e1fc03cb4a`:
+Use these immutable, published `linux/amd64` images with container-managed setup, optional certificates and NVIDIA NGC CUDA **13.4.2** for GPU roles. Their runtime source is `d0288edbaa35c55d3fae43988bc69568cbc5615e`:
 
 ```bash
-CPU_IMAGE='ghcr.io/kklouzal/ria-cpu@sha256:11e89db1681fadb9aa092ec94078d42e850b4b5c5b3c5e879d89f1059c7160a4'
-CUDA_IMAGE='ghcr.io/kklouzal/ria-cuda@sha256:dceb8971fa01fcdf474624cbafe87e3eec617c4ef78b35dc1e73f71445e47a09'
+SETUP_IMAGE='ghcr.io/kklouzal/ria-cpu@sha256:d56c5bdf818ae76df742fd9329c77883e78072f35b1a5bef13fd19b60a6bf08a'
+CPU_IMAGE='ghcr.io/kklouzal/ria-cpu@sha256:bdffdedc410b434284bd51cbc1ddc10f4d1a952dd650f9e578b3cf685b313bb7'
+CUDA_IMAGE='ghcr.io/kklouzal/ria-cuda@sha256:331467089483f84cded050fc95e2f6671f3229512443cc795fcc3c621891434c'
 ```
 
-Both are publicly pullable. [The successful build/check run](https://github.com/kklouzal/RIA/actions/runs/37227441606), [publication identities](locks/verification/ngc-cuda-publication.json) and [handoff](docs/ria-handoff.md) record the verification scope. GHCR images include build metadata and published SBOM/provenance descriptors; descriptor presence does not establish verified attestation contents or signatures. Tags such as `latest` are not accepted deployment identities. Future images need their own build identities and fresh admission evidence.
+All three are publicly pullable without registry login. [The successful four-job build/check run](https://github.com/kklouzal/RIA/actions/runs/37240824381), [publication identities](locks/verification/container-setup-publication.json) and [handoff](docs/ria-handoff.md) record the verification scope. GHCR images include build metadata and published SBOM/provenance descriptors; descriptor presence does not establish verified attestation contents or signatures. Tags such as `latest` are not accepted deployment identities. Future images need their own build identities and fresh admission evidence.
 
-Install a **rootful Docker Engine**, its **Compose plugin**, and a host with **cgroup v2** using the [official Docker installation instructions](https://docs.docker.com/engine/install/). This orchestration uses the local `/var/run/docker.sock`; rootless, remote Docker contexts and Swarm are outside this path. Record actual Engine/Compose/kernel versions, rather than supplying example version strings. The automated setup image supplies its own pinned Docker/Compose client tools.
+Install a **rootful Docker Engine** on a host with **cgroup v2** using the [official Docker installation instructions](https://docs.docker.com/engine/install/). The automated setup image supplies its own pinned Docker/Compose client tools; the advanced manual workflow also needs the host Compose plugin. This orchestration uses the local `/var/run/docker.sock`; rootless, remote Docker contexts and Swarm are outside this path. Record actual Engine/Compose/kernel versions, rather than supplying example version strings.
 
 On each CUDA host, install an NVIDIA driver that supports the selected image's CUDA runtime, then NVIDIA Container Toolkit using its [official installation instructions](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Configure the rootful Docker runtime before recording the host baseline:
 
@@ -77,7 +78,7 @@ set -euo pipefail
 umask 077
 git clone --branch codex/ria-implementation https://github.com/kklouzal/RIA.git /opt/RIA
 cd /opt/RIA
-git checkout d9d0b6e1692c005772358abdd5ed01e1fc03cb4a
+git checkout d0288edbaa35c55d3fae43988bc69568cbc5615e
 python3.12 -m venv /opt/ria-venv
 RIA_PYTHON=/opt/ria-venv/bin/python
 "$RIA_PYTHON" -m pip install --require-hashes -r requirements-ria.txt
@@ -799,7 +800,7 @@ cd /opt/RIA
 "$RIA_PYTHON" tools/qualify_ria.py readiness --output /srv/ria/operator/readiness.json
 ```
 
-This currently returns **exit 1** because `release_ready` is false; the report is useful output, not a successful release gate. `matrix --output PATH` enumerates required cells but does not execute them. No full checkpoint, physical GPU/live model, hardware performance or soak validation was performed on the development host. Offline checks and publication evidence are recorded in [the once-over report](docs/ria-once-over.md) and [handoff guide](docs/ria-handoff.md). Free GitHub Actions currently run offline checks, amd64 CPU/CUDA builds and GHCR publication; there is no automated GPU/full-model physical qualification runner.
+This currently returns **exit 1** because `release_ready` is false; the report is useful output, not a successful release gate. `matrix --output PATH` enumerates required cells but does not execute them. No full checkpoint, physical GPU/live model, hardware performance or soak validation was performed on the development host. Offline checks and publication evidence are recorded in [the verification report](docs/ria-offline-verification.md) and [handoff guide](docs/ria-handoff.md). Free GitHub Actions run offline checks, a bounded model-free amd64 setup-transfer comparison, CPU/CUDA/setup image builds and GHCR publication; there is no automated GPU/full-model physical qualification runner.
 
 ## Original DwarfStar documentation
 

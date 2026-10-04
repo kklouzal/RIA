@@ -6,7 +6,11 @@ matching release on 2026-10-04 using the [official NGC catalog](https://catalog.
 and the complete anonymous registry tag list. The authoritative
 [container lock](../deploy/container-lock.json) records tags, index digests,
 amd64 manifest/config digests and inherited driver constraints. The CPU expert
-image keeps its Ubuntu base and requires no CUDA driver.
+and separate administrative setup image keep their CUDA-free Ubuntu bases.
+Neither requires a CUDA driver. The [setup controller](ria-container-setup.md)
+packages three CPU native binaries with checked ELF dependencies, hash-locked
+Python preparation dependencies and pinned Docker/Compose clients. Its root
+management entrypoint is distinct from the UID10001 native serving images.
 
 The `devel` builder supplies NVCC, runtime headers, libdevice and static cudart.
 RIA links `--cudart=static`, emits only SM120a cubins and retains strict numerical
@@ -38,7 +42,10 @@ is installed at `/usr/share/dwarfstar/runtime-linkage.json`. GitHub Actions
 exports build-info, AOT/raw inspection logs and runtime linkage in the
 `ria-cuda-toolchain-COMMIT` artifact, retained for seven days. The separate
 scratch exporter contains metadata only; the default Docker build remains the
-runtime image. CI builds and publishes both images after the offline gates.
+runtime image. CI builds and publishes CPU, CUDA and setup images after the
+offline gates and bounded model-free amd64 setup-transfer comparison. The setup
+image uses the existing public `ria-cpu` package with a distinct `setup-sha-`
+tag and immutable digest; it does not use the CUDA toolchain exporter.
 
 NVIDIA's [CUDA 13.4 release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/#cuda-driver)
 identify the corresponding driver branch as R615. CUDA 13.x [minor compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)

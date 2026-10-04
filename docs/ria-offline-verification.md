@@ -1,6 +1,45 @@
 # Offline implementation verification
 
-The NVIDIA NGC CUDA migration passed 608 Python fixtures/Ruff, 37 static checks
+Container-managed setup passed **1,043 Python fixtures with no privileged
+skips**, Ruff, 37 static checks and 27 zero-finding Clang analyses. All 47 schema
+files regenerate unchanged. Full ASan/UBSan/leak checks, five Clang18 TSan
+fixtures, three CPU binaries and six SM120a-only CUDA binaries passed. The
+[four-job hosted build](https://github.com/kklouzal/RIA/actions/runs/37240824381)
+passed for `d0288edbaa35c55d3fae43988bc69568cbc5615e` and published matching
+Linux amd64 CPU, CUDA and administrative setup images. Downloaded evidence
+matches all 3,782 committed source files and 3,713 frozen runtime inputs;
+actual CUDA 13.4.2 compiler/header/static-runtime/SDK, AOT/raw inspection and
+final-image ELF dependency identities were verified without GPU execution.
+Anonymous registry metadata verifies all three distinct images, their source,
+role/entrypoint, serving UID10001 versus administrative root, and SPDX/SLSA
+descriptors. Filesystem/attestation layers and signatures were not downloaded
+or verified. See [local evidence](../locks/verification/container-setup.json),
+[publication evidence](../locks/verification/container-setup-publication.json),
+[automated setup](ria-container-setup.md) and [handoff](ria-handoff.md).
+
+The hosted model-free transfer comparison independently verified 24 paired
+64MiB fetch/upload cases across TLS/plaintext and advisory-cold/warm cases, with three
+before/after samples per region. Median complete-transfer speedups over the
+retained test-only prototype were 10.13–11.10×. Every case met its 60-second
+transfer and 256MiB sampled combined-RSS budgets; larger chunks raised maximum
+sampled RSS from 67,350,528 to 100,380,672 bytes. Five-millisecond sampling can
+miss shorter peaks, and three samples cannot establish population p95/p99.
+This is isolated amd64 loopback setup-transfer evidence, not physical LAN or
+model performance. The authoritative producer hashes both copied payloads;
+the separate evidence reader verifies its source, report and independently
+recomputed summaries, without claiming to rehash unretained payload files.
+
+The first hosted attempt failed only on Python source-cache permissions after
+root-owned fixture execution. A private per-invocation compilation cache fixes
+that mixed-owner case without changing source ownership or weakening syntax
+checks. Actual valid/invalid syntax regressions verify write denial, generated
+cache ownership, cleanup, unchanged sources and retained failure status. The
+failed artifact and corrective evidence remain bound in the local record.
+These builds and initial-admission tools remain unqualified for final release;
+no checkpoint/model/GPU/physical/soak execution occurred here, and the existing
+full-model and semantic release qualification software gaps remain.
+
+The preceding NVIDIA NGC CUDA migration passed 608 Python fixtures/Ruff, 37 static checks
 and 27 zero-finding Clang analyses, all 45 unchanged schemas, and CPU/CUDA AOT
 build gates. All three jobs in the [hosted NGC build](https://github.com/kklouzal/RIA/actions/runs/37227441606)
 passed for `d9d0b6e1692c005772358abdd5ed01e1fc03cb4a`, repeating full
