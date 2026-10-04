@@ -54,7 +54,7 @@ bool ria_expert_cuda_pinned_required_bytes(uint64_t input,uint64_t intermediate,
     if (maximum>SIZE_MAX) return fail(e,RIA_RESOURCE_LIMIT,"pinned expert pool exceeds address range");
     *bytes=maximum;return true;
 }
-static bool disjoint(const void *a,uint64_t a_bytes,const void *b,uint64_t b_bytes) {
+bool ria_expert_ranges_disjoint(const void *a,uint64_t a_bytes,const void *b,uint64_t b_bytes) {
     uintptr_t aa=(uintptr_t)a,bb=(uintptr_t)b;
     if (a_bytes>UINTPTR_MAX-aa || b_bytes>UINTPTR_MAX-bb) return false;
     return aa+a_bytes<=bb || bb+b_bytes<=aa;
@@ -378,9 +378,9 @@ bool ria_expert_cpu_evaluate(ria_expert_cpu *c,const ria_expert *e,const float *
         return fail(error,RIA_RESOURCE_LIMIT,"expert evaluation exceeds admitted dimensions/strides");
     uint64_t input_bytes=((rows-1)*input_stride+e->gate.in_features)*sizeof(float);
     uint64_t output_bytes=((rows-1)*output_stride+e->down.out_features)*sizeof(float);
-    if (!disjoint(input,input_bytes,output,output_bytes) ||
-        (coefficients && (!disjoint(coefficients,rows*sizeof(float),input,input_bytes) ||
-                          !disjoint(coefficients,rows*sizeof(float),output,output_bytes))))
+    if (!ria_expert_ranges_disjoint(input,input_bytes,output,output_bytes) ||
+        (coefficients && (!ria_expert_ranges_disjoint(coefficients,rows*sizeof(float),input,input_bytes) ||
+                          !ria_expert_ranges_disjoint(coefficients,rows*sizeof(float),output,output_bytes))))
         return fail(error,RIA_INVALID_REQUEST,"expert input/coefficient/output ranges overlap");
     for (uint64_t row=0;row<rows;++row) {
         float coefficient=coefficients ? coefficients[row] : 1.0f;
@@ -413,7 +413,7 @@ bool ria_expert_cpu_projection(ria_expert_cpu *c,const ria_expert_matrix *m,cons
         !span(rows,input_stride,m->in_features,SIZE_MAX/sizeof(float)) ||
         !span(rows,output_stride,m->out_features,SIZE_MAX/sizeof(float)))
         return fail(error,RIA_RESOURCE_LIMIT,"projection exceeds admitted dimensions/strides");
-    if (!disjoint(input,((rows-1)*input_stride+m->in_features)*sizeof(float),
+    if (!ria_expert_ranges_disjoint(input,((rows-1)*input_stride+m->in_features)*sizeof(float),
                   output,((rows-1)*output_stride+m->out_features)*sizeof(float)))
         return fail(error,RIA_INVALID_REQUEST,"projection input/output ranges overlap");
     for (uint64_t row=0;row<rows;++row) {

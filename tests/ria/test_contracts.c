@@ -178,6 +178,37 @@ static void test_json(void) {
     ria_json_free(&d);
   }
 }
+static void test_json_memory(void) {
+  ria_error e={0};
+  const size_t lengths[]={128,(size_t)RIA_ERROR_MAX,(size_t)RIA_CONTROL_MAX};
+  for (unsigned i=0;i<3;i++) {
+    size_t n=lengths[i];ria_json_limits limits={n,8192,32};
+    uint32_t cap;uint64_t owned,canonical_bytes,keys;
+    CHECK(ria_json_parse_required_bytes(n,limits,&cap,&owned,&e));
+    CHECK(ria_json_control_required_bytes(limits,&owned,&canonical_bytes,&keys,&e));
+    CHECK(cap==(n/2+1<8192 ? n/2+1 : 8192));
+    CHECK(owned==(uint64_t)cap*sizeof(ria_json_node)+n+1);
+    CHECK(keys>=((uint64_t)cap+limits.max_depth)*sizeof(const ria_json_node *));
+    char *input=malloc(n);CHECK(input);
+    input[0]='"';memset(input+1,'a',n-2);input[n-1]='"';
+    ria_json_doc d={0};CHECK(ria_json_parse(input,n,limits,&d,&e));
+    CHECK(d.allocated_bytes==owned);
+    uint64_t actual_capacity;char *canonical=NULL;size_t actual_length;
+    CHECK(ria_json_canonical_required_bytes(d.string_bytes,d.count,&actual_capacity,&e));
+    CHECK(actual_capacity<=canonical_bytes);
+    CHECK(ria_json_canonical(&d,false,&canonical,&actual_length,&e));
+    CHECK(actual_length==n && !memcmp(input,canonical,n));
+    CHECK(actual_length+1<=actual_capacity);
+    if (n==RIA_CONTROL_MAX) CHECK(n+owned>2*RIA_CONTROL_MAX);
+    free(canonical);ria_json_free(&d);free(input);
+  }
+  uint32_t cap;uint64_t owned,canonical_bytes,keys;
+  CHECK(!ria_json_parse_required_bytes(0,(ria_json_limits){4096,8192,32},&cap,&owned,&e));
+  CHECK(!ria_json_control_required_bytes((ria_json_limits){4096,0,32},&owned,&canonical_bytes,&keys,&e));
+  CHECK(!ria_json_control_required_bytes((ria_json_limits){4096,8192,0},&owned,&canonical_bytes,&keys,&e));
+  CHECK(!ria_json_canonical_required_bytes(UINT64_MAX,1,&owned,&e));
+  CHECK(!ria_json_keys_required_bytes(UINT64_MAX,&owned,&e));
+}
 static void test_json_files(void) {
   char directory[] = "/tmp/ria-json-contracts-XXXXXX";
   CHECK(mkdtemp(directory));
@@ -551,7 +582,7 @@ static void test_admission(void) {
            "\"profile\":\"bf16\","
            "\"logical_model_digest\":\"%s\",\"operator_contract_digest\":\"%"
            "s\",\"context_"
-           "positions\":8,\"caps\":{\"host_bytes\":1000,\"device_bytes\":0,"
+           "positions\":8,\"prefill_rows\":4,\"caps\":{\"host_bytes\":1000,\"device_bytes\":0,"
            "\"pinned_bytes\":0,"
            "\"numa\":[{\"node\":0,\"bytes\":1000}]}}",
            logical, logical);
@@ -592,7 +623,7 @@ static void test_admission(void) {
   ria_admission_plan plan;
   CHECK(ria_admission_compute(&r, &i, &p, &c, &plan, &e));
   CHECK(plan.peak.host == 244 && plan.peak.numa[0] == 244 &&
-        plan.allocation_count == 2);
+        plan.allocation_count == 2 && plan.prefill_rows == 4);
   char *json;
   size_t n;
   CHECK(ria_admission_json(&plan, &json, &n, &e));
@@ -611,8 +642,19 @@ static void test_admission(void) {
   CHECK(ria_json_digest_field(&out, ria_json_get(&out, 0, "policy_digest"),
                               expected, &e));
   CHECK(!memcmp(expected, plan.policy_digest, 32));
+  uint64_t prefill_rows;
+  CHECK(ria_json_u64(&out,ria_json_get(&out,0,"prefill_rows"),false,&prefill_rows,&e) && prefill_rows==4);
   ria_json_free(&out);
   free(json);
+  ria_json_node *batch=&r.nodes[ria_json_get(&r,0,"prefill_rows")];
+  const uint64_t invalid_rows[]={0,65,9};
+  const char *const invalid_text[]={"0","65","9"};
+  for (unsigned invalid=0;invalid<3;invalid++) {
+    batch->number=(double)invalid_rows[invalid];batch->text=invalid_text[invalid];batch->length=strlen(batch->text);
+    CHECK(!ria_admission_compute(&r,&i,&p,&c,&plan,&e));
+  }
+  batch->number=4;batch->text="4";batch->length=1;
+  CHECK(ria_admission_compute(&r,&i,&p,&c,&plan,&e));
   uint32_t environment = ria_json_get(&c, 0, "environment_digest");
   const char *old_environment = c.nodes[environment].text;
   c.nodes[environment].text =
@@ -864,6 +906,7 @@ static void test_tls_configuration(void) {
 int main(void) {
   CHECK(signal(SIGPIPE, SIG_IGN) != SIG_ERR);
   test_json();
+  test_json_memory();
   test_json_files();
   test_wire();
   test_control();

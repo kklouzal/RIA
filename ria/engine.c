@@ -83,13 +83,15 @@ static bool client_preflight(void *context, const ria_tensor_store *store,
     return true;
   const ria_json_doc *p = &r->service.placement;
   uint32_t runtime = ria_json_get(p, 0, "runtime");
-  uint64_t tokenizer, host, frontend, projection, patches, engram, owned, total,
+  uint64_t tokenizer, host, frontend, projection, prefill_rows, patches, engram, owned, total,
       pinned, locked = 0;
   if (!integer(p, runtime, "tokenizer_memory_bytes", true, &tokenizer, e) ||
       !integer(p, runtime, "host_state_bytes", true, &host, e) ||
       !integer(p, runtime, "frontend_host_bytes", true, &frontend, e) ||
       !integer(p, runtime, "projection_tile_rows", false, &projection, e) ||
       projection > UINT32_MAX ||
+      !integer(p,runtime,"prefill_rows",false,&prefill_rows,e) ||
+      prefill_rows!=r->service.prefill_rows ||
       !integer(p, runtime, "max_image_patches", false, &patches, e) ||
       patches > UINT32_MAX ||
       !integer(p, 0, "engram_cache_bytes", false, &engram, e) ||
@@ -105,6 +107,7 @@ static bool client_preflight(void *context, const ria_tensor_store *store,
       return ria_fail(e, RIA_RESOURCE_LIMIT,
                       "local membership exceeds source population");
   ria_graph_options options = {.projection_tile_rows = (uint32_t)projection,
+                               .prefill_rows=(uint32_t)prefill_rows,
                                .max_image_patches = (uint32_t)patches,
                                .max_tokens = r->context,
                                .local_expert_count = local_count,
@@ -260,13 +263,13 @@ static bool config(ria_engine *r, ria_error *e) {
   static const char *const fields[] = {
       "tokenizer_file",   "tokenizer_sha256",   "tokenizer_memory_bytes",
       "host_state_bytes", "device_state_bytes", "projection_tile_rows",
-      "state_tile_rows",  "max_image_patches",  "frontend_host_bytes"};
-  if (!ria_json_fields(p, runtime, fields, 9, fields, 9, e))
+      "state_tile_rows",  "max_image_patches",  "frontend_host_bytes", "prefill_rows"};
+  if (!ria_json_fields(p, runtime, fields, 10, fields, 10, e))
     return false;
   const char *path = NULL;
   size_t length = 0;
   uint8_t sha[32];
-  uint64_t tokenizer_budget, host, device, projection, state, patches;
+  uint64_t tokenizer_budget, host, device, projection, state, patches,prefill_rows;
   if (!ria_json_string(p, ria_json_get(p, runtime, "tokenizer_file"), &path,
                        &length, e) ||
       !length || path[0] != '/' ||
@@ -280,6 +283,8 @@ static bool config(ria_engine *r, ria_error *e) {
       !integer(p, runtime, "projection_tile_rows", false, &projection, e) ||
       !integer(p, runtime, "state_tile_rows", false, &state, e) ||
       !integer(p, runtime, "max_image_patches", false, &patches, e) ||
+      !integer(p,runtime,"prefill_rows",false,&prefill_rows,e) ||
+      prefill_rows!=r->service.prefill_rows || !prefill_rows || prefill_rows>64 ||
       !projection || !state || !patches || projection > UINT32_MAX ||
       state > UINT32_MAX || patches > UINT32_MAX ||
       host > r->service.host_cap || device > r->service.device_cap ||
@@ -296,6 +301,7 @@ static bool config(ria_engine *r, ria_error *e) {
                           .projection_tile_rows = (uint32_t)projection,
                           .state_tile_rows = (uint32_t)state,
                           .max_image_patches = (uint32_t)patches,
+                          .prefill_rows=(uint32_t)prefill_rows,
                           .compressed_vocab = 99092};
   if (!local_placement(r, e))
     return false;
@@ -306,7 +312,8 @@ static bool config(ria_engine *r, ria_error *e) {
     return ria_fail(e, RIA_RESOURCE_LIMIT,
                     "graph pinned staging exceeds admitted cap");
   uint8_t expected[32];
-  uint64_t prefix_bytes, live, store_owned, service_owned = 0;
+  uint64_t prefix_bytes, live, store_owned, service_owned = 0,remote_required;
+  if (!ria_remote_host_required_bytes((uint32_t)prefill_rows,&r->service.limits,&remote_required,e)) return false;
   const ria_json_doc *service_documents[] = {
       &r->service.document, &r->service.lock, &r->service.plan,
       &r->service.placement, &r->service.grants};
@@ -322,6 +329,7 @@ static bool config(ria_engine *r, ria_error *e) {
                    &r->frontend_fixed) ||
       !ria_u64_add(r->frontend_fixed, r->outer_owner, &r->frontend_fixed) ||
       !ria_u64_add(r->frontend_fixed, service_owned, &r->frontend_fixed) ||
+      !ria_u64_add(r->frontend_fixed,remote_required,&r->frontend_fixed) ||
       !ria_u64_add(r->frontend_fixed, ria_graph_cuda_metadata_bytes(),
                    &r->frontend_fixed) ||
       !ria_u64_add(
@@ -447,7 +455,7 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
   if (ok) {
     const ria_json_doc *placement = &r->service.placement;
     uint32_t runtime = ria_json_get(placement, 0, "runtime");
-    uint64_t tokenizer, host, frontend, projection, patches, pinned, reserved;
+    uint64_t tokenizer, host, frontend, projection, prefill_rows, patches, pinned, reserved;
     ok = integer(placement, runtime, "tokenizer_memory_bytes", true, &tokenizer,
                  e) &&
          integer(placement, runtime, "host_state_bytes", true, &host, e) &&
@@ -456,10 +464,13 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
          integer(placement, runtime, "projection_tile_rows", false, &projection,
                  e) &&
          projection <= UINT32_MAX &&
+         integer(placement,runtime,"prefill_rows",false,&prefill_rows,e) &&
+         prefill_rows==r->service.prefill_rows &&
          integer(placement, runtime, "max_image_patches", false, &patches, e) &&
          patches <= UINT32_MAX;
     ria_graph_options sizing = {
         .projection_tile_rows = ok ? (uint32_t)projection : 0,
+        .prefill_rows=ok ? (uint32_t)prefill_rows : 0,
         .max_image_patches = ok ? (uint32_t)patches : 0};
     if (ok)
       ok = ria_graph_pinned_required_bytes(&sizing, &pinned, e) &&
@@ -603,6 +614,7 @@ bool ria_engine_sync(ria_engine *r, const ds4_tokens *prompt,
                      ria_error *e) {
   if (!r || r->fatal || !r->claimed || !prompt || !prompt->v ||
       prompt->len <= 0 || (uint64_t)prompt->len > r->context || !logits ||
+      !r->graph_options.prefill_rows || r->graph_options.prefill_rows>64 ||
       image_count > 128 || (image_count && !images))
     return ria_fail(e, RIA_INVALID_REQUEST,
                     "invalid incorporated prompt bounds");
@@ -656,32 +668,32 @@ bool ria_engine_sync(ria_engine *r, const ds4_tokens *prompt,
     memcpy(r->images[i].digest, images[i].embedding.fingerprint, 32);
   }
   r->image_count = image_count;
-  for (uint64_t i = r->position; ok && i < (uint64_t)prompt->len; i++) {
+  for (uint64_t first=r->position;ok && first<(uint64_t)prompt->len;) {
     if (cancel && cancel(ud)) {
       ok = ria_fail(e, RIA_CANCELLED,
                     "generation cancelled at incorporated position");
       break;
     }
-    if (prompt->v[i] < 0 || prompt->v[i] >= 129280) {
-      ok = ria_fail(e, RIA_INVALID_REQUEST,
-                    "prompt token outside source vocabulary");
-      break;
+    uint64_t count=(uint64_t)prompt->len-first;
+    if (count>r->graph_options.prefill_rows) count=r->graph_options.prefill_rows;
+    uint32_t tokens[64]={0};const float *embeddings[64]={0};
+    for (uint64_t row=0;row<count;row++) {
+      uint64_t position=first+row;tokens[row]=(uint32_t)prompt->v[position];embeddings[row]=NULL;
+      for (size_t j=0;j<image_count;j++)
+        if (position>=images[j].token_start && position<(uint64_t)images[j].token_start+images[j].embedding.token_count) {
+          embeddings[row]=images[j].embedding.data+(position-images[j].token_start)*RIA_GRAPH_DIM;break;
+        }
     }
-    const float *embedding = NULL;
-    for (size_t j = 0; j < image_count; j++)
-      if (i >= images[j].token_start &&
-          i < (uint64_t)images[j].token_start +
-                  images[j].embedding.token_count) {
-        embedding =
-            images[j].embedding.data + (i - images[j].token_start) * 5120;
-        break;
-      }
-    ok = ria_graph_step(r->graph, (uint32_t)prompt->v[i], embedding != NULL,
-                        embedding, logits, e);
+    /* Layer-major grouped execution advances the entire bounded chunk only
+     * after all required row/slot work completes. Failed chunks poison the
+     * graph; engine invalidation then requires a fresh binding/full replay. */
+    ok=ria_graph_prefill_rows(r->graph,tokens,embeddings,(uint32_t)count,logits,NULL,cancel,ud,e);
+    if (ok && cancel && cancel(ud))
+      ok=ria_fail(e,RIA_CANCELLED,"generation cancelled before prompt chunk publication");
     if (ok) {
-      memcpy(r->last_logits, logits, 129280 * sizeof(float));
-      r->prefix[i] = (uint32_t)prompt->v[i];
-      r->position = i + 1;
+      memcpy(r->last_logits,logits,RIA_GRAPH_VOCAB*sizeof(float));
+      for (uint64_t row=0;row<count;row++) r->prefix[first+row]=tokens[row];
+      first+=count;r->position=first;
     }
   }
   if (!ok) {

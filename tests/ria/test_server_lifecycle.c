@@ -276,7 +276,7 @@ static void client_configuration(credentials *c,const server *s,const struct soc
                                  char control[64],char bulk[64]) {
   CHECK(snprintf(control,64,"127.0.0.1:%u",ntohs(a[0].sin_port))>0 &&
     snprintf(bulk,64,"127.0.0.1:%u",ntohs(a[1].sin_port))>0);
-  memset(client,0,sizeof(*client)); client->role="client"; client->server_executor="cpu";
+  memset(client,0,sizeof(*client)); client->role="client"; client->server_executor="cpu";client->prefill_rows=64;
   client->control_address=control; client->bulk_address=bulk; client->connect_timeout_ms=1000;
   client->limits=s->service.limits;
   client->tls=(ria_tls_config){c->paths[0],c->paths[3],c->paths[1],"server.test",false,1000};
@@ -448,6 +448,91 @@ static void test_callback_groups(credentials *c,bool rows,bool fail_group) {
   }
   free(output); CHECK(ria_remote_close(remote,&e)); CHECK(reap(false,1000)==0); fixture_free(s);
 }
+/* Same-expert multirow units retain absolute row/slot identities across
+ * negotiated row, frame and protected-credit subgroup boundaries. */
+static void test_callback_batch_groups(credentials *c,unsigned limit,uint64_t frame,bool credit_limit,bool fail_group) {
+  struct sockaddr_in a[2];server *s=fixture(c,a);ria_error e={0};
+  s->service.limits.expert_rows=limit;s->service.limits.frame_payload_bytes=frame;
+  s->bank.operations[0]=(ria_operation){1,5120,5120,64,0,384,6,0,1.5f,false,true,true};
+  unsigned unit=limit;
+  while (unit>1) { uint64_t request,response;
+    CHECK(ria_expert_lengths(unit,unit,5120,5120,0,&request,&response,&e));
+    if (request<=frame && response<=frame) break;
+    unit--;
+  }
+  if (credit_limit) {
+    uint64_t request,response,charge,control,row,bulk;
+    CHECK(ria_expert_lengths(2,2,5120,5120,0,&request,&response,&e) &&
+      ria_request_charge(RIA_EXPERT,request,response,&charge,&e) &&
+      ria_progress_charges(&s->service.limits,&control,&row,&bulk,&e));
+    s->service.limits.inflight_payload_bytes=control+row+bulk+charge;unit=2;
+  }
+  CHECK(server_minimum(s,&e));fixture_child=fork();CHECK(fixture_child>=0);
+  const unsigned total=64;
+  if (!fixture_child) {
+    bool ok=peer_bind(s,0,&e) && peer_bind(s,1,&e);unsigned begin=0,group=0;
+    while (ok && begin<total) {
+      unsigned count=total-begin;if (count>unit) count=unit;
+      ria_header h;uint8_t *p=NULL;
+      ok=ria_transport_frame(&s->channels[0].transport,end_after(2000),100,frame,&h,&p,&e) &&
+        h.kind==RIA_EXPERT && h.request_id==group+2;
+      ria_expert_request parsed={0};
+      if (ok) ok=ria_expert_parse(p,(size_t)h.payload_length,h.kind,&s->bank.operations[0],&s->binding.limits,&parsed,&e) &&
+        parsed.row_count==count && parsed.entry_count==count && parsed.invocation_id==group+1;
+      for (unsigned i=0;ok && i<count;i++) {
+        unsigned original=begin+i;
+        ok=ria_read_u64(parsed.row_ids+i*8)==UINT64_C(4000)+original*7 &&
+          ria_read_u32(parsed.offsets+i*4)==i && ria_read_u32(parsed.offsets+(i+1)*4)==i+1 &&
+          ria_read_u16(parsed.entries+i*8)==23 && ria_read_u16(parsed.entries+i*8+2)==original%6 &&
+          ria_read_f32(parsed.entries+i*8+4)==.25f*(1+original%3);
+        for (unsigned k=0;ok && k<5120;k++) ok=ria_read_f32(parsed.inputs+((size_t)i*5120+k)*4)==original+1;
+      }
+      bool reject=fail_group && group==1;
+      uint8_t *response=NULL;
+      if (ok && !reject) {
+        ok=ria_binding_receive(&s->binding,&h,false,&e) && admit(s,&h,parsed.response_bytes,ria_monotonic_ms(),&e);
+        response=ok ? calloc(1,(size_t)parsed.response_bytes) : NULL;if (ok) ok=response!=NULL;
+        if (ok) {
+          ria_write_u64(response,1);ria_write_u64(response+8,parsed.invocation_id);
+          ria_write_u32(response+16,count);ria_write_u32(response+20,5120);ria_write_u32(response+24,count);
+          for (unsigned i=0;i<count;i++) for (unsigned k=0;k<5120;k++)
+            ria_write_f32(response+32+((size_t)i*5120+k)*4,(float)(begin+i+1));
+        }
+      }
+      free(p);
+      if (ok && reject) ok=error_reply(s,0,&h,RIA_RESOURCE_LIMIT,false,false,end_after(1000),&e) && peer_flush(s,0,&e);
+      else if (ok) ok=queue_reply(s,0,&h,response,(size_t)parsed.response_bytes,0,true,false,end_after(1000),&e) && peer_flush(s,0,&e);
+      else free(response);
+      begin+=count;group++;if (reject) break;
+    }
+    ria_header close;uint8_t *p=NULL;
+    if (ok && !fail_group) ok=ria_transport_frame(&s->channels[0].transport,end_after(2000),100,frame,&close,&p,&e) &&
+      close.kind==RIA_CLOSE && dispatch(s,0,&close,p,ria_monotonic_ms(),&e) && close_ready(s,&e) && peer_flush(s,0,&e);
+    else if (ok) ok=!ria_transport_frame(&s->channels[0].transport,end_after(2000),100,frame,&close,&p,&e) && e.code!=RIA_DEADLINE_EXCEEDED;
+    if (!ok) fprintf(stderr,"batch peer failure: %s\n",e.message);
+    free(p);fixture_free(s);_exit(ok?0:1);
+  }
+  char control[64],bulk[64];ria_service client;ria_tensor_store store;ria_remote_options options;
+  client_configuration(c,s,a,&client,&store,&options,control,bulk);ria_remote *remote=NULL;
+  bool opened=ria_remote_open(&remote,&options,&e);
+  if (!opened) fprintf(stderr,"batch Bind failed rows=%u frame=%llu credit=%d fail=%d: %s\n",limit,
+    (unsigned long long)frame,credit_limit,fail_group,e.message);
+  CHECK(opened);ria_graph_remote callback=ria_remote_callbacks(remote);
+  uint64_t row_ids[64],epoch,generation;uint16_t slots[64];float coefficients[64];
+  float *input=malloc(total*5120u*sizeof(float)),*output=malloc(total*5120u*sizeof(float));CHECK(input && output);
+  for (unsigned i=0;i<total;i++) {
+    row_ids[i]=UINT64_C(4000)+i*7;slots[i]=(uint16_t)(i%6);coefficients[i]=.25f*(1+i%3);
+    for (unsigned k=0;k<5120;k++) { input[(size_t)i*5120+k]=(float)(i+1);output[(size_t)i*5120+k]=-7; }
+  }
+  CHECK(ria_remote_begin_generation(remote,&epoch,&generation,&e));
+  /* Cross-subgroup duplicate IDs are rejected before any unit is sent. */
+  row_ids[63]=row_ids[0];CHECK(!callback.experts_batch(callback.context,0,23,total,row_ids,input,coefficients,slots,output,&e) && e.code==RIA_INVALID_REQUEST);
+  row_ids[63]=UINT64_C(4000)+63*7;
+  bool ok=callback.experts_batch(callback.context,0,23,total,row_ids,input,coefficients,slots,output,&e);CHECK(ok!=fail_group);
+  for (unsigned i=0;i<total;i++) for (unsigned k=0;k<5120;k++) CHECK(output[(size_t)i*5120+k]==(fail_group ? -7 : (float)(i+1)));
+  if (fail_group) CHECK(e.code==RIA_RESOURCE_LIMIT);
+  free(input);free(output);CHECK(ria_remote_close(remote,&e));CHECK(reap(false,2000)==0);fixture_free(s);
+}
 static void test_bind_minimum(credentials *c,unsigned kind) {
   struct sockaddr_in a[2]; server *s=fixture(c,a); ria_error e={0};
   ria_shard shard={.id=1,.length=4096,.chunk_size=4096,.chunk_count=1}; ria_chunk_grant grant={1,0,4096};
@@ -532,6 +617,11 @@ int main(void) {
   test_callback_groups(&c,false,false); test_callback_groups(&c,false,true);
   test_callback_groups(&c,true,false); test_callback_groups(&c,true,true);
   for (unsigned kind=0;kind<4;kind++) test_bind_minimum(&c,kind);
+  test_callback_batch_groups(&c,1,65536,false,false);
+  test_callback_batch_groups(&c,2,131072,false,false);
+  test_callback_batch_groups(&c,64,65536,false,false);
+  test_callback_batch_groups(&c,64,131072,true,false);
+  test_callback_batch_groups(&c,64,65536,false,true);
   credentials_free(&c); alarm(0);
   puts("RIA production server lifecycle: setup/frame deadlines, idle/rebind ownership, channel loss/drain, TLS retry/fatal rules, typed refusals, response caps, negotiated slot/row groups and atomic publication, operation/error/chunk Bind minima passed");
   return 0;

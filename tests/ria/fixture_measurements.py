@@ -19,7 +19,7 @@ def synthetic_environment(model, source, operator, profile, executor, role, buil
             "docker_version": "synthetic", "compose_version": "synthetic", "kernel_version": "synthetic", "host_report_digest": "7" * 64,
             "source_lock_digest": source},
         "planning_request": {"schema_revision": 1, "role": "client" if role == "client" else "expert", "executor": "cuda" if gpu else "cpu",
-            "profile": profile, "logical_model_digest": model, "operator_contract_digest": operator, "context_positions": 64,
+            "profile": profile, "logical_model_digest": model, "operator_contract_digest": operator, "context_positions": 64, "prefill_rows": 8,
             "caps": {"host_bytes": 268435456, "device_bytes": 134217728 if gpu else 0, "pinned_bytes": 1048576 if gpu else 0,
                      "numa": [{"node": 0, "bytes": 268435456}]}},
         "tls": {"ca_file": "/run/secrets/ca.pem", "certificate_file": "/run/secrets/peer.pem", "private_key_file": "/run/secrets/peer.key",

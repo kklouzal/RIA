@@ -89,7 +89,7 @@ class GraphReference(unittest.TestCase):
         subprocess.run([
             "gcc", "-std=c11", "-O2", "-ffp-contract=off", "-Wall", "-Wextra", "-Wconversion", "-Werror",
             "-ffunction-sections", "-I", str(ROOT), str(ROOT / "tests/ria/test_graph_contracts.c"),
-            str(ROOT / "ria/graph.c"), str(ROOT / "ria/vision.c"), str(ROOT / "ria/common.c"), str(ROOT / "ria/expert.c"),
+            str(ROOT / "ria/graph.c"), str(ROOT / "ria/vision.c"), str(ROOT / "ria/prefill.c"), str(ROOT / "ria/common.c"), str(ROOT / "ria/expert.c"),
             "-Wl,--gc-sections", "-lcrypto", "-lpng", "-ljpeg", "-lm", "-o", str(cls.binary),
         ], check=True)
         subprocess.run([cls.binary], check=True)

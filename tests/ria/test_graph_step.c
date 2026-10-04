@@ -123,7 +123,7 @@ static bool experts(void *context,uint32_t layer,const float *input,const uint16
 int main(int argc,char **argv) {
     ria_graph *g=calloc(1,sizeof(*g));ria_graph_cuda c={0};assert(g);
     for (unsigned i=0;i<RIA_G_BUFFER_COUNT;++i) { c.buffers[i]=calloc(129280,sizeof(float));assert(c.buffers[i]); }
-    uint32_t map[2]={0,1};g->cuda=&c;g->options.max_tokens=130;g->options.state_tile_rows=1;g->options.compressed_token_map=map;
+    uint32_t map[2]={0,1};g->cuda=&c;g->options.max_tokens=130;g->options.state_tile_rows=1;g->options.prefill_rows=1;g->options.compressed_token_map=map;
     g->options.compressed_vocab=99092;g->options.pad_compressed_id=2;g->remote.engram=rows;g->remote.experts=experts;
     for (unsigned i=0;i<4;++i) g->history[i]=-1;
     for (unsigned layer=0;layer<2;++layer) {

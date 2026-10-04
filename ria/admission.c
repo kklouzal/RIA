@@ -118,6 +118,7 @@ bool ria_admission_compute(const ria_json_doc *request, const ria_json_doc *inve
                                              "logical_model_digest",
                                              "operator_contract_digest",
                                              "context_positions",
+                                             "prefill_rows",
                                              "caps",
                                              "digest"};
     static const char *const inv_fields[] = {
@@ -221,18 +222,23 @@ bool ria_admission_compute(const ria_json_doc *request, const ria_json_doc *inve
         return false;
     uint64_t semantic;
     if (!integer(request, 0, "context_positions", &plan->context_positions, e) ||
+        !integer(request, 0, "prefill_rows", &plan->prefill_rows, e) ||
+        !plan->prefill_rows || plan->prefill_rows > 64 || plan->prefill_rows > plan->context_positions ||
         !integer(inventory, 0, "semantic_max_positions", &semantic, e) ||
         !plan->context_positions || plan->context_positions > semantic)
         return ria_fail(e, RIA_RESOURCE_LIMIT, "context exceeds semantic position contract");
     uint32_t derivation=ria_json_get(inventory,0,"derivation");
+    if (client && derivation==RIA_JSON_NONE)
+        return ria_fail(e,RIA_INTEGRITY_ERROR,"client inventory must bind its context/prefill derivation");
     if (derivation!=RIA_JSON_NONE) {
-        const char *const fields[]={"manifest_digest","runtime_policy_digest","request_digest","context_positions"};
-        uint8_t derived_digest[32];uint64_t derived_context;
-        if (!ria_json_fields(inventory,derivation,fields,4,fields,4,e)) return false;
+        const char *const fields[]={"manifest_digest","runtime_policy_digest","request_digest","context_positions","prefill_rows"};
+        uint8_t derived_digest[32];uint64_t derived_context,derived_rows;
+        if (!ria_json_fields(inventory,derivation,fields,5,fields,5,e)) return false;
         for (unsigned i=0;i<3;i++)
             if (!ria_json_digest_field(inventory,ria_json_get(inventory,derivation,fields[i]),derived_digest,e)) return false;
-        if (!integer(inventory,derivation,"context_positions",&derived_context,e) || derived_context!=semantic)
-            return ria_fail(e,RIA_IDENTITY_MISMATCH,"inventory derivation context differs from semantic bound");
+        if (!integer(inventory,derivation,"context_positions",&derived_context,e) || derived_context!=semantic ||
+            !integer(inventory,derivation,"prefill_rows",&derived_rows,e) || derived_rows!=plan->prefill_rows)
+            return ria_fail(e,RIA_IDENTITY_MISMATCH,"inventory derivation context/prefill differs from workload bound");
     }
     const ria_json_node *allocations =
         ria_json_at(inventory, ria_json_get(inventory, 0, "allocations"));
@@ -395,10 +401,11 @@ bool ria_admission_json(const ria_admission_plan *p, char **json, size_t *length
               "{\"schema_revision\":1,\"admitted\":true,\"role\":\"%s\",\"executor\":\"%s\","
               "\"profile\":\"%s\",\"logical_model_digest\":\"%s\",\"operator_contract_digest\":\"%"
               "s\",\"request_digest\":\"%s\",\"inventory_digest\":\"%s\",\"probe_digest\":\"%s\","
-              "\"calibration_digest\":\"%s\",\"context_positions\":%llu,\"allocation_count\":%llu,"
+              "\"calibration_digest\":\"%s\",\"context_positions\":%llu,\"prefill_rows\":%llu,\"allocation_count\":%llu,"
               "\"caps\":",
               p->role, p->executor, p->profile, logical, op, req, inv, probe, cal,
-              (unsigned long long)p->context_positions, (unsigned long long)p->allocation_count) &&
+              (unsigned long long)p->context_positions, (unsigned long long)p->prefill_rows,
+              (unsigned long long)p->allocation_count) &&
         memory_json(&o, &p->caps) && print(&o, ",\"peak\":") && memory_json(&o, &p->peak) &&
         print(&o, ",\"phases\":{");
     for (unsigned k = 0; k < RIA_PHASES && ok; k++)

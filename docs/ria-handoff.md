@@ -17,12 +17,13 @@ does not establish GPU numerical correctness.
 
 Use source branch `codex/ria-implementation` and read the
 [independent review](ria-implementation-review.md) before hardware handoff.
-The corrected sources have passed the local and hosted frozen offline gates; grouped
-prefill and full semantic physical qualification producers are still missing.
+The corrected baseline passed the local and hosted frozen offline gates.
+[Expert-grouped prefill](ria-prompt-prefill.md) is now implemented; full semantic
+physical qualification producers remain missing.
 
-The corrected implementation commit is
+The earlier corrected baseline commit is
 `f37d418ed146283a98004e02925621c82573b9e9`; later documentation-only commits
-leave those runtime sources unchanged. The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37188961273)
+preceded the prompt-prefill changes. The [baseline hosted build](https://github.com/kklouzal/RIA/actions/runs/37188961273)
 passed all three jobs and published these Linux amd64 images:
 
 ```text
@@ -34,7 +35,8 @@ Their immutable index/manifest/config hashes, source revision, UID10001,
 SBOM/provenance descriptors and anonymous manifest access were verified without
 downloading filesystem layers. The [publication record](../locks/verification/implementation-review-publication.json)
 binds the source, jobs, images and downloaded verification logs.
-They are build-verified images and remain unqualified for model/physical release.
+These historical baseline images do not contain grouped prompt prefill. They
+are build-verified and remain unqualified for model/physical release.
 
 Read the [unchanged specification](ria-specification.md) and
 [implementation plan](../IMPLEMENTATION_PLAN.md). The user's canonical-base
@@ -45,6 +47,7 @@ Use these operational guides:
 | --- | --- |
 | Source preparation, bootstrap, fixture provenance, admission, launch | [Artifacts and deployment](ria-artifacts-and-deployment.md) |
 | Independent expert, graph and transfer fixtures | [Native fixtures](ria-native-fixtures.md) |
+| Grouped prompt chunks, continuation, cancellation and memory admission | [Prompt prefill](ria-prompt-prefill.md) |
 | CLI, authenticated HTTP, images, tools, continuation, saved logits | [Frontend](ria-frontend.md) |
 | Preregistered HTTP replay, token timing and measured soak | [Replay and soak](ria-release-replay.md) |
 | Missing physical qualification software and bounded diagnostics | [Physical contracts](ria-physical-contracts.md) |
@@ -132,11 +135,13 @@ cell/gate coverage. Their validator authenticates bytes and recomputes numeric
 bounds but cannot prove routing, residency, NUMA execution, fault safety or
 the full gate semantics. See [physical qualification](ria-physical-contracts.md).
 
-The required prefill scheduler that groups prompt rows by expert is also
-missing. The current graph processes causal positions sequentially and has
-no multirow client expert callback. That path preserves a reference schedule,
-but does not implement the grouping requirement in specification section7.3.
-These software gaps must be resolved before claiming complete implementation.
+Prompt prefill now groups independent FFN rows by expert while attention and
+private source history advance causally. Set mandatory `prefill_rows` between1
+and64, no larger than context capacity. Regenerate the planning request, native
+inventory, memory/placement plans, bootstrap/probe/calibration evidence and
+deployment lock together; older packages lack the new workspace identity and
+fail closed. The remaining semantic qualification software gap prevents a
+complete-implementation claim.
 
 Register and execute the release replay plan for at least the accepted soak
 duration, minimum one hour. Use actual monotonic durations, failure counts,

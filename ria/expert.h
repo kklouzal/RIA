@@ -54,6 +54,10 @@ void ria_expert_cpu_destroy(ria_expert_cpu *context);
 const char *ria_expert_cpu_kernel(const ria_expert_cpu *context);
 uint64_t ria_expert_cpu_workspace_bytes(const ria_expert_cpu *context);
 uint64_t ria_expert_cpu_metadata_bytes(void);
+/* Pure nonempty byte-span predicate shared by host expert boundaries. Returns
+ * false for overlap or unrepresentable address arithmetic; never accesses the
+ * pointed-to storage. Callers prove each logical strided extent first. */
+bool ria_expert_ranges_disjoint(const void *a,uint64_t a_bytes,const void *b,uint64_t b_bytes);
 
 /* Context is caller-owned, nonreentrant; FP32 nearest-even/denormal preserving
  * math is required and checked at operation boundaries. Build without fast

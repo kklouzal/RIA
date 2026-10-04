@@ -59,6 +59,10 @@ bool ria_graph_cuda_index_scores(ria_graph_cuda *,const float *q,const float *we
 bool ria_graph_cuda_index_download(ria_graph_cuda *,uint64_t first,uint64_t count,float *host,ria_error *);
 bool ria_graph_cuda_select(ria_graph_cuda *,uint64_t count,bool candidate_source,bool uses_candidates,
                            uint32_t *selected,uint32_t *selected_count,ria_error *);
+/* Compact exact hierarchy mask snapshot: original block IDs, at most2048.
+ * Each row owns its layer20 candidates across later layer-major consumers. */
+bool ria_graph_cuda_candidates_get(ria_graph_cuda *,uint32_t *blocks,uint32_t *count,ria_error *);
+bool ria_graph_cuda_candidates_set(ria_graph_cuda *,const uint32_t *blocks,uint32_t count,ria_error *);
 /* Preserve source sparse-slot order, including [masked_begin,masked_end)
  * holes: its online-softmax BF16 boundary is scoped to each 64-slot tile. */
 bool ria_graph_cuda_attention(ria_graph_cuda *,const float *q,const float *kv,uint64_t count,uint64_t masked_begin,uint64_t masked_end,
@@ -74,6 +78,9 @@ bool ria_graph_cuda_shared(ria_graph_cuda *,const ria_expert *,const float *,flo
 bool ria_graph_cuda_local_create(ria_graph_cuda *,const ria_expert *,uint64_t budget,ria_expert_cuda_resident *,ria_error *);
 bool ria_graph_cuda_local_evaluate(ria_graph_cuda *,const ria_expert *,const ria_expert_cuda_resident *,
                                   const float *,float coefficient,float *host_contribution,ria_error *);
+bool ria_graph_cuda_local_batch(ria_graph_cuda *,const ria_expert *,const ria_expert_cuda_resident *,
+                                const float *host_inputs,uint32_t rows,const float *coefficients,
+                                float *host_contributions,ria_error *);
 #ifdef __cplusplus
 }
 #endif

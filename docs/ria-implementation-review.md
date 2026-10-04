@@ -40,22 +40,24 @@ The [publication checkpoint](../locks/verification/implementation-review-publica
 records independently checked source/log identities and actual amd64 GHCR image
 digests. These build and offline results do not resolve the following gaps.
 
-Two remaining implementation gaps prevent a complete-software claim:
+The specification section7.3 prompt-prefill gap is now implemented. The graph
+executes bounded chunks layer by layer, retains independent causal row state
+and source-candidate snapshots, groups FFN rows by original expert ID and
+scatters results into original selected slots. The engine, multirow remote
+callback, expert worker and admission equations share the bounded row contract.
+[Prompt prefill](ria-prompt-prefill.md) records its numerical, ownership,
+cancellation and configuration contracts and the independent offline coverage.
+The [frozen prefill checkpoint](../locks/verification/prompt-prefill.json)
+records430 Python tests,36 static checks, sanitizers, all four ThreadSanitizer
+fixtures and CPU/SM120a builds. Target execution remains unrun.
 
-1. Specification section7.3 requires bounded prompt chunks with independent
-   rows grouped by expert and contributions scattered into original slots.
-   `ria_graph_prefill` and engine prompt synchronization currently call the
-   one-token graph repeatedly; the client callback is single-row. Implementing
-   grouped prefill requires per-row CED/mHC/Engram state, query-specific
-   source-candidate snapshots, a multirow client executor/callback, admitted
-   microbatch workspaces, and independent sequential-versus-grouped checks.
-2. The full540-cell matrix and complete semantic fault/gate producers and
-   validators are missing. Existing numerical, TLS, HTTP replay, soak and
-   host/deployment tools cover parts of these obligations. They cannot establish
-   every residency, route, NUMA, full-bank, failure and source-model contract.
-   [Producer readiness](../planning/qualification-software-readiness.json)
-   distinguishes supplied software, partial coverage and missing software for
-   every gate family. `tools/qualify_ria.py readiness` exits1 while blocked.
+The full540-cell matrix and complete semantic fault/gate producers and
+validators remain missing. Existing numerical, TLS, HTTP replay, soak and
+host/deployment tools cover parts of these obligations. They cannot establish
+every residency, route, NUMA, full-bank, failure and source-model contract.
+[Producer readiness](../planning/qualification-software-readiness.json)
+distinguishes supplied software, partial coverage and missing software for
+every gate family. `tools/qualify_ria.py readiness` exits1 while blocked.
 
 Physical GPU numerical comparisons, both full-model fidelity axes, target
 capacity/NUMA/security/fault tests, controlled performance comparisons and the

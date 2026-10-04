@@ -24,7 +24,7 @@
 #include <unistd.h>
 
 #define WORKER_BYTES RIA_NUMA_WORKER_BYTES
-#define STACK_BYTES (1u<<20)
+#define STACK_BYTES RIA_NUMA_WORKER_STACK_BYTES
 typedef struct server server;
 typedef struct {
   bool used, cancelled, completed;
@@ -38,7 +38,7 @@ typedef struct {
 typedef struct {
   server *owner; unsigned node,index; pthread_t thread; bool started, initialized, exited;
   void *arena; uint64_t arena_bytes;
-  float *input,*output; ria_expert_cpu *cpu;
+  float *input,*output; ria_expert_cpu *cpu; uint32_t batch_rows;
 #ifdef RIA_WITH_CUDA
   ria_expert_cuda *cuda;
 #endif
@@ -199,22 +199,22 @@ static void *worker_main(void *argument) {
   worker *w=argument; server *s=w->owner; ria_error e={0};
   bool ok=ria_numa_affinity(&s->service.expert.nodes[w->node],w->index,&e);
   uint64_t scratch=0;
+  if (ok) ok=ria_numa_worker_rows(s->service.prefill_rows,s->service.executor,&w->batch_rows,&scratch,&e);
   if (ok && !strcmp(s->service.executor,"cpu")) {
-    ok=ria_expert_cpu_required_bytes(5120,2304,5120,&scratch,&e) && scratch+40960<=STACK_BYTES &&
-       ria_expert_cpu_create_in(5120,2304,5120,(uint8_t *)w->arena+STACK_BYTES,scratch,&w->cpu,&e);
+    ok=ria_expert_cpu_create_in(5120,2304,5120,(uint8_t *)w->arena+STACK_BYTES,scratch,&w->cpu,&e);
     /* Raw arena ownership supplies float alignment and storage; no byte
      * object is accessed through an incompatible typed lvalue. */
     void *input=(uint8_t *)w->arena+STACK_BYTES+scratch;
     w->input=input;
-    w->output=w->input+5120;
+    w->output=w->input+(size_t)w->batch_rows*RIA_GRAPH_DIM;
   }
 #ifdef RIA_WITH_CUDA
   else if (ok) {
     ok=ria_expert_cuda_device_require(0,s->service.gpu_uuid,NULL,&e) &&
-       ria_expert_cuda_create_pooled(0,5120,2304,5120,1,s->service.expert.projection_tile_rows,
+       ria_expert_cuda_create_pooled(0,5120,2304,5120,w->batch_rows,s->service.expert.projection_tile_rows,
                                     s->service.expert.device_workspace_bytes,s->service.expert.pinned_workspace_bytes,&w->cuda,&e);
     void *input=(uint8_t *)w->arena+STACK_BYTES;
-    w->input=input; w->output=w->input+5120;
+    w->input=input; w->output=w->input+(size_t)w->batch_rows*RIA_GRAPH_DIM;
     if (!ok && !e.code) ria_error_set(&e,RIA_RESOURCE_LIMIT,"CUDA workspace exceeds admitted allocation");
   }
 #else
@@ -226,33 +226,49 @@ static void *worker_main(void *argument) {
   pthread_cond_broadcast(&s->condition); pthread_mutex_unlock(&s->mutex); notify(s);
   if (!ok) goto finish;
   for (;;) {
-    ria_server_job task;
+    ria_server_job task,group[64];unsigned group_count=1;
     pthread_mutex_lock(&s->mutex);
     while (!s->stopping && !ria_server_queue_take(&s->queue,w->node,&task)) pthread_cond_wait(&s->condition,&s->mutex);
     if (s->stopping) { pthread_mutex_unlock(&s->mutex); break; }
     work *r=task.request; bool abandoned=r->cancelled || r->error.code || ria_monotonic_ms()>=r->deadline;
+    group[0]=task;
+    uint16_t expert_id=ria_read_u16(r->parsed.entries+(size_t)task.entry*8);
+    /* Same request/expert/node owns every gathered row. Remove queued jobs
+     * under the lifecycle mutex, then retain all borrowed slots until the
+     * grouped executor completes. No later cancellation frees that backing. */
+    for (unsigned i=0;!abandoned && i<s->queue.count && group_count<w->batch_rows;) {
+      ria_server_job candidate=s->queue.jobs[i];
+      if (candidate.request==r && candidate.node==w->node &&
+          ria_read_u16(r->parsed.entries+(size_t)candidate.entry*8)==expert_id) {
+        group[group_count++]=candidate;
+        memmove(s->queue.jobs+i,s->queue.jobs+i+1,(s->queue.count-i-1)*sizeof(*s->queue.jobs));s->queue.count--;
+      } else i++;
+    }
     pthread_mutex_unlock(&s->mutex);
     ria_error error={0}; bool success=true;
     if (!abandoned) {
-      const uint8_t *entry=r->parsed.entries+(size_t)task.entry*8;
-      uint16_t id=ria_read_u16(entry); float coefficient=0;
-      const ria_expert *x=ria_numa_expert(s->numa,w->node,r->parsed.operation_handle,id);
-      if (!ria_server_contribution_unpack(&r->parsed,task.row,task.entry,w->input,5120,&coefficient,&error)) success=false;
-      else if (!x) success=ria_fail(&error,RIA_INTEGRITY_ERROR,"worker selected absent local expert");
-      else if (w->cpu) success=ria_expert_cpu_evaluate(w->cpu,x,w->input,1,r->parsed.input_width,
-                            r->header.kind==RIA_SHARED ? NULL : &coefficient,w->output,r->parsed.output_width,&error);
+      float coefficients[64];
+      const ria_expert *x=ria_numa_expert(s->numa,w->node,r->parsed.operation_handle,expert_id);
+      if (!x) success=ria_fail(&error,RIA_INTEGRITY_ERROR,"worker selected absent local expert");
+      for (unsigned i=0;success && i<group_count;i++)
+        success=ria_server_contribution_unpack(&r->parsed,group[i].row,group[i].entry,
+                    w->input+(size_t)i*RIA_GRAPH_DIM,RIA_GRAPH_DIM,&coefficients[i],&error);
+      if (success && w->cpu) success=ria_expert_cpu_evaluate(w->cpu,x,w->input,group_count,RIA_GRAPH_DIM,
+                            r->header.kind==RIA_SHARED ? NULL : coefficients,w->output,RIA_GRAPH_DIM,&error);
 #ifdef RIA_WITH_CUDA
-      else success=ria_expert_cuda_evaluate(w->cuda,x,w->input,1,r->parsed.input_width,
-                            r->header.kind==RIA_SHARED ? NULL : &coefficient,w->output,r->parsed.output_width,&error);
+      else if (success) success=ria_expert_cuda_evaluate(w->cuda,x,w->input,group_count,RIA_GRAPH_DIM,
+                            r->header.kind==RIA_SHARED ? NULL : coefficients,w->output,RIA_GRAPH_DIM,&error);
 #endif
-      if (success) success=ria_server_contribution_pack(&r->parsed,task.entry,w->output,5120,r->output,r->parsed.response_bytes,&error);
+      for (unsigned i=0;success && i<group_count;i++)
+        success=ria_server_contribution_pack(&r->parsed,group[i].entry,w->output+(size_t)i*RIA_GRAPH_DIM,
+                                             RIA_GRAPH_DIM,r->output,r->parsed.response_bytes,&error);
     }
     pthread_mutex_lock(&s->mutex);
     if (!success && !r->error.code) r->error=error;
     if (!success && !strcmp(s->service.executor,"cuda")) { s->sticky=true; s->draining=true; }
     if (abandoned || ria_monotonic_ms()>=r->deadline) r->cancelled=true;
-    if (!r->remaining) abort();
-    if (!--r->remaining) r->completed=true;
+    if (r->remaining<group_count) abort();
+    r->remaining-=group_count;if (!r->remaining) r->completed=true;
     pthread_cond_broadcast(&s->condition); pthread_mutex_unlock(&s->mutex); notify(s);
   }
 finish:

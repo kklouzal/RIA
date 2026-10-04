@@ -48,7 +48,7 @@ static void placement_and_cache(void) {
 static ria_graph_options options(void) {
     ria_graph_options o={0};o.device=0;o.gpu_uuid="GPU-00112233-4455-6677-8899-aabbccddeeff";
     o.max_tokens=257;o.host_state_budget=UINT64_C(1)<<30;o.device_budget=UINT64_C(1)<<30;o.pinned_budget=UINT64_C(1)<<26;
-    o.projection_tile_rows=64;o.state_tile_rows=32;o.max_image_patches=9216;
+    o.projection_tile_rows=64;o.state_tile_rows=32;o.max_image_patches=9216;o.prefill_rows=1;
     o.compressed_token_map=token_map;o.compressed_vocab=99092;o.pad_compressed_id=2;
     const uint64_t multipliers[2][4]={{76632096046245,4839876093313,35959672319349,73987337458391},
                                     {67716810739261,51510806800915,30921347202721,82619226485591}};
@@ -114,6 +114,8 @@ int main(int argc,char **argv) {
     assert(!ria_graph_host_state_required(1,NULL,&e));
     ria_graph_options bad=o;bad.gpu_uuid="GPU-00112233-4455-6677-8899-aabbccddeefZ";assert(!ria_graph_options_validate(&bad,&e));
     bad=o;bad.max_tokens=1048577;assert(!ria_graph_options_validate(&bad,&e));bad=o;bad.hash_multipliers[1][2]=2;assert(!ria_graph_options_validate(&bad,&e));
+    bad=o;bad.prefill_rows=0;assert(!ria_graph_options_validate(&bad,&e));bad.prefill_rows=65;assert(!ria_graph_options_validate(&bad,&e));
+    bad=o;bad.max_tokens=1;bad.prefill_rows=2;assert(!ria_graph_options_validate(&bad,&e));
     bad=o;bad.hash_primes[1][23]++;assert(!ria_graph_options_validate(&bad,&e));bad=o;bad.hash_multipliers[0][0]=UINT64_MAX;assert(!ria_graph_options_validate(&bad,&e));
     token_map[129279]=99092;assert(!ria_graph_options_validate(&o,&e));token_map[129279]=0;
     int64_t history[4]={99092,0,0,0};uint64_t ids[24];assert(!ria_graph_hash(&o,0,history,ids,&e));

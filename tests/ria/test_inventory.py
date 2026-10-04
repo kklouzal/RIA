@@ -114,11 +114,14 @@ def test_inventory_identity_cannot_reuse_another_context_or_runtime(tmp_path):
     before = inventory_request(request, manifest)
     request["planning_request"]["context_positions"] += 1
     assert inventory_request(request, manifest)["runtime_policy_digest"] != before["runtime_policy_digest"]
+    request["planning_request"]["prefill_rows"] += 1
+    assert inventory_request(request, manifest)["prefill_rows"] == 9
+    assert inventory_request(request, manifest)["runtime_policy_digest"] != before["runtime_policy_digest"]
     request["expert"]["host_runtime_bytes"] = str(9 << 20)
     assert inventory_request(request, manifest)["runtime_policy_digest"] != before["runtime_policy_digest"]
 
 
-def test_client_inventory_counts_pinned_reserve_once_and_authenticates_placement(tmp_path):
+def client_inventory_request(tmp_path):
     from ria.client import client_package
     request = native_request(tmp_path, "client", "cuda")
     server = Path(request["environment"]["model_dir"])
@@ -126,30 +129,68 @@ def test_client_inventory_counts_pinned_reserve_once_and_authenticates_placement
     model = tmp_path / "client-population"
     client_package(server, manifest["digest"], model, chunk_size=4096)
     planning = request["planning_request"]
+    planning["caps"].update(host_bytes=64 << 20,device_bytes=64 << 20,pinned_bytes=32 << 20)
+    planning["caps"]["numa"][0]["bytes"] = 64 << 20
     placement = seal({"schema_revision": 1, "logical_model_digest": planning["logical_model_digest"],
         "operator_contract_digest": planning["operator_contract_digest"], "server_layout_digest": manifest["layout_digest"],
         "server_executor": "cuda", "schedule": "full_reference", "shared_placement": "client", "expert_policy": "remote",
         "host_expert_cache_bytes": 0, "device_expert_cache_bytes": 0, "engram_cache_bytes": 0, "local_experts": [],
         "runtime": {"tokenizer_file": "/model/tokenizer.bin", "tokenizer_sha256": "b" * 64,
-            "tokenizer_memory_bytes": str(1 << 20), "host_state_bytes": str(1 << 20),
-            "device_state_bytes": str(1 << 20), "frontend_host_bytes": str(1 << 20),
-            "projection_tile_rows": 64, "state_tile_rows": 64, "max_image_patches": 16}})
+            "tokenizer_memory_bytes": str(1 << 20), "host_state_bytes": str(8 << 20),
+            "device_state_bytes": str(64 << 20), "frontend_host_bytes": str(16 << 20),
+            "projection_tile_rows": 64, "state_tile_rows": 64, "max_image_patches": 16, "prefill_rows": 8}})
     request["placement_plan"] = str(tmp_path / "placement.json")
     atomic_json(request["placement_plan"], placement)
+    return request, model, placement
+
+
+def test_client_inventory_counts_pinned_reserve_once_and_authenticates_placement(tmp_path):
+    request, model, placement = client_inventory_request(tmp_path)
+    planning = request["planning_request"]
     result = build_inventory(request, model / "manifest.json", tmp_path / "client-inventory.json")
     totals = phase_totals(result)
     assert len(set(tuple(total.items()) for total in totals.values())) == 1
     assert totals["decode"]["pinned"] == planning["caps"]["pinned_bytes"]
-    assert totals["decode"]["device"] == 1 << 20
+    assert totals["decode"]["device"] == 64 << 20
     assert sum(item["base_bytes"] for item in result["allocations"] if item["protected_progress"] and
-               item["resource"] == "host") == (3 << 20) + planning["caps"]["pinned_bytes"]
+               item["resource"] == "host") == (25 << 20) + planning["caps"]["pinned_bytes"]
     placement["digest"] = "0" * 64
     atomic_json(request["placement_plan"], placement)
     with pytest.raises(ArtifactError, match="identity"):
         build_inventory(request, model / "manifest.json", tmp_path / "rejected.json")
 
 
-@pytest.mark.parametrize("mutation", ["type", "unknown", "digest", "context"])
+@pytest.mark.parametrize("mutation", ["legacy_planning", "legacy_placement", "row_bound", "context_bound", "mismatched_rows",
+    "host_workspace", "device_workspace", "pinned_workspace", "remote_workspace"])
+def test_prefill_inventory_rejects_undeclared_or_underfunded_workspaces(tmp_path, mutation):
+    request, model, placement = client_inventory_request(tmp_path)
+    destination = tmp_path / "inventory.json"
+    baseline = build_inventory(request, model / "manifest.json", destination)
+    if mutation == "legacy_planning":
+        del request["planning_request"]["prefill_rows"]
+    elif mutation == "legacy_placement":
+        del placement["runtime"]["prefill_rows"]
+    elif mutation == "row_bound":
+        request["planning_request"]["prefill_rows"] = 65
+    elif mutation == "context_bound":
+        request["planning_request"]["context_positions"] = 4
+    elif mutation == "mismatched_rows":
+        placement["runtime"]["prefill_rows"] = 4
+    elif mutation == "host_workspace":
+        placement["runtime"]["host_state_bytes"] = "4096"
+    elif mutation == "device_workspace":
+        placement["runtime"]["device_state_bytes"] = "4096"
+    elif mutation == "pinned_workspace":
+        request["planning_request"]["caps"]["pinned_bytes"] = 4096
+    else:
+        placement["runtime"]["frontend_host_bytes"] = "4096"
+    atomic_json(request["placement_plan"], seal(placement))
+    with pytest.raises(ArtifactError):
+        build_inventory(request, model / "manifest.json", destination)
+    assert read_json(destination) == baseline
+
+
+@pytest.mark.parametrize("mutation", ["type", "unknown", "digest", "context", "prefill", "legacy_prefill"])
 def test_native_plan_validates_generated_inventory_derivation(tmp_path, mutation):
     request = native_request(tmp_path)
     model = Path(request["environment"]["model_dir"])
@@ -162,8 +203,12 @@ def test_native_plan_validates_generated_inventory_derivation(tmp_path, mutation
         changed["derivation"]["ignored"] = True
     elif mutation == "digest":
         changed["derivation"]["manifest_digest"] = "bad"
-    else:
+    elif mutation == "context":
         changed["derivation"]["context_positions"] += 1
+    elif mutation == "prefill":
+        changed["derivation"]["prefill_rows"] += 1
+    else:
+        del changed["derivation"]["prefill_rows"]
     arguments = [request["native_ctl"], "plan"]
     for option, value in (("request", request["planning_request"]), ("inventory", inventory),
                           ("probe", probe), ("calibration", calibration)):
@@ -181,3 +226,65 @@ def test_native_plan_validates_generated_inventory_derivation(tmp_path, mutation
     with pytest.raises(ArtifactError):
         _run(arguments, request["deadline_ms"])
     assert not destination.exists()
+
+
+def test_native_client_plan_requires_prefill_derivation(tmp_path):
+    request, model, _ = client_inventory_request(tmp_path)
+    planning = request["planning_request"]
+    inventory = build_inventory(request, model / "manifest.json", tmp_path / "inventory.json")
+    # Synthetic admission boundary inputs: no physical qualification or model
+    # execution. Their identical valid control proves the rejected derivation
+    # is not masked by a different role/capacity/evidence defect.
+    identity = "a" * 64
+    provenance = {"environment_digest": identity, "build_digest": identity, "evidence_digest": identity}
+    probe = seal({"schema_revision": 1, "role": "client", "executor": "cuda", **planning["caps"],
+        "qualified": True, **provenance})
+    calibration = seal({"schema_revision": 1, "profile": "bf16", "executor": "cuda", "qualified": True,
+        "operator_contract_digest": planning["operator_contract_digest"], "policy_digest": identity, **provenance})
+    arguments = [request["native_ctl"], "plan"]
+    for option, value in (("request", planning), ("inventory", inventory), ("probe", probe), ("calibration", calibration)):
+        path = tmp_path / (option + "-client-plan.json")
+        atomic_json(path, value)
+        arguments.extend(["--" + option, str(path)])
+    destination = tmp_path / "client-plan.json"
+    arguments.extend(["--output", str(destination)])
+    _run(arguments, request["deadline_ms"])
+    assert read_json(destination)["prefill_rows"] == planning["prefill_rows"]
+    del inventory["derivation"]
+    atomic_json(tmp_path / "inventory-client-plan.json", seal(inventory))
+    with pytest.raises(ArtifactError, match="context/prefill derivation"):
+        _run(arguments, request["deadline_ms"])
+    assert read_json(destination)["prefill_rows"] == planning["prefill_rows"]
+
+
+def test_maximum_prefill_microbatch_is_admitted_when_owners_are_reserved(tmp_path):
+    request, model, placement = client_inventory_request(tmp_path)
+    planning = request["planning_request"]
+    planning["prefill_rows"] = placement["runtime"]["prefill_rows"] = 64
+    planning["caps"].update(host_bytes=96 << 20,device_bytes=128 << 20)
+    planning["caps"]["numa"][0]["bytes"] = 96 << 20
+    placement["runtime"].update(host_state_bytes=str(32 << 20),device_state_bytes=str(128 << 20))
+    atomic_json(request["placement_plan"], seal(placement))
+    inventory = build_inventory(request, model / "manifest.json", tmp_path / "maximum-inventory.json")
+    assert inventory["derivation"]["prefill_rows"] == 64
+    totals = phase_totals(inventory)
+    assert totals["prefill"]["device"] == 128 << 20
+    assert totals["prefill"]["pinned"] == 32 << 20
+
+
+def test_cuda_expert_inventory_checks_exact_pinned_worker_pool_without_cuda(tmp_path):
+    request = native_request(tmp_path,"expert","cuda")
+    model = Path(request["environment"]["model_dir"])
+    destination = tmp_path / "cuda-inventory.json"
+    baseline = build_inventory(request,model / "manifest.json",destination)
+    # This is metadata-only CPU ds4ctl with no CUDA runtime initialization.
+    # A 64-row configured chunk is subdivided by the fixed worker arena; the
+    # required pool still covers the admitted tile and actual worker rows.
+    request["planning_request"]["prefill_rows"] = 64
+    accepted = build_inventory(request,model / "manifest.json",destination)
+    assert accepted["derivation"]["prefill_rows"] == 64
+    assert baseline["derivation"]["prefill_rows"] == 8
+    request["expert"]["pinned_workspace_bytes"] = str(64*5120*4-1)
+    with pytest.raises(ArtifactError,match="microbatch pinned pool"):
+        build_inventory(request,model / "manifest.json",destination)
+    assert read_json(destination) == accepted

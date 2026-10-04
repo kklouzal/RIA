@@ -28,6 +28,7 @@ ROLE = {"enum": ["client", "expert"]}
 EXECUTOR = {"enum": ["cpu", "cuda"]}
 PROFILE = {"enum": ["nvfp4", "fp8", "bf16"]}
 PHASE = {"enum": ["startup", "prefill", "decode", "continuation", "image", "drain"]}
+PREFILL_ROWS = {**POS, "maximum": 64}
 DTYPE = {"enum": ["BOOL", "U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64", "F16", "BF16", "F32", "F64", "F8_E4M3", "F8_E5M2", "F8_E8M0"]}
 FORMAT = {"enum": ["plain", "source_mxfp4", "nvfp4", "fp8_block32", "bf16", "engram_packed"]}
 OPERATION = {"enum": ["embedding", "attention", "attention_state", "index", "router", "norm", "mhc", "expert_gate", "expert_up", "expert_down", "shared_gate", "shared_up", "shared_down", "engram", "vision", "output", "scale", "inactive"]}
@@ -50,7 +51,8 @@ NUMA = obj({"node": INT, "bytes": INT})
 NUMA["properties"]["node"] = {**INT, "maximum": 63}
 CAPS = obj({"host_bytes": POS, "device_bytes": INT, "pinned_bytes": INT, "numa": array(NUMA, maximum=64)})
 PLANNING = obj({"schema_revision": REV, "role": ROLE, "executor": EXECUTOR, "profile": PROFILE,
-                "logical_model_digest": SHA, "operator_contract_digest": SHA, "context_positions": POS, "caps": CAPS,
+                "logical_model_digest": SHA, "operator_contract_digest": SHA, "context_positions": POS,
+                "prefill_rows": PREFILL_ROWS, "caps": CAPS,
                 "digest": SHA}, ("digest",))
 ALLOCATION = obj({"id": U64, "name": TEXT, "resource": {"enum": ["host", "device"]}, "base_bytes": INT,
                   "bytes_per_position": INT, "numa_node": nullable({**INT, "maximum": 63}), "pinned": BOOL, "protected_progress": BOOL,
@@ -58,7 +60,7 @@ ALLOCATION = obj({"id": U64, "name": TEXT, "resource": {"enum": ["host", "device
 INVENTORY = obj({"schema_revision": REV, "logical_model_digest": SHA, "operator_contract_digest": SHA,
                  "semantic_max_positions": POS, "allocations": array(ALLOCATION, minimum=1), "digest": SHA}, ("digest",))
 INVENTORY["properties"]["derivation"] = obj({"manifest_digest": SHA,"runtime_policy_digest": SHA,
-    "request_digest": SHA,"context_positions": POS})
+    "request_digest": SHA,"context_positions": POS,"prefill_rows": PREFILL_ROWS})
 PROBE_REPORT = obj({"schema_revision": REV, "role": ROLE, "executor": EXECUTOR, "host_bytes": POS, "device_bytes": INT,
                     "pinned_bytes": INT, "numa": array(NUMA, maximum=64), "qualified": BOOL,
                     "environment_digest": SHA, "build_digest": SHA, "evidence_digest": SHA, "digest": SHA})
@@ -142,7 +144,7 @@ MEMORY_PLAN = obj({"schema_revision": REV, "admitted": {"const": True}, "role": 
     "profile": PROFILE, "logical_model_digest": SHA, "operator_contract_digest": SHA,
     "request_digest": SHA, "inventory_digest": SHA, "probe_digest": SHA, "calibration_digest": SHA,
     "environment_digest": SHA, "build_digest": SHA, "policy_digest": SHA,
-    "context_positions": POS, "allocation_count": POS, "caps": CAPS, "peak": PEAK,
+    "context_positions": POS, "prefill_rows": PREFILL_ROWS, "allocation_count": POS, "caps": CAPS, "peak": PEAK,
     "phases": obj({name: PEAK for name in PHASE["enum"]}), "digest": SHA})
 IMAGE = {"type": "string", "pattern": "^[a-zA-Z0-9._:/-]+@sha256:[0-9a-f]{64}$"}
 ENVIRONMENT = obj({"image": IMAGE, "image_kind": {"enum": ["cpu", "cuda"]}, "build_digest": SHA,
@@ -181,7 +183,7 @@ PLACEMENT_PLAN = obj({"schema_revision": REV, "logical_model_digest": SHA, "oper
         "local_phases": array({"enum": ["prefill", "decode", "continuation"]}, minimum=1, maximum=3, unique=True)}), maximum=15360),
     "runtime": obj({"tokenizer_file": PATH, "tokenizer_sha256": SHA, "tokenizer_memory_bytes": U64,
         "host_state_bytes": U64, "device_state_bytes": U64, "frontend_host_bytes": U64, "projection_tile_rows": POS,
-        "state_tile_rows": POS, "max_image_patches": POS}), "digest": SHA})
+        "state_tile_rows": POS, "max_image_patches": POS, "prefill_rows": PREFILL_ROWS}), "digest": SHA})
 PEER_GRANTS = obj({"schema_revision": REV, "grants": array(obj({"expected_peer_name": TEXT,
     "logical_model_digest": SHA, "operator_contract_digest": SHA, "encoding_digest": SHA,
     "client_layout_digest": SHA, "placement_plan_digest": SHA, "profile": PROFILE,
@@ -277,6 +279,10 @@ def _relations(kind, value):
         nodes = value["caps"]["numa"] if kind == "planning-request" else value["numa"]
         if len({node["node"] for node in nodes}) != len(nodes):
             raise ArtifactError("duplicate NUMA nodes")
+    if kind in ("planning-request", "memory-plan") and value["prefill_rows"] > value["context_positions"]:
+        raise ArtifactError("prefill microbatch exceeds semantic context capacity")
+    if kind == "deployment-request":
+        validate("planning-request", value["planning_request"])
     if kind == "service":
         network = value["network"]
         if network["max_bulk_data_bytes"] + 32 > network["max_frame_payload_bytes"] or network["max_frame_payload_bytes"] > network["max_inflight_payload_bytes"]:

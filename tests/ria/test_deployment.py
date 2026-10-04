@@ -34,8 +34,8 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
     atomic_json(tmp_path / "host.json", host_report)
     planning = {"schema_revision": 1, "role": role, "executor": executor, "profile": "bf16",
         "logical_model_digest": recipe["logical_model_digest"], "operator_contract_digest": manifest["operator_contract_digest"],
-        "context_positions": 64, "caps": {"host_bytes": 16 << 20, "device_bytes": 0 if executor == "cpu" else 1 << 20,
-        "pinned_bytes": 0 if executor == "cpu" else 4096, "numa": [{"node": 0, "bytes": 16 << 20}]}}
+        "context_positions": 64, "prefill_rows": 8, "caps": {"host_bytes": 16 << 20, "device_bytes": 0 if executor == "cpu" else 4 << 20,
+        "pinned_bytes": 0 if executor == "cpu" else 2 << 20, "numa": [{"node": 0, "bytes": 16 << 20}]}}
     gpu = None if executor == "cpu" else "GPU-12345678-1234-1234-1234-123456789abc"
     secret_dir = tmp_path / "secrets"
     secret_dir.mkdir()
@@ -79,7 +79,7 @@ def deployment_request(tmp_path, role="expert", executor="cpu"):
     else:
         request["expert"] = {"numa_policy": "sharded", "nodes": [{"node": 0, "cpus": [0], "workers": 1, "local_bytes": str(16 << 20)}],
             "projection_tile_rows": 64, "host_runtime_bytes": str(8 << 20), "startup_host_bytes": str(16 << 20),
-            "device_workspace_bytes": "0" if executor == "cpu" else str(1 << 20), "pinned_workspace_bytes": "0" if executor == "cpu" else "4096", "drain_timeout_ms": 1000}
+            "device_workspace_bytes": "0" if executor == "cpu" else str(4 << 20), "pinned_workspace_bytes": "0" if executor == "cpu" else str(2 << 20), "drain_timeout_ms": 1000}
         grants = seal({"schema_revision": 1, "grants": [{"expected_peer_name": tls["expected_peer_name"],
             "logical_model_digest": planning["logical_model_digest"], "operator_contract_digest": planning["operator_contract_digest"],
             "encoding_digest": manifest["encoding_digest"], "client_layout_digest": identity, "placement_plan_digest": identity,
@@ -233,7 +233,7 @@ def test_native_plan_invocation_without_python_memory_equations(tmp_path):
                 "logical_model_digest": planning["logical_model_digest"], "operator_contract_digest": planning["operator_contract_digest"],
                 "environment_digest": probe["environment_digest"], "build_digest": probe["build_digest"], "policy_digest": calibration["policy_digest"],
                 **{key + "_digest": digest(read_json(paths["--" + key])) for key in ("request", "inventory", "probe", "calibration")},
-                "context_positions": 64, "allocation_count": 1, "caps": planning["caps"], "peak": memory,
+                "context_positions": 64, "prefill_rows": planning["prefill_rows"], "allocation_count": 1, "caps": planning["caps"], "peak": memory,
                 "phases": {phase: memory for phase in ("startup", "prefill", "decode", "continuation", "image", "drain")}})
             atomic_json(paths["--output"], plan)
             return b""
@@ -418,7 +418,7 @@ def test_placement_runtime_is_explicit_and_strict(tmp_path):
         "host_expert_cache_bytes": 0, "device_expert_cache_bytes": 0, "engram_cache_bytes": 0, "local_experts": [],
         "runtime": {"tokenizer_file": "/model/metadata/tokenizer.bin", "tokenizer_sha256": "b" * 64,
                     "tokenizer_memory_bytes": "10485760", "host_state_bytes": "16777216", "device_state_bytes": "16777216", "frontend_host_bytes": "16777216",
-                    "projection_tile_rows": 128, "state_tile_rows": 128, "max_image_patches": 16}})
+                    "projection_tile_rows": 128, "state_tile_rows": 128, "max_image_patches": 16, "prefill_rows": 8}})
     validate("placement-plan", placement)
     for field, value in (("host_state_bytes", "0"), ("device_state_bytes", "18446744073709551616"), ("projection_tile_rows", 0)):
         altered = copy.deepcopy(placement)

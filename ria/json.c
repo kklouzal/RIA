@@ -40,7 +40,9 @@ static bool distinct(parser *p, const ria_json_node *object) {
     count++;
   if (count < 2)
     return true;
-  const ria_json_node **keys = malloc(count * sizeof *keys);
+  uint64_t bytes;
+  if (!ria_json_keys_required_bytes(count,&bytes,p->error)) return false;
+  const ria_json_node **keys = malloc((size_t)bytes);
   if (!keys)
     return ria_fail(p->error, RIA_RESOURCE_LIMIT,
                     "duplicate-key check allocation failed");
@@ -332,22 +334,51 @@ static bool value(parser *p, uint32_t depth, uint32_t *out) {
     return invalid(p, "nonfinite or invalid number");
   return true;
 }
+bool ria_json_parse_required_bytes(size_t n,ria_json_limits limits,uint32_t *cap,uint64_t *owned,ria_error *e) {
+  if (!cap || !owned || !n || n > limits.max_bytes || n > PTRDIFF_MAX ||
+      limits.max_nodes == 0 || limits.max_nodes > 1000000 ||
+      limits.max_depth == 0 || limits.max_depth > 128)
+    return ria_fail(e, RIA_RESOURCE_LIMIT, "invalid JSON bounds");
+  uint64_t possible = (uint64_t)n / 2 + 1;
+  *cap = possible < limits.max_nodes ? (uint32_t)possible : limits.max_nodes;
+  uint64_t node_bytes;
+  if (!ria_u64_mul(*cap, sizeof(ria_json_node), &node_bytes) ||
+      !ria_u64_add(node_bytes, n + 1, owned) || *owned>SIZE_MAX)
+    return ria_fail(e, RIA_RESOURCE_LIMIT, "JSON allocation capacity overflow");
+  return true;
+}
+bool ria_json_canonical_required_bytes(uint64_t strings,uint32_t nodes,uint64_t *bytes,ria_error *e) {
+  uint64_t a;
+  if (!bytes || !nodes || !ria_u64_mul(strings,6,bytes) ||
+      !ria_u64_mul(nodes,64,&a) || !ria_u64_add(*bytes,a,bytes) ||
+      !ria_u64_add(*bytes,1,bytes) || *bytes>SIZE_MAX)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"canonical size overflow");
+  return true;
+}
+bool ria_json_keys_required_bytes(uint64_t slots,uint64_t *bytes,ria_error *e) {
+  if (!bytes || !ria_u64_mul(slots,sizeof(const ria_json_node *),bytes) || *bytes>SIZE_MAX)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"JSON key-array allocation overflow");
+  return true;
+}
+bool ria_json_control_required_bytes(ria_json_limits limits,uint64_t *owned,uint64_t *canonical,uint64_t *keys,ria_error *e) {
+  uint32_t cap;uint64_t strings,key_count;
+  if (!owned || !canonical || !keys ||
+      !ria_json_parse_required_bytes(limits.max_bytes,limits,&cap,owned,e) ||
+      !ria_u64_add(limits.max_bytes,1,&strings) ||
+      !ria_json_canonical_required_bytes(strings,cap,canonical,e) ||
+      !ria_u64_add(cap,limits.max_depth,&key_count) ||
+      !ria_json_keys_required_bytes(key_count,keys,e))
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"control JSON allocation bound overflow");
+  return true;
+}
 bool ria_json_parse(const void *bytes, size_t n, ria_json_limits limits,
                     ria_json_doc *doc, ria_error *e) {
   if (!doc)
     return ria_fail(e, RIA_INVALID_REQUEST, "null JSON document");
   memset(doc, 0, sizeof *doc);
-  if (!bytes || !n || n > limits.max_bytes || n > PTRDIFF_MAX ||
-      limits.max_nodes == 0 || limits.max_nodes > 1000000 ||
-      limits.max_depth == 0 || limits.max_depth > 128)
-    return ria_fail(e, RIA_RESOURCE_LIMIT, "invalid JSON bounds");
-  uint64_t possible = (uint64_t)n / 2 + 1;
-  uint32_t cap =
-      possible < limits.max_nodes ? (uint32_t)possible : limits.max_nodes;
-  uint64_t node_bytes;
-  if (!ria_u64_mul(cap, sizeof *doc->nodes, &node_bytes) ||
-      !ria_u64_add(node_bytes, n + 1, &doc->allocated_bytes))
-    return ria_fail(e, RIA_RESOURCE_LIMIT, "JSON allocation capacity overflow");
+  uint32_t cap;
+  if (!bytes) return ria_fail(e,RIA_RESOURCE_LIMIT,"invalid JSON bounds");
+  if (!ria_json_parse_required_bytes(n,limits,&cap,&doc->allocated_bytes,e)) return false;
   doc->nodes = calloc(cap, sizeof *doc->nodes);
   doc->strings = malloc(n + 1);
   if (!doc->nodes || !doc->strings) {
@@ -790,7 +821,9 @@ static bool encode(const ria_json_doc *doc, uint32_t i, writer *w, bool exclude,
     size_t count = 0;
     for (uint32_t j = n->child; j != RIA_JSON_NONE; j = doc->nodes[j].next)
       count++;
-    const ria_json_node **keys = malloc((count ? count : 1) * sizeof *keys);
+    uint64_t key_bytes;
+    if (!ria_json_keys_required_bytes(count ? count : 1,&key_bytes,w->error)) return false;
+    const ria_json_node **keys = malloc((size_t)key_bytes);
     if (!keys)
       return ria_fail(w->error, RIA_RESOURCE_LIMIT,
                       "canonical key allocation failed");
@@ -824,11 +857,9 @@ bool ria_json_canonical(const ria_json_doc *doc, bool exclude, char **out,
                         size_t *length, ria_error *e) {
   if (!doc || !doc->count || !out || !length)
     return ria_fail(e, RIA_INVALID_REQUEST, "empty canonical input");
-  uint64_t cap, a;
-  if (!ria_u64_mul(doc->string_bytes, 6, &cap) ||
-      !ria_u64_mul(doc->count, 64, &a) || !ria_u64_add(cap, a, &cap) ||
-      !ria_u64_add(cap, 1, &cap))
-    return ria_fail(e, RIA_RESOURCE_LIMIT, "canonical size overflow");
+  uint64_t cap;
+  if (!ria_json_canonical_required_bytes(doc->string_bytes,doc->count,&cap,e))
+    return false;
   size_t bytes;
   if (!ria_size(cap, &bytes, e))
     return false;

@@ -105,6 +105,17 @@ tolerance is inferred. The initial/final qualification scope is an audit label
 on request, calibration and deployment lock; it does not change runtime
 environment identity when the physical settings and policies are identical.
 
+The planning request must declare `prefill_rows` from 1 through 64, no greater
+than `context_positions`. Client placement must declare the identical
+`runtime.prefill_rows`; the native memory plan preserves that bound. The
+protected snapshots, expert groups, projection workspace, pinned staging and
+endpoint result/wire storage are sized before admission with the same native
+allocation equations used by serving. These persistent pools count throughout
+the session; decode consumes one row. An earlier package without an explicit
+microbatch is rejected. Regenerate the placement/planning documents, inventory,
+bootstrap/probe/calibration evidence, memory plan and deployment lock whenever
+the selected microbatch changes, then recreate the containers.
+
 On each actual native Linux x86-64 host, first record the real rootful Engine,
 cgroup-v2 topology and intended host parent hierarchy:
 

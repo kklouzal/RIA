@@ -40,6 +40,10 @@ struct ria_graph {
     engram_cache_entry *engram_cache;
     float input[5120],contributions[6*5120],remote_contributions[6*5120];
     uint8_t packed_rows[24*264],packed_window[128*528],packed_selected[512*288];
+    ria_graph_prefill_row *prefill;
+    float *group_inputs,*group_outputs,*group_coefficients;
+    uint64_t *group_row_ids;
+    uint16_t *group_slots,*group_rows;
     bool poisoned,locked,owner_locked;
     ria_expert_cuda_resident local_device[];
 };
@@ -58,9 +62,9 @@ static bool page_round(uint64_t bytes,uint64_t *rounded,ria_error *e) {
         return ria_fail(e,RIA_RESOURCE_LIMIT,"private graph allocation rounding overflow");
     *rounded=sum/(uint64_t)page*(uint64_t)page;return true;
 }
-static bool private_sizes(uint64_t max_tokens,uint32_t locals,uint64_t cache_budget,uint64_t *owner,uint64_t *state,ria_error *e) {
+static bool private_sizes(uint64_t max_tokens,uint32_t locals,uint64_t cache_budget,uint32_t rows,uint64_t *owner,uint64_t *state,ria_error *e) {
     uint64_t bytes=40*128*528;
-    if (!max_tokens || max_tokens>1048576) return ria_fail(e,RIA_INVALID_REQUEST,"invalid graph state extent");
+    if (!max_tokens || max_tokens>1048576 || rows>max_tokens) return ria_fail(e,RIA_INVALID_REQUEST,"invalid graph state extent");
     for (unsigned i=0;i<4;++i) {
         uint64_t count=max_tokens/(i==3 ? 1 : 2),part;
         if (!ria_u64_mul(count,356,&part) || !ria_u64_add(bytes,part,&bytes) || !ria_u64_add(bytes,8192,&bytes))
@@ -71,17 +75,20 @@ static bool private_sizes(uint64_t max_tokens,uint32_t locals,uint64_t cache_bud
         !ria_u64_add(metadata,sizeof(ria_graph),&metadata) ||
         !ria_u64_add(bytes,cache ? RIA_CACHE_ALIGNMENT-1 : 0,&bytes) || !ria_u64_add(bytes,cache,&bytes))
         return ria_fail(e,RIA_RESOURCE_LIMIT,"local metadata/Engram cache allocation overflow");
-    return page_round(metadata,owner,e) && page_round(bytes,state,e);
+    uint64_t prefill,device,pinned;
+    return ria_graph_prefill_required_bytes(rows,1,&prefill,&device,&pinned,e) &&
+           page_round(metadata,owner,e) && page_round(bytes,state,e) &&
+           (ria_u64_add(*state,prefill,state) || ria_fail(e,RIA_RESOURCE_LIMIT,"complete prompt/private state overflow"));
 }
 bool ria_graph_host_state_required(uint64_t max_tokens,uint64_t *bytes,ria_error *e) {
     uint64_t owner,state;
     if (!bytes) return ria_fail(e,RIA_INVALID_REQUEST,"missing graph state size result");
-    if (!private_sizes(max_tokens,0,0,&owner,&state,e)) return false;
+    if (!private_sizes(max_tokens,0,0,1,&owner,&state,e)) return false;
     return ria_u64_add(owner,state,bytes) || ria_fail(e,RIA_RESOURCE_LIMIT,"graph total private size overflow");
 }
 bool ria_graph_host_required_bytes(const ria_graph_options *o,uint64_t *bytes,ria_error *e) {
     uint64_t owner,state;
-    if (!o || !bytes || !private_sizes(o->max_tokens,o->local_expert_count,o->engram_cache_budget,&owner,&state,e)) return false;
+    if (!o || !bytes || !private_sizes(o->max_tokens,o->local_expert_count,o->engram_cache_budget,o->prefill_rows,&owner,&state,e)) return false;
     return ria_u64_add(owner,state,bytes) || ria_fail(e,RIA_RESOURCE_LIMIT,"complete host graph size overflow");
 }
 bool ria_graph_local_experts_validate(const ria_graph_options *o,uint64_t *host,uint64_t *device,ria_error *e) {
@@ -154,7 +161,7 @@ bool ria_graph_partition(const ria_graph_options *o,uint32_t layer,ria_graph_pha
 }
 bool ria_graph_pinned_required_bytes(const ria_graph_options *o,uint64_t *bytes,ria_error *e) {
     uint64_t graph,vision=0;
-    if (!o || !bytes || !ria_expert_cuda_pinned_required_bytes(32768,32768,129280,1,o->projection_tile_rows,&graph,e)) return false;
+    if (!o || !bytes || !ria_expert_cuda_pinned_required_bytes(32768,32768,129280,o->prefill_rows,o->projection_tile_rows,&graph,e)) return false;
     if (o->max_image_patches && !ria_expert_cuda_pinned_required_bytes(9216,5632,5120,64,128,&vision,e)) return false;
     return ria_u64_add(graph,vision,bytes) || ria_fail(e,RIA_RESOURCE_LIMIT,"complete graph pinned reservation overflow");
 }
@@ -175,7 +182,8 @@ bool ria_graph_options_validate(const ria_graph_options *o,ria_error *e) {
     if (!o || o->device!=0 || !o->gpu_uuid || strncmp(o->gpu_uuid,"GPU-",4) || strlen(o->gpu_uuid)!=40 ||
         !o->max_tokens || o->max_tokens>1048576 || !o->host_state_budget || !o->device_budget || !o->pinned_budget ||
         !o->projection_tile_rows || o->projection_tile_rows>4096 || !o->state_tile_rows || o->state_tile_rows>4096 ||
-        o->max_image_patches>9216 || !o->compressed_token_map || o->compressed_vocab!=99092 || o->pad_compressed_id>=99092)
+        o->max_image_patches>9216 || !o->prefill_rows || o->prefill_rows>RIA_GRAPH_PREFILL_MAX_ROWS || o->prefill_rows>o->max_tokens ||
+        !o->compressed_token_map || o->compressed_vocab!=99092 || o->pad_compressed_id>=99092)
         return ria_fail(e,RIA_INVALID_REQUEST,"graph options differ from pinned V4.1 contract/admission");
     uint64_t pinned;
     if (!ria_graph_pinned_required_bytes(o,&pinned,e) || pinned>o->pinned_budget)
@@ -289,6 +297,24 @@ static bool bind_layer(ria_graph *g,unsigned l,ria_error *e) {
     return true;
 }
 static unsigned source_slot(uint32_t source) { for (unsigned i=0;i<4;++i) if (kv_sources[i]==source) return i;return 4; }
+/* Bind the single authoritative layout used by pure admission. All pointer
+ * offsets are aligned because row size is eight-aligned and float row width
+ * is a multiple of eight. The whole arena is protected by its owning mmap. */
+static bool prefill_bind(ria_graph *g,ria_error *e) {
+    uint64_t host,device,pinned;
+    if (!ria_graph_prefill_required_bytes(g->options.prefill_rows,g->options.projection_tile_rows,&host,&device,&pinned,e) ||
+        host>g->state_bytes) return ria_fail(e,RIA_RESOURCE_LIMIT,"prompt workspace is outside owned private state");
+    uint8_t *cursor=g->host_allocation+g->state_bytes-host;
+    void *storage=cursor;
+    g->prefill=storage;cursor+=(uint64_t)g->options.prefill_rows*sizeof(*g->prefill);
+    storage=cursor;g->group_inputs=storage;cursor+=(uint64_t)g->options.prefill_rows*5120*sizeof(float);
+    storage=cursor;g->group_outputs=storage;cursor+=(uint64_t)g->options.prefill_rows*5120*sizeof(float);
+    storage=cursor;g->group_row_ids=storage;cursor+=(uint64_t)g->options.prefill_rows*sizeof(uint64_t);
+    storage=cursor;g->group_coefficients=storage;cursor+=(uint64_t)g->options.prefill_rows*sizeof(float);
+    storage=cursor;g->group_slots=storage;cursor+=(uint64_t)g->options.prefill_rows*sizeof(uint16_t);
+    storage=cursor;g->group_rows=storage;
+    return true;
+}
 static bool allocate_private(ria_graph *g,ria_error *e) {
     /* MAP_ANONYMOUS ignores fd; -1 prevents an accidental file mapping. */
     // cppcheck-suppress invalidFunctionArg
@@ -319,16 +345,16 @@ static bool allocate_private(ria_graph *g,ria_error *e) {
     g->engram_capacity=g->options.engram_cache_budget/sizeof(engram_cache_entry);
     if (g->engram_capacity) { uintptr_t aligned=((uintptr_t)cursor+RIA_CACHE_ALIGNMENT-1)/RIA_CACHE_ALIGNMENT*RIA_CACHE_ALIGNMENT;
         g->engram_cache=(engram_cache_entry *)aligned; }
-    return true;
+    return prefill_bind(g,e);
 }
 bool ria_graph_create(const ria_tensor_store *store,const ria_graph_options *options,ria_graph_remote remote,ria_graph **out,ria_error *e) {
     if (!out) return ria_fail(e,RIA_INVALID_REQUEST,"missing graph output");
     *out=NULL;
-    if (!store || strcmp(store->role,"client") || !remote.experts || !remote.engram)
+    if (!store || strcmp(store->role,"client") || !remote.experts || !remote.experts_batch || !remote.engram)
         return ria_fail(e,RIA_INVALID_REQUEST,"graph requires client store and authenticated remote callbacks");
     if (!ria_graph_options_validate(options,e)) return false;
     uint64_t owner,state,total;
-    if (!private_sizes(options->max_tokens,options->local_expert_count,options->engram_cache_budget,&owner,&state,e) || !ria_u64_add(owner,state,&total)) return false;
+    if (!private_sizes(options->max_tokens,options->local_expert_count,options->engram_cache_budget,options->prefill_rows,&owner,&state,e) || !ria_u64_add(owner,state,&total)) return false;
     if (total>options->host_state_budget) return ria_fail(e,RIA_RESOURCE_LIMIT,"complete private graph state exceeds host budget");
     /* MAP_ANONYMOUS ignores fd; -1 prevents an accidental file mapping. */
     // cppcheck-suppress invalidFunctionArg
@@ -546,10 +572,49 @@ static bool ffn(ria_graph *g,unsigned layer,bool image,ria_error *e) {
     if (!ria_graph_cuda_shared(c,&shared,input,buffer(g,RIA_G_SHARED),e)) return false;
     return ria_graph_cuda_merge(c,ids,g->contributions,buffer(g,RIA_G_SHARED),buffer(g,RIA_G_OUTPUT),e);
 }
+/* One row's causal, learned front half. The same operator order is shared by
+ * decode and grouped prefill; only independent routed work is rescheduled. */
+static bool layer_input(ria_graph *g,unsigned layer,bool image,ria_error *e) {
+    graph_layer *x=&g->layers[layer];ria_graph_cuda *c=g->cuda;
+    float *h=buffer(g,RIA_G_H),*residual=buffer(g,RIA_G_RESIDUAL),*input=buffer(g,RIA_G_INPUT);
+    if ((layer==1 || layer==14) && !image) {
+        uint64_t ids[24];
+        if (!ria_graph_hash(&g->options,layer==14,g->history,ids,e) ||
+            !ria_graph_rows_fetch(g->remote,layer,ids,24,g->engram_cache,g->engram_capacity,g->packed_rows,e) ||
+            !ria_graph_cuda_engram(c,g->packed_rows,buffer(g,RIA_G_ENGRAM_INPUT),e) ||
+            !ria_graph_cuda_project(c,&x->engram_kv,buffer(g,RIA_G_ENGRAM_INPUT),buffer(g,RIA_G_ENGRAM_KV),true,e) ||
+            !ria_graph_cuda_engram_fuse(c,h,buffer(g,RIA_G_ENGRAM_KV),x->engram_q,x->engram_k,true,e)) return false;
+    }
+    return ria_graph_cuda_copy(c,residual,h,20480,e) &&
+           ria_graph_cuda_project(c,&x->hc_attn,h,buffer(g,RIA_G_MIX),false,e) &&
+           ria_graph_cuda_mhc(c,h,buffer(g,RIA_G_MIX),x->attn_scale,x->attn_base,
+                               buffer(g,RIA_G_ATT_PRE),buffer(g,RIA_G_ATT_POST),buffer(g,RIA_G_ATT_COMB),e) &&
+           ria_graph_cuda_collapse(c,h,buffer(g,RIA_G_PRE),input,e) && ria_graph_cuda_norm(c,input,1,5120,x->attn_norm,false,e) &&
+           attention(g,layer,e) && ria_graph_cuda_post(c,buffer(g,RIA_G_OUTPUT),residual,buffer(g,RIA_G_ATT_POST),buffer(g,RIA_G_ATT_COMB),h,e) &&
+           ria_graph_cuda_copy(c,residual,h,20480,e) && ria_graph_cuda_project(c,&x->hc_ffn,h,buffer(g,RIA_G_MIX),false,e) &&
+           ria_graph_cuda_mhc(c,h,buffer(g,RIA_G_MIX),x->ffn_scale,x->ffn_base,
+                               buffer(g,RIA_G_FFN_PRE),buffer(g,RIA_G_FFN_POST),buffer(g,RIA_G_FFN_COMB),e) &&
+           ria_graph_cuda_collapse(c,h,buffer(g,RIA_G_ATT_PRE),input,e) && ria_graph_cuda_norm(c,input,1,5120,x->ffn_norm,false,e);
+}
+static bool layer_output(ria_graph *g,ria_error *e) {
+    return ria_graph_cuda_post(g->cuda,buffer(g,RIA_G_OUTPUT),buffer(g,RIA_G_RESIDUAL),buffer(g,RIA_G_FFN_POST),
+                               buffer(g,RIA_G_FFN_COMB),buffer(g,RIA_G_H),e) &&
+           ria_graph_cuda_copy(g->cuda,buffer(g,RIA_G_PRE),buffer(g,RIA_G_FFN_PRE),4,e);
+}
+static bool graph_logits(ria_graph *g,float *output,ria_error *e) {
+    float *input=buffer(g,RIA_G_INPUT);
+    if (!ria_graph_cuda_collapse(g->cuda,buffer(g,RIA_G_H),buffer(g,RIA_G_PRE),input,e) ||
+        !ria_graph_cuda_norm(g->cuda,input,1,5120,g->norm,false,e) ||
+        !ria_graph_cuda_project(g->cuda,&g->head,input,buffer(g,RIA_G_LOGITS),false,e) ||
+        !ria_graph_cuda_download(g->cuda,buffer(g,RIA_G_LOGITS),output,129280,e)) return false;
+    for (unsigned i=0;i<RIA_GRAPH_VOCAB;++i) if (!isfinite(output[i]))
+        return ria_fail(e,RIA_EXECUTOR_ERROR,"source graph produced nonfinite logits");
+    return true;
+}
 bool ria_graph_step(ria_graph *g,uint32_t token,bool image,const float *embedding,float logits[RIA_GRAPH_VOCAB],ria_error *e) {
     if (!g || !logits || token>=129280 || g->poisoned || g->position>=g->options.max_tokens || (embedding && !image))
         return ria_fail(e,RIA_INVALID_REQUEST,"invalid/out-of-capacity/poisoned graph step");
-    ria_graph_cuda *c=g->cuda;float *h=buffer(g,RIA_G_H),*residual=buffer(g,RIA_G_RESIDUAL),*input=buffer(g,RIA_G_INPUT);
+    ria_graph_cuda *c=g->cuda;float *h=buffer(g,RIA_G_H),*input=buffer(g,RIA_G_INPUT);
     /* Single-Pass mHC carries pre-mixes between layers of this token only.
      * The source forward initializes each token independently of cached state. */
     if (!ria_graph_cuda_begin_step(c,e)) goto bad;
@@ -558,43 +623,158 @@ bool ria_graph_step(ria_graph *g,uint32_t token,bool image,const float *embeddin
     if (!(embedding ? ria_graph_cuda_upload(c,input,embedding,5120,e) :
                       ria_graph_cuda_tensor(c,g->embedding,(uint64_t)token*5120,input,5120,e)) || !ria_graph_cuda_expand(c,input,h,e)) goto bad;
     for (unsigned layer=0;layer<40;++layer) {
-        graph_layer *x=&g->layers[layer];
-        if ((layer==1 || layer==14) && !image) {
-            uint64_t ids[24];
-            if (!ria_graph_hash(&g->options,layer==14,g->history,ids,e) ||
-                !ria_graph_rows_fetch(g->remote,layer,ids,24,g->engram_cache,g->engram_capacity,g->packed_rows,e) ||
-                !ria_graph_cuda_engram(c,g->packed_rows,buffer(g,RIA_G_ENGRAM_INPUT),e) ||
-                !ria_graph_cuda_project(c,&x->engram_kv,buffer(g,RIA_G_ENGRAM_INPUT),buffer(g,RIA_G_ENGRAM_KV),true,e) ||
-                !ria_graph_cuda_engram_fuse(c,h,buffer(g,RIA_G_ENGRAM_KV),x->engram_q,x->engram_k,true,e)) goto bad;
-        }
-        if (!ria_graph_cuda_copy(c,residual,h,20480,e) ||
-            !ria_graph_cuda_project(c,&x->hc_attn,h,buffer(g,RIA_G_MIX),false,e) ||
-            !ria_graph_cuda_mhc(c,h,buffer(g,RIA_G_MIX),x->attn_scale,x->attn_base,
-                                buffer(g,RIA_G_ATT_PRE),buffer(g,RIA_G_ATT_POST),buffer(g,RIA_G_ATT_COMB),e) ||
-            !ria_graph_cuda_collapse(c,h,buffer(g,RIA_G_PRE),input,e) || !ria_graph_cuda_norm(c,input,1,5120,x->attn_norm,false,e) ||
-            !attention(g,layer,e) || !ria_graph_cuda_post(c,buffer(g,RIA_G_OUTPUT),residual,buffer(g,RIA_G_ATT_POST),buffer(g,RIA_G_ATT_COMB),h,e) ||
-            !ria_graph_cuda_copy(c,residual,h,20480,e) || !ria_graph_cuda_project(c,&x->hc_ffn,h,buffer(g,RIA_G_MIX),false,e) ||
-            !ria_graph_cuda_mhc(c,h,buffer(g,RIA_G_MIX),x->ffn_scale,x->ffn_base,
-                                buffer(g,RIA_G_FFN_PRE),buffer(g,RIA_G_FFN_POST),buffer(g,RIA_G_FFN_COMB),e) ||
-            !ria_graph_cuda_collapse(c,h,buffer(g,RIA_G_ATT_PRE),input,e) || !ria_graph_cuda_norm(c,input,1,5120,x->ffn_norm,false,e) ||
-            !ffn(g,layer,image,e) || !ria_graph_cuda_post(c,buffer(g,RIA_G_OUTPUT),residual,buffer(g,RIA_G_FFN_POST),buffer(g,RIA_G_FFN_COMB),h,e) ||
-            !ria_graph_cuda_copy(c,buffer(g,RIA_G_PRE),buffer(g,RIA_G_FFN_PRE),4,e)) goto bad;
+        if (!layer_input(g,layer,image,e) || !ffn(g,layer,image,e) || !layer_output(g,e)) goto bad;
     }
-    if (!ria_graph_cuda_collapse(c,h,buffer(g,RIA_G_PRE),input,e) || !ria_graph_cuda_norm(c,input,1,5120,g->norm,false,e) ||
-        !ria_graph_cuda_project(c,&g->head,input,buffer(g,RIA_G_LOGITS),false,e) ||
-        !ria_graph_cuda_download(c,buffer(g,RIA_G_LOGITS),logits,129280,e)) goto bad;
-    for (unsigned i=0;i<RIA_GRAPH_VOCAB;++i) if (!isfinite(logits[i])) {
-        (void)ria_fail(e,RIA_EXECUTOR_ERROR,"source graph produced nonfinite logits");
-        goto bad;
-    }
+    if (!graph_logits(g,logits,e)) goto bad;
     ++g->position;return true;
 bad:g->poisoned=true;(void)ria_graph_cuda_drain(c,NULL);return false;
 }
+static bool contribution_validate(const float *values,uint32_t rows,ria_error *e) {
+    for (uint64_t i=0;i<(uint64_t)rows*5120;++i) {
+        uint32_t bits;memcpy(&bits,values+i,sizeof(bits));
+        if (!isfinite(values[i]) || (bits&65535u))
+            return ria_fail(e,RIA_EXECUTOR_ERROR,"grouped expert contribution is not finite BF16-rounded FP32");
+    }
+    return true;
+}
+/* One original expert at a time: bounded CUDA/remote tile reuse, without a
+ * resident layer union. The collected rows retain their causal identity and
+ * selected slot, so arrival/group order never defines merge order. */
+static bool prefill_experts(ria_graph *g,unsigned layer,uint32_t count,uint64_t first,
+                            ria_graph_cancel_fn cancel,void *cancel_context,ria_error *e) {
+    for (uint16_t expert=0;expert<RIA_GRAPH_EXPERTS;++expert) {
+        uint32_t rows=0;
+        for (uint32_t row=0;row<count;++row) {
+            const ria_graph_prefill_row *r=&g->prefill[row];
+            for (uint16_t slot=0;slot<RIA_GRAPH_SELECTED;++slot) if (r->ids[slot]==expert) {
+                memcpy(g->group_inputs+(uint64_t)rows*5120,r->input,5120*sizeof(float));
+                g->group_row_ids[rows]=first+row;g->group_coefficients[rows]=r->coefficients[slot];
+                g->group_slots[rows]=slot;g->group_rows[rows]=(uint16_t)row;++rows;
+            }
+        }
+        if (!rows) continue;
+        if (cancel && cancel(cancel_context)) return ria_fail(e,RIA_CANCELLED,"grouped prompt cancelled before expert group");
+        int32_t index=g->local_index[layer][expert];
+        const ria_graph_local_expert *local=index>=0 ? &g->options.local_experts[index] : NULL;
+        if (local && (local->phase_mask&(1u<<(unsigned)g->phase))) {
+            const ria_expert_cuda_resident *resident=local->tier==RIA_GRAPH_VRAM ? &g->local_device[index] : NULL;
+            if (!ria_graph_cuda_local_batch(g->cuda,&local->expert,resident,g->group_inputs,rows,g->group_coefficients,g->group_outputs,e)) return false;
+        } else if (!g->remote.experts_batch(g->remote.context,layer,expert,rows,g->group_row_ids,g->group_inputs,
+                                          g->group_coefficients,g->group_slots,g->group_outputs,e)) return false;
+        if (!contribution_validate(g->group_outputs,rows,e)) return false;
+        for (uint32_t row=0;row<rows;++row)
+            memcpy(g->prefill[g->group_rows[row]].contributions+(uint64_t)g->group_slots[row]*5120,
+                   g->group_outputs+(uint64_t)row*5120,5120*sizeof(float));
+    }
+    return true;
+}
+/* Both result obligations must remain satisfiable. An exact final-row alias
+ * denotes the same result; any other overlap would overwrite teacher-forced
+ * logits. Validate address arithmetic before comparing the final row. */
+static bool prefill_outputs(float *last,float *all,uint64_t count,ria_error *e) {
+    const uint64_t row_bytes=RIA_GRAPH_VOCAB*sizeof(float);uint64_t all_bytes;
+    uintptr_t last_begin=(uintptr_t)last;
+    if (row_bytes>UINTPTR_MAX-last_begin)
+        return ria_fail(e,RIA_INVALID_REQUEST,"prefill last-logit span is unrepresentable");
+    if (!all) return true;
+    uintptr_t all_begin=(uintptr_t)all;
+    if (!ria_u64_mul(count,row_bytes,&all_bytes) || all_bytes>SIZE_MAX || all_bytes>UINTPTR_MAX-all_begin)
+        return ria_fail(e,RIA_INVALID_REQUEST,"prefill teacher-forced logit span is unrepresentable");
+    if (last_begin==all_begin+(count-1)*row_bytes) return true;
+    return ria_expert_ranges_disjoint(last,row_bytes,all,all_bytes) ||
+           ria_fail(e,RIA_INVALID_REQUEST,"prefill output spans overlap outside the exact final row");
+}
+bool ria_graph_prefill_rows(ria_graph *g,const uint32_t *tokens,const float *const *images,uint32_t count,
+                             float *last,float *all,ria_graph_cancel_fn cancel,void *cancel_context,ria_error *e) {
+    if (!g || !tokens || !last || g->poisoned || !g->prefill || !g->remote.experts_batch || !count ||
+        count>g->options.prefill_rows || g->position>g->options.max_tokens || count>g->options.max_tokens-g->position)
+        return ria_fail(e,RIA_INVALID_REQUEST,"invalid admitted grouped graph prefill");
+    if (!prefill_outputs(last,all,count,e)) return false;
+    for (uint32_t row=0;row<count;++row) {
+        if (tokens[row]>=RIA_GRAPH_VOCAB) return ria_fail(e,RIA_INVALID_REQUEST,"prefill token is outside source vocabulary");
+        if (images && images[row]) for (uint32_t k=0;k<RIA_GRAPH_DIM;++k) if (!isfinite(images[row][k]))
+            return ria_fail(e,RIA_INVALID_REQUEST,"prefill image embedding is nonfinite");
+    }
+    ria_graph_cuda *c=g->cuda;uint64_t first=g->position;
+    /* History is causal metadata, not a neural operation. Snapshot it before
+     * layers are transposed; each Engram consumer sees that row's own prefix. */
+    int64_t history[4];memcpy(history,g->history,sizeof(history));
+    for (uint32_t row=0;row<count;++row) {
+        if (cancel && cancel(cancel_context)) { (void)ria_fail(e,RIA_CANCELLED,"grouped prompt cancelled before row initialization");goto bad; }
+        ria_graph_prefill_row *r=&g->prefill[row];r->image=images && images[row];
+        for (unsigned i=3;i>0;--i) history[i]=history[i-1];
+        history[0]=r->image ? INT64_C(-1) : (int64_t)g->options.compressed_token_map[tokens[row]];
+        memcpy(r->history,history,sizeof(history));r->selected_count=0;r->candidate_count=0;
+        if (!ria_graph_cuda_begin_step(c,e) ||
+            !(r->image ? ria_graph_cuda_upload(c,buffer(g,RIA_G_INPUT),images[row],5120,e) :
+                         ria_graph_cuda_tensor(c,g->embedding,(uint64_t)tokens[row]*5120,buffer(g,RIA_G_INPUT),5120,e)) ||
+            !ria_graph_cuda_expand(c,buffer(g,RIA_G_INPUT),buffer(g,RIA_G_H),e) ||
+            !ria_graph_cuda_download(c,buffer(g,RIA_G_H),r->h,20480,e) ||
+            !ria_graph_cuda_download(c,buffer(g,RIA_G_PRE),r->pre,4,e)) goto bad;
+    }
+    for (unsigned layer=0;layer<RIA_GRAPH_LAYERS;++layer) {
+        graph_layer *x=&g->layers[layer];
+        for (uint32_t row=0;row<count;++row) {
+            if (cancel && cancel(cancel_context)) { (void)ria_fail(e,RIA_CANCELLED,"grouped prompt cancelled before layer row");goto bad; }
+            ria_graph_prefill_row *r=&g->prefill[row];g->position=first+row;
+            memcpy(g->history,r->history,sizeof(g->history));g->selected_count=r->selected_count;
+            memcpy(g->selected,r->selected,(size_t)r->selected_count*sizeof(uint32_t));
+            if (!ria_graph_cuda_upload(c,buffer(g,RIA_G_H),r->h,20480,e) ||
+                !ria_graph_cuda_upload(c,buffer(g,RIA_G_PRE),r->pre,4,e) ||
+                (layer>20 && x->index_source==layer && !ria_graph_cuda_candidates_set(c,r->candidate_blocks,r->candidate_count,e)) ||
+                !layer_input(g,layer,r->image,e) ||
+                !ria_graph_cuda_project(c,&x->router,buffer(g,RIA_G_INPUT),buffer(g,RIA_G_ROUTER),false,e) ||
+                !ria_graph_cuda_route(c,buffer(g,RIA_G_ROUTER),r->image ? x->bias_vl : x->bias,r->ids,r->coefficients,e)) goto bad;
+            ria_expert shared={x->shared_gate,x->shared_up,x->shared_down,10};
+            if (!ria_graph_cuda_shared(c,&shared,buffer(g,RIA_G_INPUT),buffer(g,RIA_G_SHARED),e) ||
+                !ria_graph_cuda_download(c,buffer(g,RIA_G_INPUT),r->input,5120,e) ||
+                !ria_graph_cuda_download(c,buffer(g,RIA_G_SHARED),r->shared,5120,e) ||
+                !ria_graph_cuda_download(c,buffer(g,RIA_G_RESIDUAL),r->residual,20480,e) ||
+                !ria_graph_cuda_download(c,buffer(g,RIA_G_FFN_PRE),r->ffn_pre,4,e) ||
+                !ria_graph_cuda_download(c,buffer(g,RIA_G_FFN_POST),r->ffn_post,4,e) ||
+                !ria_graph_cuda_download(c,buffer(g,RIA_G_FFN_COMB),r->ffn_comb,16,e) ||
+                (layer==20 && !ria_graph_cuda_candidates_get(c,r->candidate_blocks,&r->candidate_count,e))) goto bad;
+            r->selected_count=g->selected_count;memcpy(r->selected,g->selected,(size_t)g->selected_count*sizeof(uint32_t));
+        }
+        if (!prefill_experts(g,layer,count,first,cancel,cancel_context,e)) goto bad;
+        for (uint32_t row=0;row<count;++row) {
+            if (cancel && cancel(cancel_context)) { (void)ria_fail(e,RIA_CANCELLED,"grouped prompt cancelled before row scatter");goto bad; }
+            ria_graph_prefill_row *r=&g->prefill[row];
+            if (!ria_graph_cuda_upload(c,buffer(g,RIA_G_RESIDUAL),r->residual,20480,e) ||
+                !ria_graph_cuda_upload(c,buffer(g,RIA_G_SHARED),r->shared,5120,e) ||
+                !ria_graph_cuda_upload(c,buffer(g,RIA_G_FFN_PRE),r->ffn_pre,4,e) ||
+                !ria_graph_cuda_upload(c,buffer(g,RIA_G_FFN_POST),r->ffn_post,4,e) ||
+                !ria_graph_cuda_upload(c,buffer(g,RIA_G_FFN_COMB),r->ffn_comb,16,e) ||
+                !ria_graph_cuda_merge(c,r->ids,r->contributions,buffer(g,RIA_G_SHARED),buffer(g,RIA_G_OUTPUT),e) ||
+                !layer_output(g,e) || !ria_graph_cuda_download(c,buffer(g,RIA_G_H),r->h,20480,e) ||
+                !ria_graph_cuda_download(c,buffer(g,RIA_G_PRE),r->pre,4,e)) goto bad;
+        }
+    }
+    for (uint32_t row=all ? 0 : count-1;row<count;++row) {
+        if (cancel && cancel(cancel_context)) { (void)ria_fail(e,RIA_CANCELLED,"grouped prompt cancelled before vocabulary head");goto bad; }
+        const ria_graph_prefill_row *r=&g->prefill[row];g->position=first+row;
+        if (!ria_graph_cuda_upload(c,buffer(g,RIA_G_H),r->h,20480,e) ||
+            !ria_graph_cuda_upload(c,buffer(g,RIA_G_PRE),r->pre,4,e) ||
+            !graph_logits(g,all ? all+(uint64_t)row*RIA_GRAPH_VOCAB : last,e)) goto bad;
+    }
+    if (cancel && cancel(cancel_context)) { (void)ria_fail(e,RIA_CANCELLED,"grouped prompt cancelled before chunk commit");goto bad; }
+    if (all && last!=all+(uint64_t)(count-1)*RIA_GRAPH_VOCAB)
+        memcpy(last,all+(uint64_t)(count-1)*RIA_GRAPH_VOCAB,RIA_GRAPH_VOCAB*sizeof(float));
+    memcpy(g->history,g->prefill[count-1].history,sizeof(g->history));g->position=first+count;return true;
+bad:g->position=first;g->poisoned=true;(void)ria_graph_cuda_drain(c,NULL);return false;
+}
 bool ria_graph_prefill(ria_graph *g,const uint32_t *tokens,uint64_t count,float *last,float *all,ria_error *e) {
-    if (!g || !tokens || !last || !count || count>g->options.max_tokens-g->position ||
-        (all && count>SIZE_MAX/(129280*sizeof(float)))) return ria_fail(e,RIA_INVALID_REQUEST,"invalid bounded graph prefill");
-    for (uint64_t row=0;row<count;++row) if (!ria_graph_step(g,tokens[row],false,NULL,all ? all+row*129280 : last,e)) return false;
-    if (all) memcpy(last,all+(count-1)*129280,129280*sizeof(float));
+    if (!g || !tokens || !last || g->poisoned || !count || !g->options.prefill_rows ||
+        g->position>g->options.max_tokens || count>g->options.max_tokens-g->position)
+        return ria_fail(e,RIA_INVALID_REQUEST,"invalid bounded graph prefill");
+    if (!prefill_outputs(last,all,count,e)) return false;
+    for (uint64_t row=0;row<count;++row) if (tokens[row]>=RIA_GRAPH_VOCAB)
+        return ria_fail(e,RIA_INVALID_REQUEST,"prefill token is outside source vocabulary");
+    for (uint64_t first=0;first<count;) {
+        uint32_t rows=(uint32_t)(count-first<g->options.prefill_rows ? count-first : g->options.prefill_rows);
+        if (!ria_graph_prefill_rows(g,tokens+first,NULL,rows,last,all ? all+first*RIA_GRAPH_VOCAB : NULL,NULL,NULL,e)) return false;
+        first+=rows;
+    }
     return true;
 }
 bool ria_graph_encode_image(ria_graph *g,const float *patches,uint32_t h,uint32_t w,float *output,uint64_t rows,ria_error *e) {

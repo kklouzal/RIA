@@ -5,7 +5,23 @@ target remains Linux x86-64 with the specified physical client/server hardware.
 No checkpoint weights were downloaded, no CUDA kernel was launched, and no
 live model inference, physical target probe or engineering soak was run.
 
-The independent second review corrected numerical scheduling, preparation,
+The later specification7.3 grouped-prefill implementation passed430 Python
+tests,39 production socket lifecycle cases, Ruff, all36 static checks,27
+zero-finding Clang C analyses, ASan/UBSan/leak detection and all four Clang18
+ThreadSanitizer fixtures. Actual graph, engine and worker fixtures cover causal
+row state, grouped original-slot scatter, mixed image rows, continuation,
+aliasing, cancellation and failures. All three CPU and six SM120a CUDA
+executables built; required projection instructions were present and PTX was
+absent. Regenerating all45 schemas produced no changes. Every frozen source
+file's bytes matched across these checks.
+
+The [prompt-prefill checkpoint](../locks/verification/prompt-prefill.json)
+records commands, source/log identities and explicit limitations. See the
+[prefill contract](ria-prompt-prefill.md) for configuration regeneration and
+numerical scope. This closes the scheduling software gap; it does not establish
+GPU/model parity, performance superiority or complete release qualification.
+
+The preceding independent second review corrected numerical scheduling, preparation,
 protocol, resource accounting and ownership defects. Its frozen local sources
 passed413 Python tests, the34-case production socket lifecycle fixture, Ruff,
 all35 static checks (26 owned C modules, zero Clang findings), ASan/UBSan/leaks,
@@ -26,9 +42,9 @@ source revision, runtime UID and SBOM/SLSA descriptors. No image filesystem laye
 were pulled or executed. The [review publication record](../locks/verification/implementation-review-publication.json)
 retains those results; the [handoff](ria-handoff.md) lists the corrected images.
 
-These checks do not establish complete implementation. Grouped prompt prefill
-and complete semantic physical matrix/fault/gate producers remain missing
-software. [The review report](ria-implementation-review.md) and
+The later [grouped prompt-prefill implementation](ria-prompt-prefill.md) closes
+that scheduling gap. Complete semantic physical matrix/fault/gate producers
+remain missing software. [The review report](ria-implementation-review.md) and
 [producer readiness](../planning/qualification-software-readiness.json) list
 the remaining work separately from hardware execution. Generic numeric reports
 grant no release coverage. The prior complete-software claim is withdrawn.

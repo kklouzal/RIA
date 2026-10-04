@@ -12,7 +12,7 @@ typedef struct {
 } ria_memory_peak;
 typedef struct {
   ria_memory_peak phases[RIA_PHASES], peak, caps;
-  uint64_t context_positions, allocation_count;
+  uint64_t context_positions, prefill_rows, allocation_count;
   char role[7], executor[5], profile[6];
   uint8_t logical_model_digest[32], operator_contract_digest[32],
       request_digest[32], inventory_digest[32], probe_digest[32],

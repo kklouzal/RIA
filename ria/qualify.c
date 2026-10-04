@@ -807,7 +807,7 @@ static bool q_norm_case(q_context *q,ria_graph_cuda *g,float *arena) {
     r->times[r->samples++]=q_clock()-start;return q_measure(q,r,expected,actual,10240);
 }
 static bool q_graph(q_context *q) {
-    ria_graph_options o;memset(&o,0,sizeof(o));o.device=0;o.gpu_uuid=q->request.gpu_uuid;o.max_tokens=16409;
+    ria_graph_options o;memset(&o,0,sizeof(o));o.device=0;o.gpu_uuid=q->request.gpu_uuid;o.max_tokens=16409;o.prefill_rows=1;
     o.projection_tile_rows=32;o.state_tile_rows=256;o.device_budget=q->request.device_budget;o.pinned_budget=q->request.pinned_budget;
     uint64_t pinned=0,metadata=ria_graph_cuda_metadata_bytes(),arena_bytes=UINT64_C(200000)*4;
     ria_graph_cuda *g=NULL;float *arena=NULL;bool ok=false;

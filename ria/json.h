@@ -35,6 +35,19 @@ typedef struct {
   size_t max_bytes;
   uint32_t max_nodes, max_depth;
 } ria_json_limits;
+/* Pure allocation equations used by the parser/writer and admission. Owned
+ * parser bytes exclude the borrowed input and temporary duplicate-key array.
+ * Canonical bytes include the terminating byte, before key-array scratch. */
+bool ria_json_parse_required_bytes(size_t length,ria_json_limits,
+                                   uint32_t *node_capacity,uint64_t *owned,ria_error *);
+bool ria_json_canonical_required_bytes(uint64_t string_bytes,uint32_t nodes,
+                                       uint64_t *bytes,ria_error *);
+bool ria_json_keys_required_bytes(uint64_t key_slots,uint64_t *bytes,ria_error *);
+/* Upper bounds for any document accepted by these limits. Nested canonical
+ * object-key arrays remain live while descending; keys includes that peak.
+ * Callers additionally account input/output overlap and multiple documents. */
+bool ria_json_control_required_bytes(ria_json_limits,uint64_t *owned,
+                                     uint64_t *canonical,uint64_t *keys,ria_error *);
 /* DOM owns all strings; no retained input. Reject duplicate keys and invalid
  * UTF-8. Output must not already own resources; free before reuse. Parse/read
  * leave an empty document on failure, including failures before parsing. */

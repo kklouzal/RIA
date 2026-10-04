@@ -30,7 +30,7 @@ typedef struct {
   ria_limits limits;
   ria_expert_config expert;
   uint64_t connect_timeout_ms, host_cap, device_cap, pinned_cap,
-      context_positions;
+      context_positions, prefill_rows;
   uint8_t manifest_digest[32], logical_model_digest[32],
       operator_contract_digest[32];
 } ria_service;
@@ -38,8 +38,11 @@ typedef struct {
  * It checks chosen reservations/affinities against caps, without requiring an
  * admitted model or inspecting physical topology. Serving additionally checks
  * the immutable plan and actual placement before readiness. */
-bool ria_expert_config_parse(const ria_json_doc *,uint32_t,const char *,
+bool ria_expert_config_parse(const ria_json_doc *,uint32_t,const char *,uint32_t prefill_rows,
                              uint64_t,uint64_t,uint64_t,ria_expert_config *,ria_error *);
+/* Pure boundary parsing for the shared transport memory/lifecycle contract.
+ * Updates only network fields; returned strings borrow the input document. */
+bool ria_service_network_parse(const ria_json_doc *,uint32_t,ria_service *,ria_error *);
 bool ria_service_read(ria_service *service, const char *path, ria_error *error);
 void ria_service_free(ria_service *service);
 bool ria_service_grant(const ria_service *service,

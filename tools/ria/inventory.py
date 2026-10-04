@@ -30,6 +30,7 @@ def inventory_request(request, manifest):
         host, device, pinned = (u64(expert[field]) for field in
             ("host_runtime_bytes", "device_workspace_bytes", "pinned_workspace_bytes"))
         policy = {"planning_request": planning, "expert": expert, "network": request["network"]}
+        graph_host, projection, frontend = 0, 0, 0
     else:
         expert = None
         placement = read_json(request["placement_plan"], max_bytes=256 << 10)
@@ -38,6 +39,10 @@ def inventory_request(request, manifest):
         if any(placement[field] != planning[field] for field in ("logical_model_digest", "operator_contract_digest")):
             raise ArtifactError("inventory placement identifies another model/operator")
         runtime = placement["runtime"]
+        if runtime["prefill_rows"] != planning["prefill_rows"] or runtime["prefill_rows"] > planning["context_positions"]:
+            raise ArtifactError("inventory placement prefill microbatch differs from planning workload")
+        graph_host, projection = u64(runtime["host_state_bytes"]), runtime["projection_tile_rows"]
+        frontend = u64(runtime["frontend_host_bytes"])
         pinned = caps["pinned_bytes"]
         host = sum(u64(runtime[field]) for field in
             ("tokenizer_memory_bytes", "host_state_bytes", "frontend_host_bytes")) + pinned
@@ -47,7 +52,9 @@ def inventory_request(request, manifest):
         raise ArtifactError("runtime inventory reservations exceed chosen caps")
     return {"schema_revision": 1, "role": role, "executor": planning["executor"],
         "profile": planning["profile"], "manifest_digest": manifest["digest"],
-        "context_positions": planning["context_positions"], "max_metadata_bytes": host,
+        "context_positions": planning["context_positions"], "prefill_rows": planning["prefill_rows"], "max_metadata_bytes": host,
+        "graph_host_state_bytes": str(graph_host), "projection_tile_rows": projection,
+        "frontend_host_bytes": str(frontend), "network": request["network"],
         "host_cap": caps["host_bytes"], "device_cap": caps["device_bytes"], "pinned_cap": caps["pinned_bytes"],
         "host_runtime_bytes": str(host), "device_runtime_bytes": str(device), "pinned_runtime_bytes": str(pinned),
         "expert": expert, "runtime_policy_digest": digest(policy)}
@@ -70,7 +77,7 @@ def build_inventory(request, manifest_path, output, *, runner=None):
         verify_identity(result)
         if result.get("derivation") != {"manifest_digest": raw["manifest_digest"],
                 "runtime_policy_digest": raw["runtime_policy_digest"], "request_digest": digest(raw),
-                "context_positions": raw["context_positions"]}:
+                "context_positions": raw["context_positions"], "prefill_rows": raw["prefill_rows"]}:
             raise ArtifactError("native inventory provenance differs from its inputs")
         atomic_json(output, result)
         return result

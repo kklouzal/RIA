@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "remote.h"
 #include <openssl/crypto.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,11 +15,54 @@ struct ria_remote {
   ria_binding binding;
   pthread_mutex_t lifecycle;
   uint64_t generation, invocation;
-  unsigned expert_group_limit, row_group_limit;
-  float *expert_results;
+  unsigned expert_group_limit, expert_batch_limit, row_group_limit, prefill_rows;
+  float *expert_results,*batch_results;
   uint8_t *row_results;
   bool aborted;
 };
+bool ria_remote_host_required_bytes(uint32_t rows,const ria_limits *l,uint64_t *bytes,ria_error *e) {
+  if (!l || !bytes || !rows || rows>64 || !l->expert_rows || l->expert_rows>64 ||
+      l->frame_payload_bytes<RIA_ERROR_MAX || !l->row_lookup_rows)
+    return ria_fail(e,RIA_INVALID_REQUEST,"invalid remote prefill reservation bounds");
+  uint64_t fixed,request,response,transient,total,dom,canonical_bytes,keys;
+  /* Bind retains its outbound JSON while receiving/validating the response;
+   * the response and original DOM may coexist. Canonical validation and
+   * nested key ordering own temporary storage, including invalid inputs. */
+  if (!ria_json_control_required_bytes((ria_json_limits){RIA_CONTROL_MAX,8192,32},&dom,&canonical_bytes,&keys,e) ||
+      !ria_u64_mul(dom,2,&transient) || !ria_u64_add(transient,2*RIA_CONTROL_MAX,&transient) ||
+      !ria_u64_add(transient,canonical_bytes,&transient) || !ria_u64_add(transient,keys,&transient))
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"remote control reservation overflow");
+  if (!ria_u64_mul((uint64_t)rows+RIA_GRAPH_SELECTED,RIA_GRAPH_DIM*sizeof(float),&fixed) ||
+      !ria_u64_add(fixed,sizeof(ria_remote)+RIA_GRAPH_HASH_COLUMNS*264,&fixed))
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"remote publication reservation overflow");
+  uint32_t n=(uint32_t)l->expert_rows;
+  for (unsigned shape=0;shape<2;shape++) {
+    uint32_t count=shape ? 1 : n,entries=shape ? RIA_GRAPH_SELECTED : n*RIA_GRAPH_SELECTED;
+    if (!ria_expert_lengths(count,entries,RIA_GRAPH_DIM,RIA_GRAPH_DIM,0,&request,&response,e)) return false;
+    if (request>l->frame_payload_bytes) request=l->frame_payload_bytes;
+    if (response<RIA_ERROR_MAX) response=RIA_ERROR_MAX;
+    if (response>l->frame_payload_bytes) response=l->frame_payload_bytes;
+    if (!ria_u64_add(request,response,&total)) goto overflow;
+    if (total>transient) transient=total;
+  }
+  uint64_t row_count=l->row_lookup_rows;
+  uint64_t fit=(l->frame_payload_bytes-24)/280;
+  if (row_count>fit) row_count=fit;
+  fit=(l->frame_payload_bytes-16)/16;if (row_count>fit) row_count=fit;
+  request=16+row_count*16;response=24+row_count*280;
+  if (response<RIA_ERROR_MAX) response=RIA_ERROR_MAX;
+  if (!ria_u64_add(request,response,&total)) goto overflow;
+  if (total>transient) transient=total;
+  if (!ria_u64_add(l->bulk_data_bytes,64,&response)) goto overflow;
+  if (response<RIA_ERROR_MAX) response=RIA_ERROR_MAX;
+  /* Verified chunk output overlaps its received envelope until the copy has
+   * completed; account the caller-owned result too at this boundary. */
+  if (!ria_u64_add(16,response,&total) || !ria_u64_add(total,l->bulk_data_bytes,&total)) goto overflow;
+  if (total>transient) transient=total;
+  if (!ria_u64_add(fixed,transient,bytes)) goto overflow;
+  return true;
+overflow:return ria_fail(e,RIA_RESOURCE_LIMIT,"remote transient reservation overflow");
+}
 bool ria_request_charge(uint16_t kind, uint64_t request, uint64_t response,
                         uint64_t *charge, ria_error *e) {
   /* Schema-v1 fixed credit table. The 8MiB expert allowance covers the
@@ -96,13 +140,20 @@ static bool group_limits(ria_remote *r,ria_error *e) {
     if (request>l->frame_payload_bytes || response>l->frame_payload_bytes || charge>room) break;
     r->expert_group_limit=entries;
   }
+  for (unsigned rows=1;rows<=r->prefill_rows && rows<=l->expert_rows;rows++) {
+    uint64_t request,response,charge;
+    if (!ria_expert_lengths(rows,rows,RIA_GRAPH_DIM,RIA_GRAPH_DIM,0,&request,&response,e) ||
+        !ria_request_charge(RIA_EXPERT,request,response,&charge,e)) return false;
+    if (request>l->frame_payload_bytes || response>l->frame_payload_bytes || charge>room) break;
+    r->expert_batch_limit=rows;
+  }
   uint64_t rows=(l->frame_payload_bytes-24)/(264+16);
   uint64_t request_rows=(l->frame_payload_bytes-16)/16;
   if (rows>request_rows) rows=request_rows;
   if (rows>l->row_lookup_rows) rows=l->row_lookup_rows;
   if (rows>RIA_GRAPH_HASH_COLUMNS) rows=RIA_GRAPH_HASH_COLUMNS;
   r->row_group_limit=(unsigned)rows;
-  if (l->frame_payload_bytes<RIA_ERROR_MAX || !r->expert_group_limit || !r->row_group_limit)
+  if (l->frame_payload_bytes<RIA_ERROR_MAX || !r->expert_group_limit || !r->expert_batch_limit || !r->row_group_limit)
     return ria_fail(e,RIA_RESOURCE_LIMIT,"binding cannot hold one native expert/Engram/error unit");
   /* Only split realizations need an extra atomic-publication staging pool.
    * Fixed sizes are included in endpoint runtime admission; no HOT allocation. */
@@ -114,6 +165,8 @@ static bool group_limits(ria_remote *r,ria_error *e) {
     r->row_results=calloc(RIA_GRAPH_HASH_COLUMNS,264);
     if (!r->row_results) return ria_fail(e,RIA_RESOURCE_LIMIT,"split row publication pool unavailable");
   }
+  r->batch_results=calloc((size_t)r->prefill_rows*RIA_GRAPH_DIM,sizeof(float));
+  if (!r->batch_results) return ria_fail(e,RIA_RESOURCE_LIMIT,"grouped prefill publication pool unavailable");
   return true;
 }
 static bool exchange(ria_remote *r, uint16_t kind, const void *request,
@@ -363,6 +416,10 @@ bool ria_remote_open(ria_remote **out, const ria_remote_options *o,
     return ria_fail(e, RIA_RESOURCE_LIMIT, "remote session allocation failed");
   r->control.fd = r->bulk.fd = -1;
   r->service = o->service;
+  r->prefill_rows=o->service->prefill_rows;
+  if (!r->prefill_rows || r->prefill_rows>64) {
+    free(r);return ria_fail(e,RIA_INVALID_REQUEST,"remote prefill row bound is not admitted");
+  }
   if (pthread_mutex_init(&r->lifecycle, NULL)) {
     free(r);
     return ria_fail(e, RIA_RESOURCE_LIMIT,
@@ -394,7 +451,7 @@ bool ria_remote_open(ria_remote **out, const ria_remote_options *o,
     ria_transport_close(&r->bulk);
     ria_tls_destroy(&r->tls);
     pthread_mutex_destroy(&r->lifecycle);
-    free(r->expert_results); free(r->row_results);
+    free(r->expert_results); free(r->batch_results); free(r->row_results);
     free(r);
     return false;
   }
@@ -584,8 +641,49 @@ static bool callback_engram(void *c, uint32_t layer, const uint64_t *ids,
   }
   memcpy(out,r->row_results,(size_t)count*264); return true;
 }
+static bool callback_experts_batch(void *c,uint32_t layer,uint16_t expert,uint32_t rows,
+                                    const uint64_t *row_ids,const float *inputs,
+                                    const float *coefficients,const uint16_t *slots,
+                                    float *out,ria_error *e) {
+  ria_remote *r=c;
+  if (!r || !rows || rows>r->prefill_rows || layer>=RIA_GRAPH_LAYERS || expert>=RIA_GRAPH_EXPERTS ||
+      !row_ids || !inputs || !coefficients || !slots || !out || !r->expert_batch_limit)
+    return ria_fail(e,RIA_INVALID_REQUEST,"invalid expert-grouped prompt unit");
+  for (uint32_t row=0;row<rows;row++) {
+    if (slots[row]>=RIA_GRAPH_SELECTED || !isfinite(coefficients[row]) || coefficients[row]<0 || coefficients[row]>1.5f)
+      return ria_fail(e,RIA_INVALID_REQUEST,"invalid grouped prompt slot/coefficient");
+    for (uint32_t earlier=0;earlier<row;earlier++) if (row_ids[earlier]==row_ids[row])
+      return ria_fail(e,RIA_INVALID_REQUEST,"duplicate grouped prompt row identity");
+  }
+  /* Validate every input before the first subgroup is sent. Its wire parser
+   * independently validates each final serialized unit at the boundary. */
+  for (uint64_t i=0;i<(uint64_t)rows*RIA_GRAPH_DIM;i++) {
+    uint32_t bits;memcpy(&bits,inputs+i,sizeof bits);
+    if (!isfinite(inputs[i]) || (bits&65535u))
+      return ria_fail(e,RIA_INVALID_REQUEST,"grouped prompt input is not finite BF16-logical FP32");
+  }
+  uint32_t groups=(rows+r->expert_batch_limit-1)/r->expert_batch_limit;
+  if (UINT64_MAX-r->invocation<groups) {
+    retire(r);return ria_fail(e,RIA_RESOURCE_LIMIT,"logical invocation counter exhausted");
+  }
+  float *destination=groups>1 ? r->batch_results : out;
+  uint32_t offsets[65];uint16_t experts[64];
+  for (uint32_t begin=0;begin<rows;) {
+    uint32_t count=rows-begin;if (count>r->expert_batch_limit) count=r->expert_batch_limit;
+    for (uint32_t row=0;row<count;row++) { offsets[row]=row;experts[row]=expert; }
+    offsets[count]=count;
+    uint64_t invocation=++r->invocation;
+    if (!ria_remote_evaluate(r,layer,invocation,count,row_ids+begin,offsets,experts,slots+begin,
+                             coefficients+begin,inputs+(size_t)begin*RIA_GRAPH_DIM,false,
+                             destination+(size_t)begin*RIA_GRAPH_DIM,e)) return false;
+    begin+=count;
+  }
+  if (groups>1) memcpy(out,destination,(size_t)rows*RIA_GRAPH_DIM*sizeof(float));
+  return true;
+}
 ria_graph_remote ria_remote_callbacks(ria_remote *r) {
-  return (ria_graph_remote){r, callback_experts, callback_engram};
+  return (ria_graph_remote){.context=r,.experts=callback_experts,.engram=callback_engram,
+                            .experts_batch=callback_experts_batch};
 }
 bool ria_remote_chunk(ria_remote *r, const ria_shard *a, uint64_t index,
                       uint8_t **out, size_t *length, ria_error *e) {
@@ -647,7 +745,7 @@ bool ria_remote_close(ria_remote *r, ria_error *e) {
   pthread_mutex_unlock(&r->lifecycle);
   ria_tls_destroy(&r->tls);
   pthread_mutex_destroy(&r->lifecycle);
-  free(r->expert_results); free(r->row_results);
+  free(r->expert_results); free(r->batch_results); free(r->row_results);
   free(r);
   return ok;
 }

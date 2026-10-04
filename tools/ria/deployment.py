@@ -583,6 +583,8 @@ def finalize(request, probe, inventory, calibration, output, *, probe_evidence=N
         placement = read_json(request["placement_plan"])
         validate("placement-plan", placement)
         verify_identity(placement)
+        if placement["runtime"]["prefill_rows"] != planning["prefill_rows"]:
+            raise ArtifactError("placement prefill microbatch differs from planning workload")
         if (placement["logical_model_digest"], placement["operator_contract_digest"]) != (planning["logical_model_digest"], planning["operator_contract_digest"]):
             raise ArtifactError("placement plan identity mismatch")
         if placement["server_executor"] != request["network"]["server_executor"]:
@@ -640,6 +642,8 @@ def finalize(request, probe, inventory, calibration, output, *, probe_evidence=N
         plan = read_json(staging / "memory-plan.json")
         validate("memory-plan", plan)
         verify_identity(plan)
+        if (plan["context_positions"], plan["prefill_rows"]) != (planning["context_positions"], planning["prefill_rows"]):
+            raise ArtifactError("native plan changed admitted context/prefill workload bounds")
         for key, document in (("request_digest", planning), ("inventory_digest", inventory), ("probe_digest", probe), ("calibration_digest", calibration)):
             if plan[key] != digest(document):
                 raise ArtifactError("native plan input identity mismatch")

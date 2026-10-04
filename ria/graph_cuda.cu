@@ -11,7 +11,7 @@ struct ria_graph_cuda {
     ria_expert_cuda *projection;
     cudaStream_t stream;
     float *buffers[RIA_G_BUFFER_COUNT],*weights,*frequencies,*scores,*sorted_scores,*block_scores;
-    uint32_t *positions,*sorted_positions,*top_positions;
+    uint32_t *positions,*sorted_positions,*top_positions,*candidate_positions;
     uint16_t *route_ids;
     float *route_coefficients;
     uint8_t *packed,*candidate_blocks;
@@ -19,6 +19,7 @@ struct ria_graph_cuda {
     void *sort_workspace;
     size_t sort_bytes;
     uint64_t bytes,packed_bytes;
+    uint32_t candidate_count;
 };
 uint64_t ria_graph_cuda_metadata_bytes(void) { return sizeof(ria_graph_cuda)+ria_expert_cuda_metadata_bytes(); }
 uint64_t ria_graph_cuda_device_bytes(const ria_graph_cuda *c) { return c ? c->bytes-ria_expert_cuda_metadata_bytes() : 0; }
@@ -260,6 +261,7 @@ static __global__ void shared_mid_kernel(const float *gate,const float *up,float
 bool ria_graph_cuda_create(const ria_graph_options *o,ria_graph_cuda **out,ria_error *e) {
     if (!out || !o || o->device!=0 || !o->gpu_uuid || !o->max_tokens || o->max_tokens>1048576 ||
         !o->projection_tile_rows || o->projection_tile_rows>4096 || !o->state_tile_rows || o->state_tile_rows>4096 ||
+        !o->prefill_rows || o->prefill_rows>RIA_GRAPH_PREFILL_MAX_ROWS || o->prefill_rows>o->max_tokens ||
         !o->device_budget || !o->pinned_budget)
         return ria_fail(e,RIA_INVALID_REQUEST,"invalid bounded graph CUDA options/output");*out=NULL;
     ria_graph_cuda *c=(ria_graph_cuda *)calloc(1,sizeof(*c));if (!c) return ria_fail(e,RIA_RESOURCE_LIMIT,"graph CUDA owner allocation failed");c->options=*o;
@@ -271,7 +273,7 @@ bool ria_graph_cuda_create(const ria_graph_options *o,ria_graph_cuda **out,ria_e
       (void)snprintf(text,sizeof(text),"GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]);
       if (!ria_graph_client_device_validate(count,o->device,p.major,p.minor,p.name,text,o->gpu_uuid,e)) goto bad;
     }
-    if (!ria_expert_cuda_create_pooled(o->device,32768,32768,129280,1,o->projection_tile_rows,o->device_budget,o->pinned_budget,&c->projection,e)) goto bad;
+    if (!ria_expert_cuda_create_pooled(o->device,32768,32768,129280,o->prefill_rows,o->projection_tile_rows,o->device_budget,o->pinned_budget,&c->projection,e)) goto bad;
     c->stream=(cudaStream_t)ria_expert_cuda_stream(c->projection);c->bytes=ria_expert_cuda_workspace_bytes(c->projection);
     {const uint64_t sizes[RIA_G_BUFFER_COUNT]={20480,20480,5120,5120,4,4,4,16,4,4,16,24,1280,32768,512,512,4096,32,640*512,32768,8192,384,6*5120,5120,6144,25600,129280,(uint64_t)o->state_tile_rows*128,1024,1024};
      for (unsigned i=0;i<RIA_G_BUFFER_COUNT;++i) if (!allocate(c,(void **)&c->buffers[i],sizes[i],sizeof(float),e)) goto bad;
@@ -281,7 +283,8 @@ bool ria_graph_cuda_create(const ria_graph_options *o,ria_graph_cuda **out,ria_e
         !allocate(c,(void **)&c->scores,o->max_tokens,sizeof(float),e) || !allocate(c,(void **)&c->sorted_scores,o->max_tokens,sizeof(float),e) ||
         !allocate(c,(void **)&c->block_scores,ceil_div(o->max_tokens,8),sizeof(float),e) ||
         !allocate(c,(void **)&c->positions,o->max_tokens,sizeof(uint32_t),e) || !allocate(c,(void **)&c->sorted_positions,o->max_tokens,sizeof(uint32_t),e) ||
-        !allocate(c,(void **)&c->top_positions,512,sizeof(uint32_t),e) || !allocate(c,(void **)&c->route_ids,6,sizeof(uint16_t),e) ||
+        !allocate(c,(void **)&c->top_positions,512,sizeof(uint32_t),e) ||
+        !allocate(c,(void **)&c->candidate_positions,RIA_GRAPH_CANDIDATE_BLOCKS,sizeof(uint32_t),e) || !allocate(c,(void **)&c->route_ids,6,sizeof(uint16_t),e) ||
         !allocate(c,(void **)&c->route_coefficients,6,sizeof(float),e) || !allocate(c,(void **)&c->packed,c->packed_bytes,1,e) ||
         !allocate(c,(void **)&c->candidate_blocks,ceil_div(o->max_tokens,8),1,e) || !allocate(c,(void **)&c->error,1,sizeof(int),e)) goto bad;
     if (!check(cub::DeviceRadixSort::SortPairsDescending(NULL,c->sort_bytes,c->scores,c->sorted_scores,c->positions,c->sorted_positions,
@@ -307,7 +310,7 @@ bool ria_graph_cuda_destroy(ria_graph_cuda *c,ria_error *e) {
     }
 #define RELEASE(member) do { if (c->member && !check(cudaFree(c->member),e,"release graph scratch")) return false;c->member=NULL; } while (0)
     RELEASE(weights);RELEASE(frequencies);RELEASE(scores);RELEASE(sorted_scores);RELEASE(block_scores);RELEASE(positions);
-    RELEASE(sorted_positions);RELEASE(top_positions);RELEASE(route_ids);RELEASE(route_coefficients);RELEASE(packed);
+    RELEASE(sorted_positions);RELEASE(top_positions);RELEASE(candidate_positions);RELEASE(route_ids);RELEASE(route_coefficients);RELEASE(packed);
     RELEASE(candidate_blocks);RELEASE(error);RELEASE(sort_workspace);
 #undef RELEASE
     if (!ria_expert_cuda_destroy(c->projection,e)) return false;
@@ -324,7 +327,7 @@ bool ria_graph_cuda_reset(ria_graph_cuda *c,ria_error *e) {
     if (!c || !check(cudaStreamSynchronize(c->stream),e,"drain previous graph generation") ||
         !check(cudaMemsetAsync(c->error,0,sizeof(int),c->stream),e,"reset graph numerical status") ||
         !check(cudaMemsetAsync(c->candidate_blocks,0,(size_t)ceil_div(c->options.max_tokens,8),c->stream),e,"reset candidate cache")) return false;
-    return ria_graph_cuda_begin_step(c,e) && finish(c,e);
+    c->candidate_count=0;return ria_graph_cuda_begin_step(c,e) && finish(c,e);
 }
 bool ria_graph_cuda_begin_step(ria_graph_cuda *c,ria_error *e) {
     if (!c) return ria_fail(e,RIA_INVALID_REQUEST,"missing per-token graph context");
@@ -397,18 +400,41 @@ static bool sort_pairs(ria_graph_cuda *c,float *values,uint64_t count,ria_error 
 bool ria_graph_cuda_select(ria_graph_cuda *c,uint64_t count,bool source,bool uses,uint32_t *selected,uint32_t *selected_count,ria_error *e) {
     if (!count || count>c->options.max_tokens || !selected || !selected_count) return ria_fail(e,RIA_INVALID_REQUEST,"invalid hierarchical candidate selection");
     if (source) {
-        uint64_t blocks=ceil_div(count,8),chosen=blocks<2048 ? blocks : 2048;
+        uint64_t blocks=ceil_div(count,8),chosen=blocks<RIA_GRAPH_CANDIDATE_BLOCKS ? blocks : RIA_GRAPH_CANDIDATE_BLOCKS;
         candidate_score_kernel<<<(unsigned)ceil_div(blocks,256),256,0,c->stream>>>(c->scores,c->block_scores,count);
         if (!launched(e,"score candidate blocks") || !sort_pairs(c,c->block_scores,blocks,e) ||
             !check(cudaMemsetAsync(c->candidate_blocks,0,(size_t)ceil_div(c->options.max_tokens,8),c->stream),e,"replace candidate mask")) return false;
         candidate_mark_kernel<<<(unsigned)ceil_div(chosen,256),256,0,c->stream>>>(c->candidate_blocks,c->sorted_positions,chosen);
-        if (!launched(e,"publish candidate blocks")) return false;
+        if (!launched(e,"publish candidate blocks") ||
+            !check(cudaMemcpyAsync(c->candidate_positions,c->sorted_positions,(size_t)chosen*sizeof(uint32_t),cudaMemcpyDeviceToDevice,c->stream),e,"retain original candidate block IDs")) return false;
+        c->candidate_count=(uint32_t)chosen;
     } else if (uses) { candidate_mask_kernel<<<(unsigned)ceil_div(count,256),256,0,c->stream>>>(c->scores,c->candidate_blocks,count);if (!launched(e,"apply shared candidate mask")) return false; }
     if (!sort_pairs(c,c->scores,count,e)) return false;
     unsigned chosen=count<512 ? (unsigned)count : 512;
     sort_top_positions<<<1,512,0,c->stream>>>(c->sorted_positions,c->top_positions,chosen);
     if (!launched(e,"order selected positions") || !ria_expert_cuda_download_bytes(c->projection,c->top_positions,selected,chosen*sizeof(uint32_t),e) || !finish(c,e)) return false;
     *selected_count=chosen;return true;
+}
+bool ria_graph_cuda_candidates_get(ria_graph_cuda *c,uint32_t *blocks,uint32_t *count,ria_error *e) {
+    if (!c || !blocks || !count || c->candidate_count>RIA_GRAPH_CANDIDATE_BLOCKS)
+        return ria_fail(e,RIA_INVALID_REQUEST,"invalid candidate snapshot output");
+    if (c->candidate_count && !ria_expert_cuda_download_bytes(c->projection,c->candidate_positions,blocks,
+                                        (uint64_t)c->candidate_count*sizeof(uint32_t),e)) return false;
+    *count=c->candidate_count;return true;
+}
+bool ria_graph_cuda_candidates_set(ria_graph_cuda *c,const uint32_t *blocks,uint32_t count,ria_error *e) {
+    if (!c || !blocks || count>RIA_GRAPH_CANDIDATE_BLOCKS)
+        return ria_fail(e,RIA_INVALID_REQUEST,"invalid candidate snapshot input");
+    uint64_t extent=ceil_div(c->options.max_tokens,8);
+    for (uint32_t i=0;i<count;++i) if (blocks[i]>=extent)
+        return ria_fail(e,RIA_INTEGRITY_ERROR,"candidate snapshot block is outside admitted context");
+    if (!check(cudaMemsetAsync(c->candidate_blocks,0,(size_t)extent,c->stream),e,"restore candidate mask") ||
+        (count && !ria_expert_cuda_upload_bytes(c->projection,c->candidate_positions,blocks,(uint64_t)count*sizeof(uint32_t),e))) return false;
+    if (count) {
+        candidate_mark_kernel<<<(unsigned)ceil_div(count,256),256,0,c->stream>>>(c->candidate_blocks,c->candidate_positions,count);
+        if (!launched(e,"restore original candidate block IDs")) return false;
+    }
+    c->candidate_count=count;return true;
 }
 bool ria_graph_cuda_attention(ria_graph_cuda *c,const float *q,const float *kv,uint64_t count,uint64_t masked_begin,uint64_t masked_end,const ria_tensor *sink,float *output,ria_error *e) {
     if (!count || count>640 || masked_begin>masked_end || masked_end>count)
@@ -454,4 +480,8 @@ bool ria_graph_cuda_local_evaluate(ria_graph_cuda *c,const ria_expert *expert,co
     float *output=c->buffers[RIA_G_EXPERT_RESULTS];
     return ria_expert_cuda_evaluate_device(c->projection,expert,resident,input,coefficient,output,e) &&
         ria_graph_cuda_download(c,output,host,5120,e);
+}
+bool ria_graph_cuda_local_batch(ria_graph_cuda *c,const ria_expert *expert,const ria_expert_cuda_resident *resident,
+                                const float *inputs,uint32_t rows,const float *coefficients,float *outputs,ria_error *e) {
+    return ria_expert_cuda_evaluate_resident(c->projection,expert,resident,inputs,rows,5120,coefficients,outputs,5120,e);
 }

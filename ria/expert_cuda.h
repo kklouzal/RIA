@@ -79,6 +79,15 @@ bool ria_expert_cuda_evaluate(ria_expert_cuda *context,const ria_expert *expert,
                               const float *input,uint64_t rows,uint64_t input_stride,
                               const float *coefficients,float *output,
                               uint64_t output_stride,ria_error *error);
+/* Same host-row contract over one original expert. An explicitly admitted
+ * resident view reuses device weights; a host triplet stages each bounded
+ * weight tile once for the complete row group. Quantizers remain per-row.
+ * Logical strided host input, coefficients and output spans must be disjoint,
+ * including padding between rows; overlap is rejected before any CUDA call.
+ * On failure, output is unspecified and must not be published. */
+bool ria_expert_cuda_evaluate_resident(ria_expert_cuda *,const ria_expert *,const ria_expert_cuda_resident *,
+                                      const float *input,uint64_t rows,uint64_t input_stride,
+                                      const float *coefficients,float *output,uint64_t output_stride,ria_error *);
 /* Client graph API: input/output are contiguous CUDA DEVICE pointers, while
  * the immutable matrix descriptor borrows verified host bytes. Enqueue earlier
  * producers on ria_expert_cuda_stream(), or establish an event dependency.

@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "service.h"
+#include "numa_policy.h"
+#include "expert_cuda.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -40,10 +42,10 @@ static bool checked_doc(const char *path, const uint8_t expected[32],
           ria_fail(e, RIA_INTEGRITY_ERROR,
                    "provisioned document digest mismatch"));
 }
-bool ria_expert_config_parse(const ria_json_doc *d,uint32_t x,const char *executor,
+bool ria_expert_config_parse(const ria_json_doc *d,uint32_t x,const char *executor,uint32_t prefill_rows,
                               uint64_t host_cap,uint64_t device_cap,uint64_t pinned_cap,
                               ria_expert_config *c,ria_error *e) {
-  if (!d || !executor || !c || (strcmp(executor,"cpu") && strcmp(executor,"cuda")))
+  if (!d || !executor || !c || !prefill_rows || prefill_rows>64 || (strcmp(executor,"cpu") && strcmp(executor,"cuda")))
     return ria_fail(e,RIA_INVALID_REQUEST,"invalid expert configuration parse input");
   memset(c,0,sizeof(*c)); const char *policy;
   const char *const fields[]={"numa_policy","nodes","projection_tile_rows","host_runtime_bytes",
@@ -58,7 +60,8 @@ bool ria_expert_config_parse(const ria_json_doc *d,uint32_t x,const char *execut
       !ria_json_u64(d,ria_json_get(d,x,"device_workspace_bytes"),true,&c->device_workspace_bytes,e) ||
       !ria_json_u64(d,ria_json_get(d,x,"pinned_workspace_bytes"),true,&c->pinned_workspace_bytes,e) ||
       !c->host_runtime_bytes || c->host_runtime_bytes>c->startup_host_bytes || c->startup_host_bytes>host_cap ||
-      c->device_workspace_bytes>device_cap || c->pinned_workspace_bytes>pinned_cap)
+      c->device_workspace_bytes>device_cap || c->pinned_workspace_bytes>pinned_cap ||
+      c->pinned_workspace_bytes>c->host_runtime_bytes)
     return ria_fail(e,RIA_RESOURCE_LIMIT,"expert reservations exceed admitted caps");
   const ria_json_node *nodes=ria_json_at(d,ria_json_get(d,x,"nodes"));
   if (!nodes || nodes->type!=RIA_JSON_ARRAY) return ria_fail(e,RIA_INVALID_REQUEST,"expert NUMA nodes missing");
@@ -88,11 +91,19 @@ bool ria_expert_config_parse(const ria_json_doc *d,uint32_t x,const char *execut
       (!strcmp(executor,"cpu") && (c->device_workspace_bytes || c->pinned_workspace_bytes)) ||
       (!strcmp(executor,"cuda") && (c->worker_count!=1 || !c->device_workspace_bytes || !c->pinned_workspace_bytes)))
     return ria_fail(e,RIA_INVALID_REQUEST,"executor/node/worker reservation mismatch");
+  uint32_t rows;uint64_t scratch;
+  if (!ria_numa_worker_rows(prefill_rows,executor,&rows,&scratch,e)) return false;
+  if (!strcmp(executor,"cuda")) {
+    uint64_t pinned;
+    if (!ria_expert_cuda_pinned_required_bytes(RIA_WIDTH,RIA_INTERMEDIATE,RIA_WIDTH,rows,c->projection_tile_rows,&pinned,e) ||
+        pinned>c->pinned_workspace_bytes)
+      return ria_fail(e,RIA_RESOURCE_LIMIT,"CUDA expert microbatch pinned pool exceeds reservation");
+  }
   return true;
 }
 static bool expert_config(ria_service *s,ria_error *e) {
   ria_expert_config *c=&s->expert;
-  if (!ria_expert_config_parse(&s->document,ria_json_get(&s->document,0,"expert"),s->executor,
+  if (!ria_expert_config_parse(&s->document,ria_json_get(&s->document,0,"expert"),s->executor,(uint32_t)s->prefill_rows,
                                s->host_cap,s->device_cap,s->pinned_cap,c,e)) return false;
   const ria_json_node *caps=ria_json_at(&s->plan,ria_json_get(&s->plan,ria_json_get(&s->plan,0,"caps"),"numa"));
   uint32_t startup=ria_json_get(&s->plan,ria_json_get(&s->plan,0,"phases"),"startup");
@@ -115,6 +126,52 @@ static bool expert_config(ria_service *s,ria_error *e) {
       if (!found) return ria_fail(e,RIA_RESOURCE_LIMIT,"expert local reserve exceeds admitted node peak/capacity");
     }
   }
+  return true;
+}
+bool ria_service_network_parse(const ria_json_doc *d,uint32_t network,ria_service *s,ria_error *e) {
+  if (!d || !s) return ria_fail(e,RIA_INVALID_REQUEST,"network parse target is required");
+  const char *const nf[] = {"control_address",
+                            "bulk_address",
+                            "connect_timeout_ms",
+                            "handshake_timeout_ms",
+                            "operation_timeout_ms",
+                            "frame_io_timeout_ms",
+                            "write_timeout_ms",
+                            "max_row_lookup_rows",
+                            "max_inflight_payload_bytes",
+                            "max_frame_payload_bytes",
+                            "max_bulk_data_bytes",
+                            "max_inflight_expert_requests",
+                            "server_executor"};
+  if (!ria_json_fields(d, network, nf, 13, nf, 13, e) ||
+      !text(d, network, "control_address", &s->control_address, e) ||
+      !text(d, network, "bulk_address", &s->bulk_address, e) ||
+      !integer(d, network, "connect_timeout_ms", &s->connect_timeout_ms, e) ||
+      !text(d, network, "server_executor", &s->server_executor, e) ||
+      !integer(d, network, "handshake_timeout_ms", &s->tls.handshake_timeout_ms,
+               e) ||
+      !integer(d, network, "operation_timeout_ms",
+               &s->limits.operation_timeout_ms, e) ||
+      !integer(d, network, "frame_io_timeout_ms",
+               &s->limits.frame_io_timeout_ms, e) ||
+      !integer(d, network, "write_timeout_ms", &s->limits.write_timeout_ms,
+               e) ||
+      !integer(d, network, "max_row_lookup_rows", &s->limits.row_lookup_rows,
+               e) ||
+      !integer(d, network, "max_inflight_payload_bytes",
+               &s->limits.inflight_payload_bytes, e) ||
+      !integer(d, network, "max_frame_payload_bytes",
+               &s->limits.frame_payload_bytes, e) ||
+      !integer(d, network, "max_bulk_data_bytes", &s->limits.bulk_data_bytes,
+               e) ||
+      !integer(d, network, "max_inflight_expert_requests",
+               &s->limits.expert_requests, e))
+    return false;
+  s->limits.expert_rows = 64;
+  if (!s->connect_timeout_ms || !s->tls.handshake_timeout_ms ||
+      !ria_limits_validate(&s->limits, e) ||
+      (strcmp(s->server_executor, "cpu") && strcmp(s->server_executor, "cuda")))
+    return ria_fail(e,RIA_INVALID_REQUEST,"invalid network executor/timeouts/limits");
   return true;
 }
 bool ria_service_read(ria_service *s, const char *path, ria_error *e) {
@@ -170,7 +227,9 @@ bool ria_service_read(ria_service *s, const char *path, ria_error *e) {
       !digest(&s->lock, 0, "operator_contract_digest",
               s->operator_contract_digest, e) ||
       !text(&s->plan, 0, "profile", &s->profile, e) ||
-      !integer(&s->plan, 0, "context_positions", &s->context_positions, e))
+      !integer(&s->plan, 0, "context_positions", &s->context_positions, e) ||
+      !integer(&s->plan, 0, "prefill_rows", &s->prefill_rows, e) ||
+      !s->prefill_rows || s->prefill_rows > 64 || s->prefill_rows > s->context_positions)
     goto fail;
   const ria_json_node *admitted =
       ria_json_at(&s->plan, ria_json_get(&s->plan, 0, "admitted"));
@@ -216,48 +275,8 @@ bool ria_service_read(ria_service *s, const char *path, ria_error *e) {
     goto invalid;
   s->tls.server = !strcmp(s->role, "expert");
   uint32_t network = ria_json_get(d, 0, "network");
-  const char *const nf[] = {"control_address",
-                            "bulk_address",
-                            "connect_timeout_ms",
-                            "handshake_timeout_ms",
-                            "operation_timeout_ms",
-                            "frame_io_timeout_ms",
-                            "write_timeout_ms",
-                            "max_row_lookup_rows",
-                            "max_inflight_payload_bytes",
-                            "max_frame_payload_bytes",
-                            "max_bulk_data_bytes",
-                            "max_inflight_expert_requests",
-                            "server_executor"};
-  if (!ria_json_fields(d, network, nf, 13, nf, 13, e) ||
-      !text(d, network, "control_address", &s->control_address, e) ||
-      !text(d, network, "bulk_address", &s->bulk_address, e) ||
-      !integer(d, network, "connect_timeout_ms", &s->connect_timeout_ms, e) ||
-      !text(d, network, "server_executor", &s->server_executor, e) ||
-      !integer(d, network, "handshake_timeout_ms", &s->tls.handshake_timeout_ms,
-               e) ||
-      !integer(d, network, "operation_timeout_ms",
-               &s->limits.operation_timeout_ms, e) ||
-      !integer(d, network, "frame_io_timeout_ms",
-               &s->limits.frame_io_timeout_ms, e) ||
-      !integer(d, network, "write_timeout_ms", &s->limits.write_timeout_ms,
-               e) ||
-      !integer(d, network, "max_row_lookup_rows", &s->limits.row_lookup_rows,
-               e) ||
-      !integer(d, network, "max_inflight_payload_bytes",
-               &s->limits.inflight_payload_bytes, e) ||
-      !integer(d, network, "max_frame_payload_bytes",
-               &s->limits.frame_payload_bytes, e) ||
-      !integer(d, network, "max_bulk_data_bytes", &s->limits.bulk_data_bytes,
-               e) ||
-      !integer(d, network, "max_inflight_expert_requests",
-               &s->limits.expert_requests, e))
+  if (!ria_service_network_parse(d,network,s,e))
     goto fail;
-  s->limits.expert_rows = 64;
-  if (!s->connect_timeout_ms || !s->tls.handshake_timeout_ms ||
-      !ria_limits_validate(&s->limits, e) ||
-      (strcmp(s->server_executor, "cpu") && strcmp(s->server_executor, "cuda")))
-    goto invalid;
   if (!strcmp(s->role, "expert")) {
     if (strcmp(s->server_executor, s->executor))
       goto invalid;

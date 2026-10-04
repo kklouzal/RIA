@@ -12,10 +12,12 @@ typedef struct {
   uint8_t client_layout_digest[32], server_layout_digest[32],
       placement_plan_digest[32];
 } ria_remote_options;
-/* Single-row graph callbacks split selected slots and Engram associations to
- * agreed frame/count/byte bounds, publish all contributions atomically, and
- * assign a fresh invocation ID to each expert group. Multirow callers pass
- * already bounded units. Bind must support one native expert/table/error unit;
+/* Graph callbacks split selected slots, expert-grouped prompt rows and Engram
+ * associations to agreed frame/count/byte bounds. They publish contributions
+ * atomically and assign a fresh invocation ID to each expert subgroup. Prompt
+ * row identities/coefficients/original slots survive every split. Direct
+ * multirow callers pass already bounded units. Bind must support one native
+ * expert/table/error unit;
  * authorized verification chunks always retain their manifest granule.
  * Graph thread owns all SSL and binding transitions. Abort only shuts down
  * stable descriptors under the lifecycle mutex; destruction follows joining
@@ -27,6 +29,11 @@ void ria_remote_abort(ria_remote *remote, uint64_t generation);
 bool ria_remote_begin_generation(ria_remote *remote, uint64_t *epoch,
                                  uint64_t *generation, ria_error *error);
 ria_graph_remote ria_remote_callbacks(ria_remote *remote);
+/* Conservative endpoint reservation: owner, bounded publication pools and
+ * maximum one synchronous request/reply envelope. SSL/runtime margin is an
+ * independently declared frontend reservation. Pure host sizing, no network. */
+bool ria_remote_host_required_bytes(uint32_t prefill_rows,const ria_limits *,
+                                    uint64_t *bytes,ria_error *error);
 bool ria_remote_evaluate(ria_remote *remote, uint32_t layer,
                          uint64_t invocation, uint32_t rows,
                          const uint64_t *row_ids, const uint32_t *offsets,

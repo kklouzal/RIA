@@ -2,6 +2,7 @@
 #define RIA_GRAPH_H
 #include "tensor.h"
 #include "state.h"
+#include "prefill.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -14,6 +15,7 @@ extern "C" {
 typedef enum { RIA_GRAPH_PREFILL=0,RIA_GRAPH_DECODE=1,RIA_GRAPH_CONTINUATION=2 } ria_graph_phase;
 typedef enum { RIA_GRAPH_HOST=1,RIA_GRAPH_VRAM=2 } ria_graph_tier;
 typedef enum { RIA_GRAPH_WINDOW=0,RIA_GRAPH_FULL=1,RIA_GRAPH_REINDEX=2,RIA_GRAPH_REUSE=3 } ria_graph_attention_kind;
+typedef bool (*ria_graph_cancel_fn)(void *context);
 typedef struct {
     uint32_t layer;
     uint16_t expert_id;
@@ -34,6 +36,13 @@ typedef struct {
      * IDs are original global table rows; response preserves association. */
     bool (*engram)(void *,uint32_t layer,const uint64_t *ids,uint32_t count,
                    uint8_t *packed_rows,ria_error *);
+    /* One expert over independent causal rows, preserving absolute positions
+     * and original selected slots. Inputs/results are row-major [rows,dim].
+     * A successful callback publishes every finite BF16-rounded contribution;
+     * failure makes the complete chunk/session unusable. */
+    bool (*experts_batch)(void *,uint32_t layer,uint16_t expert_id,uint32_t rows,
+                          const uint64_t *row_ids,const float *inputs,const float *coefficients,
+                          const uint16_t *original_slots,float *contributions,ria_error *);
 } ria_graph_remote;
 typedef struct { uint64_t row;uint32_t layer;uint8_t packed[264];bool valid; } ria_graph_row_cache_entry;
 /* Lossless immutable-model cache. Caller owns zeroed entries and serializes
@@ -46,7 +55,7 @@ typedef struct {
     int device;
     const char *gpu_uuid;
     uint64_t max_tokens,host_state_budget,device_budget,pinned_budget;
-    uint32_t projection_tile_rows,state_tile_rows,max_image_patches;
+    uint32_t projection_tile_rows,state_tile_rows,max_image_patches,prefill_rows;
     /* Sorted unique (layer,expert_id) explicit membership. Caller-owned
      * descriptors/bytes outlive graph. No miss fetch or implicit promotion.
      * Host budget counts local logical values/scales; parent TensorStore also
@@ -108,14 +117,29 @@ uint64_t ria_graph_pinned_bytes(const ria_graph *graph);
  * Successful return advances incorporated position. Failure poisons session. */
 bool ria_graph_step(ria_graph *graph,uint32_t token,bool image_span,
                      const float *image_embedding,float logits[RIA_GRAPH_VOCAB],ria_error *error);
-/* Exact causal token-at-a-time prefill; rows are bounded within one session.
- * Its operator schedule matches source seqlen=1 forwards: an initial one-slot
- * window, then decode-form 128 sparse ring slots with invalid holes retained
- * through the 64-slot BF16 attention probability boundary. Optional logits
- * receives every position for teacher-forced validation. This does not yet
- * implement the required bounded per-layer grouped-row prefill scheduler. */
+/* Layer-major causal prefill, split into admitted microbatches. Attention
+ * visits rows in causal order; independent FFN rows are grouped by original
+ * expert and scattered to their original slots. The numerical realization
+ * remains the source seqlen=1 schedule, including sparse attention tile holes.
+ * all_logits, when supplied, receives every teacher-forced position. With no
+ * all_logits only the final vocabulary head is evaluated. On execution failure
+ * the session is poisoned and output buffers are unspecified. last_logits and
+ * all_logits spans must be disjoint, except last_logits may exactly equal the
+ * final all_logits row. Any other overlap fails before state mutation. */
 bool ria_graph_prefill(ria_graph *graph,const uint32_t *tokens,uint64_t count,
                         float *last_logits,float *all_logits,ria_error *error);
+/* One admitted microbatch, optionally mixing text and image/delimiter rows.
+ * A nonnull embedding marks an image row and suppresses Engram. Borrowed
+ * embeddings outlive this synchronous call; no boundary resets its history.
+ * Successful return incorporates all rows. Execution failure preserves the prior
+ * public position but poisons all private state; reset is required. Optional
+ * cancellation is checked between row/group/head operations and before the
+ * chunk commits; its context outlives this synchronous call. The callback must
+ * be nonblocking and must not re-enter or destroy the graph. Output spans obey
+ * the same disjoint/exact-final-row rule as ria_graph_prefill. */
+bool ria_graph_prefill_rows(ria_graph *,const uint32_t *tokens,const float *const *image_embeddings,
+                             uint32_t count,float *last_logits,float *all_logits,
+                             ria_graph_cancel_fn,void *cancel_context,ria_error *);
 /* patches are source-normalized [n_vit_h*n_vit_w,3*14*14] host floats.
  * output is row-major [ceil(h/3)*ceil(w/3),dim] host BF16-logical values. */
 bool ria_graph_encode_image(ria_graph *graph,const float *patches,uint32_t n_vit_h,

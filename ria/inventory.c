@@ -2,6 +2,8 @@
 #include "inventory.h"
 #include "numa_policy.h"
 #include "probe.h"
+#include "prefill.h"
+#include "remote.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,27 +35,45 @@ static bool allocation(output *o,const char *name,uint64_t bytes,int node,bool d
 }
 bool ria_inventory_files(const char *manifest,const char *request,const char *destination,ria_error *e) {
   ria_json_doc d={0},result={0};ria_tensor_store store={0};output *o=NULL;bool ok=false;
-  const char *const fields[]={"schema_revision","role","executor","profile","manifest_digest","context_positions",
-    "max_metadata_bytes","host_cap","device_cap","pinned_cap","host_runtime_bytes","device_runtime_bytes","pinned_runtime_bytes","expert","runtime_policy_digest"};
-  uint64_t rev,context,metadata,host_cap,device_cap,pinned_cap,host,device,pinned;
+  const char *const fields[]={"schema_revision","role","executor","profile","manifest_digest","context_positions","prefill_rows",
+    "max_metadata_bytes","host_cap","device_cap","pinned_cap","host_runtime_bytes","device_runtime_bytes","pinned_runtime_bytes","expert","runtime_policy_digest",
+    "graph_host_state_bytes","projection_tile_rows","frontend_host_bytes","network"};
+  uint64_t rev,context,rows,projection,graph_host,frontend,metadata,host_cap,device_cap,pinned_cap,host,device,pinned;
   uint8_t expected[32],runtime[32],request_hash[32];const char *role,*executor,*profile;
   if (!ria_json_read(request,(ria_json_limits){256u<<10,32768,32},&d,e) ||
-      !ria_json_fields(&d,0,fields,15,fields,15,e) || !integer(&d,0,"schema_revision",false,&rev,e) || rev!=1 ||
+      !ria_json_fields(&d,0,fields,20,fields,20,e) || !integer(&d,0,"schema_revision",false,&rev,e) || rev!=1 ||
       !text(&d,0,"role",&role,e) || !text(&d,0,"executor",&executor,e) || !text(&d,0,"profile",&profile,e) ||
       !integer(&d,0,"context_positions",false,&context,e) || !context || context>1048576 ||
+      !integer(&d,0,"prefill_rows",false,&rows,e) || !rows || rows>64 || rows>context ||
+      !integer(&d,0,"projection_tile_rows",false,&projection,e) ||
+      !integer(&d,0,"graph_host_state_bytes",true,&graph_host,e) ||
+      !integer(&d,0,"frontend_host_bytes",true,&frontend,e) ||
       !integer(&d,0,"max_metadata_bytes",false,&metadata,e) || !metadata ||
       !integer(&d,0,"host_cap",false,&host_cap,e) || !host_cap || metadata>host_cap ||
       !integer(&d,0,"device_cap",false,&device_cap,e) || !integer(&d,0,"pinned_cap",false,&pinned_cap,e) ||
       !integer(&d,0,"host_runtime_bytes",true,&host,e) || !host ||
       !integer(&d,0,"device_runtime_bytes",true,&device,e) || !integer(&d,0,"pinned_runtime_bytes",true,&pinned,e) ||
-      host>host_cap || device>device_cap || pinned>pinned_cap || pinned>host ||
+      host>host_cap || graph_host>host || frontend>host || device>device_cap || pinned>pinned_cap || pinned>host ||
       !ria_json_digest_field(&d,ria_json_get(&d,0,"manifest_digest"),expected,e) ||
       !ria_json_digest_field(&d,ria_json_get(&d,0,"runtime_policy_digest"),runtime,e) ||
       !ria_json_sha256(&d,true,request_hash,e)) goto done;
   bool client=!strcmp(role,"client"),cpu=!strcmp(executor,"cpu");
   if ((!client && strcmp(role,"expert")) || (strcmp(executor,"cpu") && strcmp(executor,"cuda")) ||
+      (client ? !projection || projection>4096 || !graph_host || !frontend : projection || graph_host || frontend) ||
       (client && cpu) || (cpu && (device || pinned || device_cap || pinned_cap)) ||
       (!cpu && (!device || !pinned))) { ria_error_set(e,RIA_INVALID_REQUEST,"inventory role/executor reservations invalid");goto done; }
+  ria_service network={0};
+  if (!ria_service_network_parse(&d,ria_json_get(&d,0,"network"),&network,e)) goto done;
+  if (client) {
+    uint64_t batch_host,batch_device,batch_pinned,remote_host,owners;
+    if (!ria_graph_prefill_required_bytes((uint32_t)rows,(uint32_t)projection,&batch_host,&batch_device,&batch_pinned,e) ||
+        !ria_remote_host_required_bytes((unsigned)rows,&network.limits,&remote_host,e) ||
+        !ria_u64_add(graph_host,frontend,&owners) || !ria_u64_add(owners,pinned,&owners) || owners>host ||
+        batch_host>graph_host || batch_device>device || batch_pinned>pinned || remote_host>frontend) {
+      if (!e || !e->code) ria_error_set(e,RIA_RESOURCE_LIMIT,"prefill workspace exceeds client host/device/pinned reservation");
+      goto done;
+    }
+  }
   ria_tensor_load_options load={.role=client ? "client" : "server",.expected_digest=expected,
     .max_resident_bytes=host_cap,.max_metadata_bytes=metadata,.numa_node=-1};
   if (!ria_tensor_store_inspect(&store,manifest,&load,e) || strcmp(profile,store.profile)) {
@@ -66,8 +86,8 @@ bool ria_inventory_files(const char *manifest,const char *request,const char *de
   char logical[65],op[65],manifest_hash[65],policy[65],request_digest[65];
   ria_hex_encode(store.logical_model_digest,32,logical);ria_hex_encode(store.operator_contract_digest,32,op);
   ria_hex_encode(expected,32,manifest_hash);ria_hex_encode(runtime,32,policy);ria_hex_encode(request_hash,32,request_digest);
-  if (!emit(o,"{\"schema_revision\":1,\"logical_model_digest\":\"%s\",\"operator_contract_digest\":\"%s\",\"semantic_max_positions\":%llu,\"derivation\":{\"manifest_digest\":\"%s\",\"runtime_policy_digest\":\"%s\",\"request_digest\":\"%s\",\"context_positions\":%llu},\"allocations\":[",
-            logical,op,(unsigned long long)context,manifest_hash,policy,request_digest,(unsigned long long)context)) goto done;
+  if (!emit(o,"{\"schema_revision\":1,\"logical_model_digest\":\"%s\",\"operator_contract_digest\":\"%s\",\"semantic_max_positions\":%llu,\"derivation\":{\"manifest_digest\":\"%s\",\"runtime_policy_digest\":\"%s\",\"request_digest\":\"%s\",\"context_positions\":%llu,\"prefill_rows\":%llu},\"allocations\":[",
+            logical,op,(unsigned long long)context,manifest_hash,policy,request_digest,(unsigned long long)context,(unsigned long long)rows)) goto done;
   if (client) {
     const ria_json_node *expert=ria_json_at(&d,ria_json_get(&d,0,"expert"));uint64_t total;
     if (!expert || expert->type!=RIA_JSON_NULL || !ria_u64_add(owned,host,&total) || total>host_cap) {
@@ -78,7 +98,7 @@ bool ria_inventory_files(const char *manifest,const char *request,const char *de
         !allocation(o,"client_pinned_reservation",pinned,-1,false,true,true)) goto done;
   } else {
     ria_expert_config c;ria_numa_account a;uint64_t reserved=0;
-    if (!ria_expert_config_parse(&d,ria_json_get(&d,0,"expert"),executor,host_cap,device_cap,pinned_cap,&c,e) ||
+    if (!ria_expert_config_parse(&d,ria_json_get(&d,0,"expert"),executor,(uint32_t)rows,host_cap,device_cap,pinned_cap,&c,e) ||
         c.host_runtime_bytes!=host || c.device_workspace_bytes!=device || c.pinned_workspace_bytes!=pinned ||
         !ria_numa_account_store(&store,&c,&a,e) || owned<a.canonical_bytes || owned-a.canonical_bytes>host) {
       if (!e || !e->code) ria_error_set(e,RIA_RESOURCE_LIMIT,"expert metadata/runtime reservations disagree");

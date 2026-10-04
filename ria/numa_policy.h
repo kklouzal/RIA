@@ -2,6 +2,7 @@
 #define RIA_NUMA_H
 #include "bank.h"
 #include "service.h"
+#include <string.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,6 +14,23 @@ typedef struct ria_numa ria_numa;
 #define RIA_NUMA_BIND_MODE 2u
 #define RIA_NUMA_QUERY_PAGES 64u
 #define RIA_NUMA_WORKER_BYTES UINT64_C(2097152)
+#define RIA_NUMA_WORKER_STACK_BYTES UINT64_C(1048576)
+/* One fixed per-node worker arena: stack, CPU quantizer owner/scratch (CPU
+ * only), and distinct widened-FP32 input/output rows. Shared by admission and
+ * execution; it does not inspect topology or allocate/initialize a runtime. */
+static inline bool ria_numa_worker_rows(uint32_t bound,const char *executor,uint32_t *rows,uint64_t *scratch,ria_error *e) {
+  if (!rows || !scratch || !executor || !bound || bound>64 ||
+      (strcmp(executor,"cpu") && strcmp(executor,"cuda")))
+    return ria_fail(e,RIA_INVALID_REQUEST,"invalid admitted worker row bound");
+  *scratch=0;
+  if (!strcmp(executor,"cpu") && !ria_expert_cpu_required_bytes(RIA_WIDTH,RIA_INTERMEDIATE,RIA_WIDTH,scratch,e)) return false;
+  uint64_t fixed,capacity;
+  if (!ria_u64_add(RIA_NUMA_WORKER_STACK_BYTES,*scratch,&fixed) || fixed>=RIA_NUMA_WORKER_BYTES)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"worker scratch exceeds fixed NUMA arena");
+  capacity=(RIA_NUMA_WORKER_BYTES-fixed)/(2*RIA_WIDTH*sizeof(float));
+  if (!capacity) return ria_fail(e,RIA_RESOURCE_LIMIT,"worker arena cannot hold one expert row");
+  *rows=(uint32_t)(capacity<bound ? capacity : bound);return true;
+}
 typedef struct {
   uint64_t canonical_bytes, replica_bytes, total_bytes;
   uint64_t node_bytes[RIA_NUMA_MAX_NODES];
