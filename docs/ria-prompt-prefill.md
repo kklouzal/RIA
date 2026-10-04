@@ -2,7 +2,7 @@
 
 Specification section7.3 is implemented in the native RIA serving path.
 `ria_graph_prefill_rows` processes one admitted prompt chunk; the text wrapper
-and engine split longer prompts into those chunks. The maximum is64 rows.
+and engine split longer prompts into those chunks. The maximum is 64 rows.
 Ordinary generation keeps the one-position decode graph.
 
 ## Causal schedule and numerical contract
@@ -38,7 +38,7 @@ changed token/image identity requires fresh binding and complete replay.
 ## Capacity and transport
 
 `prefill_rows` is mandatory in the planning request, memory plan, placement
-runtime and service configuration. Its range is1–64 and it cannot exceed context
+runtime and service configuration. Its range is 1–64 and it cannot exceed context
 capacity. Preparation, generated native inventory, admission and runtime compare
 the same value. Changing it requires regeneration of identity-bound plans,
 bootstrap, probes, calibration evidence and deployment locks; packages lacking
@@ -81,11 +81,11 @@ requires the serving owner to terminate before teardown.
 
 The fixtures execute actual graph scheduling with independent synthetic
 arithmetic, the actual engine synchronization, production worker threads and
-real loopback mTLS request framing. They cover chunk sizes1/2/3/8/17/64,
-130 causal positions across all40 layers, all384 expert IDs, all three profiles,
+real loopback mTLS request framing. They cover chunk sizes 1/2/3/8/17/64,
+130 causal positions across all 40 layers, all 384 expert IDs, all three profiles,
 original slots and coefficients, explicit residency/phase membership, mixed
 image rows, continuation, output alias boundaries and staged cancellation.
-Independent expert oracles check64-row CPU groups and host-simulated production
+Independent expert oracles check 64-row CPU groups and host-simulated production
 CUDA quantizer bodies. The CUDA host boundary fixture stops before the first
 CUDA operation and checks the actual production validation prefix.
 

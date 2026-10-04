@@ -5,14 +5,14 @@ target remains Linux x86-64 with the specified physical client/server hardware.
 No checkpoint weights were downloaded, no CUDA kernel was launched, and no
 live model inference, physical target probe or engineering soak was run.
 
-The later specification7.3 grouped-prefill implementation passed430 Python
-tests,39 production socket lifecycle cases, Ruff, all36 static checks,27
+The later specification 7.3 grouped-prefill implementation passed 430 Python
+tests, 39 production socket lifecycle cases, Ruff, all 36 static checks, 27
 zero-finding Clang C analyses, ASan/UBSan/leak detection and all four Clang18
 ThreadSanitizer fixtures. Actual graph, engine and worker fixtures cover causal
 row state, grouped original-slot scatter, mixed image rows, continuation,
 aliasing, cancellation and failures. All three CPU and six SM120a CUDA
 executables built; required projection instructions were present and PTX was
-absent. Regenerating all45 schemas produced no changes. Every frozen source
+absent. Regenerating all 45 schemas produced no changes. Every frozen source
 file's bytes matched across these checks.
 
 The [prompt-prefill checkpoint](../locks/verification/prompt-prefill.json)
@@ -20,6 +20,18 @@ records commands, source/log identities and explicit limitations. See the
 [prefill contract](ria-prompt-prefill.md) for configuration regeneration and
 numerical scope. This closes the scheduling software gap; it does not establish
 GPU/model parity, performance superiority or complete release qualification.
+
+All three jobs in the [prefill hosted run](https://github.com/kklouzal/RIA/actions/runs/37208400490)
+passed for commit `97310cd58ebe3b7079c4bdc6acaa2413d701dea6`: the 430 Python
+tests, 36 static checks, 27 zero-finding Clang analyses, ASan/UBSan/leaks, four
+ThreadSanitizer fixtures, unchanged schemas and both native amd64 containers.
+Downloaded evidence matched all 3,727 tracked source files in that immutable
+commit and every locally validated changed runtime input. Anonymous registry
+metadata verified both image/config identities, revision, UID and SPDX/SLSA
+descriptors without downloading filesystem or attestation layers. The
+[prefill publication record](../locks/verification/prompt-prefill-publication.json)
+retains job URLs, immutable digests and complete downloaded evidence hashes;
+the [handoff](ria-handoff.md) lists these current images.
 
 The preceding independent second review corrected numerical scheduling, preparation,
 protocol, resource accounting and ownership defects. Its frozen local sources

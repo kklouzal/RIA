@@ -17,26 +17,26 @@ does not establish GPU numerical correctness.
 
 Use source branch `codex/ria-implementation` and read the
 [independent review](ria-implementation-review.md) before hardware handoff.
-The corrected baseline passed the local and hosted frozen offline gates.
-[Expert-grouped prefill](ria-prompt-prefill.md) is now implemented; full semantic
+The updated sources passed local and hosted frozen offline gates.
+[Expert-grouped prefill](ria-prompt-prefill.md) is implemented; full semantic
 physical qualification producers remain missing.
 
-The earlier corrected baseline commit is
-`f37d418ed146283a98004e02925621c82573b9e9`; later documentation-only commits
-preceded the prompt-prefill changes. The [baseline hosted build](https://github.com/kklouzal/RIA/actions/runs/37188961273)
+The grouped-prefill implementation commit is
+`97310cd58ebe3b7079c4bdc6acaa2413d701dea6`; later documentation-only commits
+leave those runtime sources unchanged. The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37208400490)
 passed all three jobs and published these Linux amd64 images:
 
 ```text
-ghcr.io/kklouzal/ria-cpu@sha256:cf66c38d4e989a1dec32522e7a51bf96c634d0087dc1bd9d749762a05975d1a5
-ghcr.io/kklouzal/ria-cuda@sha256:6784b247343d4313aa616164d53c17b36a9dd5e3b0666ba498bde142e2e31308
+ghcr.io/kklouzal/ria-cpu@sha256:138bc2a1f96c6a4fcb0f72b3e4c1b49b3cd7623b99e883b7d2accd1260081e70
+ghcr.io/kklouzal/ria-cuda@sha256:b37c7074311546f9518c2b013defad197b1168e852f14c8179fa2177d171018b
 ```
 
 Their immutable index/manifest/config hashes, source revision, UID10001,
 SBOM/provenance descriptors and anonymous manifest access were verified without
-downloading filesystem layers. The [publication record](../locks/verification/implementation-review-publication.json)
+downloading filesystem layers. The [publication record](../locks/verification/prompt-prefill-publication.json)
 binds the source, jobs, images and downloaded verification logs.
-These historical baseline images do not contain grouped prompt prefill. They
-are build-verified and remain unqualified for model/physical release.
+These images contain grouped prompt prefill. They are build-verified and remain
+unqualified for model/physical release.
 
 Read the [unchanged specification](ria-specification.md) and
 [implementation plan](../IMPLEMENTATION_PLAN.md). The user's canonical-base
@@ -136,8 +136,8 @@ bounds but cannot prove routing, residency, NUMA execution, fault safety or
 the full gate semantics. See [physical qualification](ria-physical-contracts.md).
 
 Prompt prefill now groups independent FFN rows by expert while attention and
-private source history advance causally. Set mandatory `prefill_rows` between1
-and64, no larger than context capacity. Regenerate the planning request, native
+private source history advance causally. Set mandatory `prefill_rows` between 1
+and 64, no larger than context capacity. Regenerate the planning request, native
 inventory, memory/placement plans, bootstrap/probe/calibration evidence and
 deployment lock together; older packages lack the new workspace identity and
 fail closed. The remaining semantic qualification software gap prevents a

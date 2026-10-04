@@ -48,8 +48,11 @@ callback, expert worker and admission equations share the bounded row contract.
 [Prompt prefill](ria-prompt-prefill.md) records its numerical, ownership,
 cancellation and configuration contracts and the independent offline coverage.
 The [frozen prefill checkpoint](../locks/verification/prompt-prefill.json)
-records430 Python tests,36 static checks, sanitizers, all four ThreadSanitizer
+records 430 Python tests, 36 static checks, sanitizers, all four ThreadSanitizer
 fixtures and CPU/SM120a builds. Target execution remains unrun.
+All three [prefill hosted jobs](https://github.com/kklouzal/RIA/actions/runs/37208400490)
+passed. The [prefill publication record](../locks/verification/prompt-prefill-publication.json)
+binds the verified source, logs and current amd64 images.
 
 The full540-cell matrix and complete semantic fault/gate producers and
 validators remain missing. Existing numerical, TLS, HTTP replay, soak and
