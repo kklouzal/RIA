@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -82,20 +83,24 @@ def main():
         print(name, "passed" if code == 0 else f"failed ({code}); see {log}", flush=True)
         return code == 0
     ok = True
-    for name, command in (
-        ("ruff", ["ruff", "check", "tools", "tests/ria", "deploy"]),
-        ("python-compile", [sys.executable, "-m", "compileall", "-q", "tools", "deploy"]),
-        ("seccomp-generated", [sys.executable, "deploy/generate_seccomp.py", "--check"]),
-        ("source-lock", [sys.executable, "tools/verify_ria.py", "--source-lock", "locks/source-lock.json"]),
-        ("workflow-lint", ["build/ria/check-tools/actionlint", ".github/workflows/ria.yml"]),
-        ("container-lint", ["build/ria/check-tools/hadolint", "deploy/Dockerfile.cpu", "deploy/Dockerfile.cuda", "deploy/Dockerfile.setup"]),
-        ("container-base-lock", [sys.executable, "deploy/check_container_lock.py"]),
-        ("native-static", ["make", "ria-static"]),
-        ("compiler-versions", ["clang", "--version"]),
-        ("cppcheck-version", ["build/ria/check-tools/cppcheck", "--version"]),
-    ):
-        passed = run(name, command)
-        ok = passed and ok
+    # Privileged fixtures can leave source caches owned by another UID. Compile
+    # every source into this invocation's private cache without changing source
+    # ownership or weakening the syntax check; release all generated cache data.
+    with tempfile.TemporaryDirectory(prefix="python-cache-", dir=evidence) as cache:
+        for name, command in (
+            ("ruff", ["ruff", "check", "tools", "tests/ria", "deploy"]),
+            ("python-compile", [sys.executable, "-X", "pycache_prefix=" + cache, "-m", "compileall", "-q", "tools", "deploy"]),
+            ("seccomp-generated", [sys.executable, "deploy/generate_seccomp.py", "--check"]),
+            ("source-lock", [sys.executable, "tools/verify_ria.py", "--source-lock", "locks/source-lock.json"]),
+            ("workflow-lint", ["build/ria/check-tools/actionlint", ".github/workflows/ria.yml"]),
+            ("container-lint", ["build/ria/check-tools/hadolint", "deploy/Dockerfile.cpu", "deploy/Dockerfile.cuda", "deploy/Dockerfile.setup"]),
+            ("container-base-lock", [sys.executable, "deploy/check_container_lock.py"]),
+            ("native-static", ["make", "ria-static"]),
+            ("compiler-versions", ["clang", "--version"]),
+            ("cppcheck-version", ["build/ria/check-tools/cppcheck", "--version"]),
+        ):
+            passed = run(name, command)
+            ok = passed and ok
     sources = sorted((root / "ria").glob("*.c"))
     for source in sources:
         name = "analyzer-" + source.stem

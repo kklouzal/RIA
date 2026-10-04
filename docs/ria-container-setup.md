@@ -2,6 +2,15 @@
 
 Run one administrative `ria-setup` container on each physical host. The expert creates a private invitation; transfer that file to the client and start its setup container. The pair prepares and transfers the necessary model package, discovers actual host/image facts, generates configuration and credentials, executes the existing supervised initial-admission fixtures, exchanges their complete evidence, admits both deployments and starts the native services in order. The setup containers then exit; the services continue running.
 
+```mermaid
+flowchart LR
+    E[Expert setup] <-->|Pairing, compact package, evidence| C[Client setup]
+    E -->|Admission and health| ES[Native expert service]
+    C -->|After expert is healthy| CS[Native client service]
+    ES <-->|Control and bulk| CS
+    CS --> API[Authenticated prompt API]
+```
+
 This workflow replaces the file creation, identity transcription and evidence shuffling in the [advanced deployment runbook](../README.md#host-tools-and-directory-layout). It provides **initial fixture admission for supervised hardware testing**, not final release qualification. The [existing full-model/reference, semantic matrix and fault/soak software gaps](../README.md#qualification-limits) remain. No weights, GPU kernels or physical qualification were run while developing this automation.
 
 ## What remains an operator choice
