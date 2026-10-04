@@ -1,6 +1,6 @@
-# RIA planning ledger
+# RIA task ledger
 
-Task: read the complete implementation handoff and produce a reasoned, reviewable implementation plan. Software implementation is outside this request.
+Task: implement the reviewed RIA plan on the canonical antirez/ds4 fork, with complete available offline/static/build checks and a hardware handoff. The initial planning request is complete; the current implementation request supersedes its original scope.
 
 Source: `/home/kklouzal/DwarfStar-Remote-Inference-Architecture.md`, 2,133 lines, 245,262 bytes; SHA-256 `14224cdb33476944111e14f69a5679f0597c192a44d67b48f048910f326f3f6e`. Planning date: 2026-10-03. Governing guidance: `/home/kklouzal/AGENTS.md` and the user's supplied instructions. RIA was empty at task start; no deeper AGENTS.md was present.
 
@@ -22,6 +22,20 @@ Source: `/home/kklouzal/DwarfStar-Remote-Inference-Architecture.md`, 2,133 lines
 - [x] Independently review the integrated plan, resolve findings and recheck changed sections with all three reviewers.
 
 Planning status: complete. Software implementation W00–W12 and all runtime/model/physical qualification remain unexecuted project work. The user subsequently provided the fork and authorized commit/push; publish these reviewed documentation artifacts on `codex/implementation-plan` without changing the main branch.
+
+## Active implementation request
+
+The user now authorizes complete implementation and free GitHub Actions/GHCR automation. Do not download model weights or run live inference/hardware tests on this host; prepare the software and offline/static/build evidence for the friend's later hardware handoff. Required physical/numerical/performance release gates remain explicit and deferred by that instruction. Model reference source and compact metadata may be inspected without acquiring checkpoints.
+
+Implementation branch: `codex/ria-implementation`, based on planning commit `e2af41cc173b76cba26321e0d18ba7c46c5ddf77`. Runtime source changes, offline fixture tests, static analysis, Ruff, native/CPU/CUDA/container builds, CI and GHCR publication are authorized. Preserve unrelated donor functionality and do not claim deferred gates passed.
+
+- [x] Freeze shared descriptors/source contracts and implement native boundary validation, identities and protocol.
+- [x] Implement bounded prepared tensor ingestion/profile preparation and strict schemas/tooling.
+- [x] Implement CPU/CUDA expert math, admission, caches and server role.
+- [x] Integrate the CUDA graph with bounded client backing, exact state, remote work and features.
+- [x] Implement probes/admin/deployment renderer/templates/containers/runbooks.
+- [x] Add offline verification and free CI/GHCR build/publication, run available checks and fix findings.
+- [ ] Complete integration review, preserve evidence and commit/push the handoff.
 
 ## Read coverage and checkpoint
 
@@ -47,10 +61,60 @@ Planning status: complete. Software implementation W00–W12 and all runtime/mod
 - `planning/verification.json` retains 13 passing planning-artifact checks: source/snapshot identity, W00–W12 and all 15 requirements/23 sections, FP8/address gates, acyclic/ordered dependencies, document fences/local links, development evidence JSON and no inherited runtime-source edits. These are structural/planning checks, not runtime correctness/performance results.
 - Staged whitespace check flags seven intentional two-space Markdown hard breaks at lines 5–11 of the byte-identical historical specification. Triaged without modifying that input; the scoped whitespace check for all newly authored documentation passes (exit 0). No runtime source/build/test command was changed or executed.
 
-## Implementation prerequisites still open
+## Historical prerequisites at the end of planning
 
 - W00/W02: complete coherent source/model/publisher/kernel/toolchain/image pins, import provenance and licenses; independent strict W4A4 oracle and preregistered profile/operator/quality policies.
 - W01/W04/W05: actual verified tensor inventory and prepared populations; complete operation/state dependencies and measured growth/peak bounds; bounded exact prefill/continuation.
 - W02/W06/W10/W12: actual x86-64 CPU/NUMA and RTX 5090/server GPU hosts, sufficient profile/reference/replica capacities, required Compose-v2 environment, network/PKI/paths/permissions and real probes.
 - W03/W07/W10/W11: measured workspace and protected resources, schema-bound credit costs, complete lifecycle tables, fixture calibration, context/feature/resource/deadline inputs and operational targets where applicable.
 - All required builds, operator/model/TLS/Docker/physical-host tests, fidelity/capacity measurements, candidate comparisons and at-least-one-hour engineering soak remain unrun. The implementation plan owns their dependencies/gates; none is counted as a pass.
+
+## Implementation checkpoint — 2026-10-03
+
+- Source pins and compact publisher metadata are recorded under locks/; no checkpoint weights have been downloaded. Python preparation, trusted metadata pages, full-population profile calibration, compact client extraction and deployment schemas are implemented and undergoing final integration checks.
+- Native JCS, protocol, admission, TLS and shared contracts pass GCC/Clang, ASan/UBSan and isolated offline mTLS fixtures. These are synthetic boundary checks, not live inference qualification. Full evidence is retained under build/ria/evidence/.
+- CPU expert math and independent profile oracles pass offline checks; CUDA expert and client graph compile for SM120a. CUDA production matrix acceleration, full graph/frontends, vision fidelity and executable linking remain unresolved work. Compilation is not a GPU execution or numerical/performance pass.
+- Parent-owned tensor ingestion authenticates root/pages/shards/chunks, copies active bytes into protected anonymous RAM, validates safetensors boundaries and exposes immutable views. A prepared Python fixture loads in C. Generic exact private-state paging fixtures pass. Further integration, sanitizer and adversarial artifact review remain open.
+- Bank descriptors, service/deployment identity checks and persistent remote binding code compile with strict C diagnostics; executable server, administrative CLI, probes, containers and CI remain in progress. No running production service is claimed.
+- Installed development tooling includes Ruff, Clang/static analysis, C sanitizers, OpenSSL/NUMA/Oniguruma headers and CUDA 13.1 compiler/disassembler. This ARM64 CC12.1 host remains outside the declared x86-64/RTX5090 release region. No model/GPU live test will run here.
+- Root owns integration/probe/CLI/build/deployment/CI and evidence; native_contracts owns frontend/tokenizer/prompt/evaluator; expert_math owns CUDA graph/vision; artifact_tools owns preparation/schema/renderer, then expert-service integration. Shared interfaces are coordinated explicitly.
+- GitHub repository push is authorized. Read access to Actions permission settings returned HTTP403 for the current fine-grained token; workflow publication/CI access is not yet tested and must be reported precisely if blocked.
+- All physical, fidelity, capacity, candidate-performance and at-least-one-hour soak gates remain deferred by the user. Required preregistered thresholds and actual host admission evidence must be supplied before a deployment can be admitted.
+
+## Integration checkpoint — 2026-10-03
+
+- Artifact tooling checkpoint: `locks/verification/artifact-tools.json` records 28 passing offline Python checks, Ruff, source/derived metadata verification and actual native admission integration (fixture host peak 13,312 bytes). Subsequent per-expert page-alignment changes exposed a client padding-record regression; it remains open until fixed and reverified.
+- Native CLI `bin/ds4ctl` builds and supports strict plan/validate/probe/health/drain. Bounded probe configuration/publication fixtures pass without running a physical probe. The common runtime restriction inspector is being integrated into role startup; no target-host observation has been manufactured.
+- Shared Unix admin code compiles and offline fixtures pass peer authorization, strict malformed input, actual callback drain and finite shutdown. Client/expert consumers are integrating callbacks; neither role is claimed ready yet.
+- Production CUDA expert code now dispatches actual native BF16/FP8/NVFP4 MMA, with generated SASS instructions independently inspected by the math agent. Source cast/quantization contracts and fragment-layout fixtures remain under review; no kernel was launched here. The client graph requires the exact RTX5090/CC12.0/UUID contract.
+- Image recipes, strict role Compose templates, pinned Engine-derived NUMA seccomp generation and hash-locked isolated Python test environment are present. Native source/toolchain build metadata and pinned-action CI/GHCR workflow are drafted. Container builds, effective/actual deployment review, CI execution and publication remain open.
+- Broad integration checks found and are fixing strict frontend compiler diagnostics, native analyzer boundary findings, the client extraction regression and a Cppcheck loop-shadowing false finding. Source mutations invalidate earlier build results; final verification will rerun after integration stabilizes.
+- Shared ownership update: artifact_tools owns server/NUMA and coordinated service/tensor extensions for explicit budgets and NUMA binding before first touch; native_contracts owns API/tokenizer/prompt/engine/evaluator/admin client callbacks; expert_math owns graph/vision/native MMA; root owns runtime/probe/admin/CLI/build/container/CI integration and final evidence.
+
+## Offline integration checkpoint — 2026-10-04 UTC
+
+- CPU expert service, CPU/CUDA administrative tools, CUDA client CLI/HTTP/evaluator and standalone bounded operator qualifier compile and link. SM120a cubins are present and PTX is absent in the inspected qualifier; no CUDA kernel was launched. Source/build mutations still require a final repeat.
+- Sixteen cross-language Python-to-native TensorStore fixtures pass, including actual authenticated loading, header/descriptor shape equality, rank/stride/overflow, aliases, paths, truncation and hash corruption. Twenty qualification comparison/admission fixtures passed before mandatory raw-provenance fields were added; those inputs must be migrated and reverified.
+- Actual Compose config parsing exposed decimal-string memory limits and empty default core/network/placement objects omitted by mocked fixtures. Those production normalization corrections and actual Engine inspection policy checks are now being integrated. A CPU image was created and inspected without starting it, then removed; no production service was run.
+- Review found and corrected NUMA/seccomp drift: bind mode is plain MPOL_BIND=2 with no migration flags, and self-query batches are at most64 pages. A pure fixture now compares the production constants to the generated allow rules.
+- Exact native child-lifetime peak RSS is obtained with owned wait4, with25ms sampled early containment and finite process-group cleanup; four subprocess/host-boundary fixtures pass. Physical container cgroup limits remain the hard memory enclosure.
+- Existing donor CPU binaries built; offline Engram, GGUF extent, web recovery, GPU-argument, prompt-prefix, sampling and evaluation self-checks pass. No model file was acquired.
+- All25 owned C modules passed Clang analyzer in an integration run, but source changes and an in-progress transport compiler warning invalidated that aggregate. Cppcheck2.13 builtin analysis stalls on TensorStore; alternate parser investigation is ongoing and no incomplete analysis is counted as a pass.
+- Remaining software work: complete paired model-free TLS qualifier and preregistered five-component proof producer, handoff/replay/soak driver, final docs, stable-source checks, final containers, commit/push and actual hosted CI/GHCR verification. Physical NUMA/GPU/model parity/capacity/performance/soak remain deferred by the user.
+
+## Final software integration checkpoint — 2026-10-04 UTC
+
+- All previously open production modules and offline handoff producers are implemented. The actual paired mTLS qualifier, joint preregistration, same-image managed fixture containers, raw-backed five-component proof derivation, source preparation, CUDA frontends/evaluator, bounded replay/soak driver and inspected launch controller are present. Physical matrix proofs additionally require preregistered measured contracts; content hashes are integrity checks, not attestations of execution.
+- A fresh forced build of all three CPU and six CUDA executables passed. Production projection functions in every CUDA executable contain the required BF16 HMMA, FP8 QMMA and NVFP4 OMMA instructions; only SM120a cubins are retained, with no PTX. No kernel was launched.
+- The integration suite passed 258 offline Python tests before the last physical-proof validator addition. Strict Ruff E/F/B checks passed. ASan/UBSan with leak detection passed all native contract, expert, state, graph, probe, admin, server and actual socket fixtures, plus nine frontend, sixteen TensorStore, six qualifier and three real paired TLS fixtures. The final Python/schema/static aggregate still needs to include the final proof validator.
+- Donor CPU binaries build, and sampling, Engram, GGUF extents, GPU-argument parsing, prompt-prefix, web recovery and evaluator case/extractor checks pass without a model. Those fixtures do not establish live donor or RIA inference correctness.
+- Cppcheck2.13's stall and alternate-parser crash were resolved by pinning and building isolated official Cppcheck2.22.0. Its full CPU/CUDA-host analyses pass with narrow documented POSIX mmap model suppressions. The source is unmodified, hash checked and kept outside production dependencies. The installer now kills and reaps timed-out compiler process groups.
+- Review fixed stale OpenSSL error queues, fail-stop TLS cleanup, SIGPIPE on OpenSSL socket writes, large-common-offset NLL cancellation, scope/environment digest cycles, stale actual host reports, candidate-operator identity checks, release profile/executor identity checks, build flag overrides and probe-only CUDA instruction certification. Negative fixtures cover these boundaries.
+- All native/source owners are frozen. Remaining work is final physical-proof integration, generated schemas, stable-source aggregate checks, refreshed local container builds, tracked verification report, commit/push and actual hosted amd64 Actions/GHCR verification. Model weights, hardware execution, fidelity, physical matrix, resource/performance evidence and the one-hour soak remain deferred by the user's instruction.
+
+## Handoff verification checkpoint — 2026-10-04 UTC
+
+- Final proof integration and generated schemas are complete. All360 offline Python tests and Ruff pass. The stable-source static aggregate has34 passing checks, including zero findings in all25 owned Clang analyzers and both Cppcheck2.22.0 configurations. Final native compilation, AOT SASS inspection, available donor regressions and ASan/UBSan/leaks pass.
+- Both ARM64 build-only containers were rebuilt after source freeze; stopped-container inspection confirms exact source/build identities and UID10001. No production container or GPU workload was started. Hosted amd64 builds/GHCR publication are checked after the authorized branch push; actual results are recorded in GitHub Actions and the final handoff response.
+- ThreadSanitizer compiled but could not initialize on this host (unexpected memory mapping, exit66, both PIE and non-PIE). It is recorded as unavailable, never passed. The single Pillow palette-transparency warning is from the intentional reference fixture and its pixel comparison passes.
+- `docs/ria-offline-verification.md`, `locks/verification/offline-integration.json` and ignored complete logs retain the evidence and limits. The source/credential/artifact audit accepts only the authenticated locally generated integer Engram lookup metadata as a safetensors file; no neural weights or private credentials are committed. The unchanged original specification retains its exact input hash.

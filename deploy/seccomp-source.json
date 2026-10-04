@@ -1,0 +1,21 @@
+{
+  "schema_revision": 1,
+  "engine_version": "29.6.2",
+  "engine_commit": "3d80467678f6e36325fa9ae3dd486fe91e5652e3",
+  "engine_module": "github.com/moby/profiles/seccomp v0.2.3",
+  "profiles_commit": "836ae4d37ef2ec995c77c99fc55f5b5f3af3a897",
+  "inputs": [
+    {
+      "url": "https://raw.githubusercontent.com/moby/profiles/836ae4d37ef2ec995c77c99fc55f5b5f3af3a897/seccomp/default.json",
+      "path": "seccomp-engine-default.json",
+      "sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+      "bytes": 13470
+    },
+    {
+      "url": "https://raw.githubusercontent.com/moby/profiles/836ae4d37ef2ec995c77c99fc55f5b5f3af3a897/LICENSE",
+      "path": "seccomp-LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358
+    }
+  ]
+}

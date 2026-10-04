@@ -130,6 +130,8 @@ typedef struct {
 
 typedef struct {
     const char *model_path;
+    /* Explicit admitted RIA CUDA service; NULL preserves the donor engine. */
+    const char *ria_service_path;
     const char *mtp_path;
     const char *vision_path;
     ds4_backend backend;
@@ -220,6 +222,8 @@ typedef struct {
     uint64_t bytes;
 } ds4_session_payload_file;
 
+struct ria_engine;
+struct ria_engine *ds4_engine_ria(ds4_engine *e);
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt);
 
 /* Multi-GPU pipeline-parallel entry point (wave 2).

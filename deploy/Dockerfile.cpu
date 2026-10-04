@@ -1,0 +1,43 @@
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS build
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY deploy/ubuntu.sources /etc/apt/ria.sources
+COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
+# Package versions resolve from the immutable, signed 20261002T000000Z snapshot.
+# hadolint ignore=DL3008
+RUN apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt install -y --no-install-recommends \
+      build-essential libssl-dev libnuma-dev python3 python3-venv ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN python3 -m venv /opt/ria-qualification && \
+    /opt/ria-qualification/bin/pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r requirements-ria.txt
+RUN make -j2 ria-cpu RIA_CC=cc && python3 deploy/build_info.py --role cpu --compiler cc --output build/ria/build-info.json
+
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY deploy/ubuntu.sources /etc/apt/ria.sources
+COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
+# Package versions resolve from the immutable, signed 20261002T000000Z snapshot.
+# hadolint ignore=DL3008
+RUN apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt install -y --no-install-recommends \
+      libssl3t64 libnuma1 python3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /model /etc/dwarfstar /run/secrets /run/dwarfstar /artifacts /usr/share/dwarfstar/licenses && \
+    chown 10001:10001 /run/dwarfstar /artifacts
+COPY --from=build /src/bin/ds4ctl /src/bin/ds4-expert-server /src/bin/ds4-ria-qualify /usr/local/bin/
+COPY --from=build /src/build/ria/build-info.json /usr/share/dwarfstar/build-info.json
+COPY --from=build /opt/ria-qualification/ /opt/ria-qualification/
+COPY tools/ /opt/ria-tools/
+COPY LICENSE /usr/share/dwarfstar/licenses/DS4-LICENSE
+COPY third_party/ryu/LICENSE-Apache2 third_party/ryu/LICENSE-Boost /usr/share/dwarfstar/licenses/
+LABEL org.opencontainers.image.source="https://github.com/kklouzal/RIA" \
+      org.opencontainers.image.title="RIA native CPU expert service" \
+      org.opencontainers.image.licenses="MIT AND (Apache-2.0 OR BSL-1.0)" \
+      io.ria.hardware-qualification="required"
+USER 10001:10001
+WORKDIR /artifacts
+ENTRYPOINT ["/usr/local/bin/ds4-expert-server"]
+CMD ["--config", "/etc/dwarfstar/service.json"]
+HEALTHCHECK --interval=10s --timeout=6s --start-period=300s --retries=3 CMD ["/usr/local/bin/ds4ctl", "health", "--socket", "/run/dwarfstar/admin.sock", "--timeout-ms", "5000"]

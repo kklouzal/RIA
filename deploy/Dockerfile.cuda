@@ -1,0 +1,48 @@
+FROM nvidia/cuda:13.1.1-devel-ubuntu24.04@sha256:9cf8694a27722418a1f175d90f85d5afb5a728fd4a9907d7f0565efecfa14d32 AS build
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY deploy/ubuntu.sources /etc/apt/ria.sources
+COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
+# Package versions resolve from the immutable, signed 20261002T000000Z snapshot.
+# hadolint ignore=DL3008
+RUN apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt install -y --no-install-recommends \
+      build-essential libssl-dev libnuma-dev libonig-dev libpng-dev libjpeg-dev python3 python3-venv ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN python3 -m venv /opt/ria-qualification && \
+    /opt/ria-qualification/bin/pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r requirements-ria.txt
+# No GPU is exposed to the build. Only accelerated SM120a machine code is
+# emitted; startup cannot JIT a missing implementation or download a kernel.
+RUN make -j2 ria-cuda RIA_CC=cc && python3 deploy/build_info.py --role cuda --compiler cc --output build/ria/build-info.json
+
+FROM nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY deploy/ubuntu.sources /etc/apt/ria.sources
+COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
+# Package versions resolve from the immutable, signed 20261002T000000Z snapshot.
+# hadolint ignore=DL3008
+RUN apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt install -y --no-install-recommends \
+      libssl3t64 libnuma1 libonig5 libpng16-16t64 libjpeg-turbo8 python3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /model /etc/dwarfstar /run/secrets /run/dwarfstar /artifacts /usr/share/dwarfstar/licenses && \
+    chown 10001:10001 /run/dwarfstar /artifacts
+COPY --from=build /src/bin/cuda/ /usr/local/bin/
+COPY --from=build /src/build/ria/build-info.json /usr/share/dwarfstar/build-info.json
+COPY --from=build /src/build/ria/evidence/cuda-artifacts.json /usr/share/dwarfstar/cuda-artifacts.json
+COPY --from=build /opt/ria-qualification/ /opt/ria-qualification/
+COPY tools/ /opt/ria-tools/
+COPY LICENSE /usr/share/dwarfstar/licenses/DS4-LICENSE
+COPY third_party/ryu/LICENSE-Apache2 third_party/ryu/LICENSE-Boost /usr/share/dwarfstar/licenses/
+COPY third_party/iris/LICENSE /usr/share/dwarfstar/licenses/iris-LICENSE
+LABEL org.opencontainers.image.source="https://github.com/kklouzal/RIA" \
+      org.opencontainers.image.title="RIA native SM120a client and expert service" \
+      org.opencontainers.image.licenses="MIT AND (Apache-2.0 OR BSL-1.0)" \
+      io.ria.hardware-qualification="required"
+ENV CUDA_DISABLE_PTX_JIT=1 NVIDIA_DRIVER_CAPABILITIES=compute,utility
+USER 10001:10001
+WORKDIR /artifacts
+ENTRYPOINT ["/usr/local/bin/ds4-server"]
+CMD ["--config", "/etc/dwarfstar/service.json"]
+HEALTHCHECK --interval=10s --timeout=6s --start-period=300s --retries=3 CMD ["/usr/local/bin/ds4ctl", "health", "--socket", "/run/dwarfstar/admin.sock", "--timeout-ms", "5000"]

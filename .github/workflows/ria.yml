@@ -1,0 +1,109 @@
+name: RIA offline verification and containers
+on:
+  push:
+    branches: [main, 'codex/**']
+    paths-ignore: ['planning/**', 'docs/**', 'TASK_LEDGER.md', 'IMPLEMENTATION_PLAN.md', 'locks/verification/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ria-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install native diagnostic tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang clang-tools libssl-dev libnuma-dev libonig-dev libpng-dev libjpeg-dev
+      - name: Install hash-locked offline dependencies
+        run: python -m pip install --no-deps --require-hashes -r requirements-ria-dev.txt
+      - name: Install checksum-locked static check tools
+        run: python deploy/install_checks.py --output-dir build/ria/check-tools
+      - name: Native and independent offline fixtures
+        run: make -j2 ria-offline RIA_PYTHON=python
+      - name: Static analysis, source and deployment checks
+        run: python deploy/offline_checks.py --output build/ria/evidence/ci-offline.json
+      - name: Sanitizers
+        run: make ria-sanitize
+      - name: Verify generated schemas
+        run: |
+          PYTHONPATH=tools python -m ria.schemas
+          git diff --exit-code -- schema
+      - name: Retain bounded offline evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ria-offline-${{ github.sha }}
+          path: build/ria/evidence/
+          retention-days: 7
+          if-no-files-found: error
+  containers:
+    needs: offline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [cpu, cuda]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+          driver-opts: image=moby/buildkit:v0.31.2@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+      - name: Authenticate GHCR on authorized repository pushes
+        if: github.event_name != 'pull_request' && github.repository == 'kklouzal/RIA'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build native image without GPU or checkpoint
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.${{ matrix.image }}
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' && github.repository == 'kklouzal/RIA' }}
+          tags: ghcr.io/kklouzal/ria-${{ matrix.image }}:sha-${{ github.sha }}
+          provenance: mode=max
+          sbom: generator=docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
+          outputs: ${{ github.event_name == 'pull_request' && 'type=oci,dest=/tmp/ria-image.tar' || '' }}
+          build-args: |
+            BUILDKIT_SBOM_SCAN_STAGE=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.ria.hardware-qualification=required
+      - name: Record immutable publication result
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_KIND: ${{ matrix.image }}
+        run: |
+          mkdir -p build/ria/evidence
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          value = {"image": "ghcr.io/kklouzal/ria-" + os.environ["IMAGE_KIND"], "digest": os.environ["IMAGE_DIGEST"], "commit": os.environ["GITHUB_SHA"], "hardware_qualified": False}
+          Path("build/ria/evidence/container-publication.json").write_text(json.dumps(value, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ria-${{ matrix.image }}-publication-${{ github.sha }}
+          path: build/ria/evidence/container-publication.json
+          retention-days: 7

@@ -1,4 +1,8 @@
 #include "ds4.h"
+#ifdef DS4_RIA
+#include "ria/engine.h"
+#include "ria/admin.h"
+#endif
 #include "ds4_tool_text.h"
 #include "ds4_distributed.h"
 #include "ds4_gpu_args.h"
@@ -43,9 +47,15 @@
 
 static volatile sig_atomic_t g_stop_requested = 0;
 static volatile sig_atomic_t g_listen_fd = -1;
+#ifdef DS4_RIA
+/* Process-owned signal policy, selected before publishing the listener. */
+static volatile sig_atomic_t g_ria_signal_mode = 0;
+#endif
 
 #define DS4_SERVER_IO_TIMEOUT_SEC 10
 #define DS4_SERVER_SEND_STALL_TIMEOUT_MS 2000
+#define RIA_FRONTEND_THREAD_STACK UINT64_C(1048576)
+#define RIA_FRONTEND_THREAD_GUARD UINT64_C(4096)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define DS4_SERVER_MAYBE_UNUSED __attribute__((unused))
@@ -57,6 +67,9 @@ static void stop_signal_handler(int sig) {
     (void)sig;
     if (g_stop_requested) _exit(130);
     g_stop_requested = 1;
+#ifdef DS4_RIA
+    if (g_ria_signal_mode) return;
+#endif
     if (g_listen_fd >= 0) {
         int fd = (int)g_listen_fd;
         g_listen_fd = -1;
@@ -480,7 +493,7 @@ static bool server_decode_base64(const char *src, uint8_t **out, size_t *out_len
         int c = pad2 ? 0 : base64_value((unsigned char)src[i + 2]);
         int d = pad3 ? 0 : base64_value((unsigned char)src[i + 3]);
         if (a < 0 || b < 0 || c < 0 || d < 0 ||
-            (pad2 && !pad3) || ((pad2 || pad3) && i + 4 != n)) {
+            (pad2 && !pad3) || (pad2 && (b & 15)) || (pad3 && !pad2 && (c & 3)) || ((pad2 || pad3) && i + 4 != n)) {
             free(decoded);
             return false;
         }
@@ -705,6 +718,9 @@ static void random_tool_id(char *dst, size_t dstlen, api_style api) {
 }
 
 typedef struct server server;
+#ifdef DS4_RIA
+static bool server_is_ria(const server *);
+#endif
 static void server_inference_lock(server *s);
 static void server_inference_unlock(server *s);
 static bool server_encode_image(server *s, const server_image_input *input,
@@ -795,6 +811,13 @@ static bool responses_live_has_call_id(server *s, const char *id);
 static bool anthropic_live_has_call_id(server *s, const char *id);
 static stop_list live_tool_call_order(server *s, api_style api, const stop_list *ids);
 
+#ifdef DS4_RIA
+typedef struct {
+    uint64_t started_ns, sampled_tokens, write_ns, pending_write_ns, reused_prefix_tokens;
+    const char *phase;
+    bool failed;
+} ria_measurement;
+#endif
 typedef struct {
     req_kind kind;
     api_style api;
@@ -809,6 +832,12 @@ typedef struct {
     char *raw_body;
     char *prompt_text;
     tool_schema_orders tool_orders;
+    bool ria_tool_calls_allowed, ria_measurements;
+#ifdef DS4_RIA
+    /* Worker-owned observer stored within the job; no retained token array. */
+    ria_measurement ria_measurement;
+    ria_measurement *ria_observer;
+#endif
     int max_tokens;
     int top_k;
     float temperature;
@@ -1220,6 +1249,7 @@ static server_model_syntax server_model_syntax_for_engine(ds4_engine *engine) {
 }
 
 static const char *server_model_id_from_engine(ds4_engine *engine) {
+    if(ds4_engine_ria(engine))return "DeepSeek-V4.1-Flash";
     if (ds4_engine_is_deepseek41(engine)) return "deepseek-v4.1-flash";
     if (ds4_engine_is_qwen4(engine)) return "qwen3.8-flash-next";
     if (ds4_engine_is_glm53(engine)) return "glm-5.3-flash";
@@ -1519,6 +1549,61 @@ static void append_raw_json_line(buf *b, const char *json) {
     if (b->len) buf_putc(b, '\n');
     buf_puts(b, json);
 }
+
+static bool send_all(int fd, const void *bytes, size_t length);
+static bool request_send_all(int fd, const void *bytes, size_t length, const request *r) {
+#ifdef DS4_RIA
+    ria_measurement *observer = r ? r->ria_observer : NULL;
+    if (observer) {
+        ria_error error = {0};
+        uint64_t start, end;
+        if (observer->failed || !ria_monotonic_ns(&start, &error)) return false;
+        bool ok = send_all(fd, bytes, length);
+        if (!ria_monotonic_ns(&end, &error) || end < start ||
+            !ria_u64_add(observer->write_ns, end - start, &observer->write_ns) ||
+            !ria_u64_add(observer->pending_write_ns, end - start, &observer->pending_write_ns)) {
+            observer->failed = true;
+            return false;
+        }
+        return ok;
+    }
+#else
+    (void)r;
+#endif
+    return send_all(fd, bytes, length);
+}
+#ifdef DS4_RIA
+static bool ria_measure_token(int fd, const request *r) {
+    ria_measurement *observer = r->ria_observer;
+    if (!observer) return true;
+    ria_error error = {0};
+    uint64_t now;
+    if (observer->failed || !ria_monotonic_ns(&now, &error) || now < observer->started_ns) return false;
+    char bytes[320];
+    int n = snprintf(bytes, sizeof bytes,
+        "event: ria_measurement\ndata: {\"index\":\"%llu\",\"elapsed_ns\":\"%llu\",\"previous_write_ns\":\"%llu\"}\n\n",
+        (unsigned long long)observer->sampled_tokens, (unsigned long long)(now - observer->started_ns),
+        (unsigned long long)observer->pending_write_ns);
+    observer->pending_write_ns = 0;
+    if (n < 0 || (size_t)n >= sizeof bytes ||
+        !request_send_all(fd, bytes, (size_t)n, r)) return false;
+    if (!ria_u64_add(observer->sampled_tokens, 1, &observer->sampled_tokens)) return false;
+    return true;
+}
+static bool ria_measure_final(int fd, const request *r, int completion_tokens) {
+    ria_measurement *observer = r->ria_observer;
+    if (!observer) return true;
+    if (observer->failed || !observer->phase) return false;
+    char bytes[384];
+    int n = snprintf(bytes, sizeof bytes,
+        "event: ria_diagnostics\ndata: {\"phase\":\"%s\",\"reused_prefix_tokens\":\"%llu\","
+        "\"sampled_tokens\":\"%llu\",\"completion_tokens\":%d,\"write_ns\":\"%llu\"}\n\n",
+        observer->phase, (unsigned long long)observer->reused_prefix_tokens,
+        (unsigned long long)observer->sampled_tokens, completion_tokens,
+        (unsigned long long)observer->write_ns);
+    return n > 0 && (size_t)n < sizeof bytes && request_send_all(fd, bytes, (size_t)n, r);
+}
+#endif
 
 static void json_escape(buf *b, const char *s);
 
@@ -5743,14 +5828,29 @@ bad:
 }
 
 static long long wall_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC,&ts);
+    return (long long)ts.tv_sec*1000+ts.tv_nsec/1000000;
 }
 
 static bool send_all(int fd, const void *p, size_t n) {
     const char *s = p;
-    long long deadline = wall_ms() + DS4_SERVER_SEND_STALL_TIMEOUT_MS;
+    long long stall_ms=DS4_SERVER_SEND_STALL_TIMEOUT_MS;
+    bool whole_write_deadline = false;
+#ifdef DS4_RIA
+    struct timeval timeout = {0}, receive_timeout = {0};
+    socklen_t receive_length = sizeof receive_timeout;
+    socklen_t timeout_length = sizeof timeout;
+    if (getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, &timeout_length) ==
+            0 &&
+        (timeout.tv_sec || timeout.tv_usec) &&
+        getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, &receive_length) == 0 &&
+        !receive_timeout.tv_sec && !receive_timeout.tv_usec) {
+      whole_write_deadline = true;
+      stall_ms = (long long)timeout.tv_sec * 1000 + timeout.tv_usec / 1000;
+    }
+#endif
+    long long deadline = wall_ms() + stall_ms;
     while (n) {
         if (g_stop_requested) return false;
         ssize_t w = send(fd, s, n, 0);
@@ -5770,7 +5870,7 @@ static bool send_all(int fd, const void *p, size_t n) {
         if (w <= 0) return false;
         s += w;
         n -= (size_t)w;
-        deadline = wall_ms() + DS4_SERVER_SEND_STALL_TIMEOUT_MS;
+        if (!whole_write_deadline) deadline = wall_ms() + stall_ms;
     }
     return true;
 }
@@ -5798,9 +5898,14 @@ static void json_escape(buf *b, const char *s) {
 }
 
 static void json_escape_n(buf *b, const char *s, size_t n) {
-    char *tmp = xstrndup(s ? s : "", n);
-    json_escape(b, tmp);
-    free(tmp);
+    buf_putc(b, '"');
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { buf_putc(b, '\\'); buf_putc(b, (char)c); }
+        else if (c < 0x20) buf_printf(b, "\\u%04x", (unsigned)c);
+        else buf_putc(b, (char)c);
+    }
+    buf_putc(b, '"');
 }
 
 static void json_escape_fragment_n(buf *b, const char *s, size_t n) {
@@ -7014,7 +7119,7 @@ static bool sse_error_event(int fd, const request *r, const char *msg) {
         json_escape(&b, message);
         buf_puts(&b, ",\"type\":\"server_error\"}}\n\n");
     }
-    bool ok = send_all(fd, b.ptr, b.len);
+    bool ok = request_send_all(fd, b.ptr, b.len, r);
     buf_free(&b);
     return ok;
 }
@@ -7045,7 +7150,7 @@ static bool sse_chunk(int fd, const request *r, const char *id, const char *text
         if (finish) json_escape(&b, finish); else buf_puts(&b, "null");
         buf_puts(&b, "}]}\n\n");
     }
-    bool ok = send_all(fd, b.ptr, b.len);
+    bool ok = request_send_all(fd, b.ptr, b.len, r);
     buf_free(&b);
     return ok;
 }
@@ -7091,7 +7196,7 @@ static bool sse_usage_chunk(int fd, const request *r, const char *id,
     append_openai_usage_json(&b, r, prompt_tokens, completion_tokens);
     buf_puts(&b, "}\n\n");
 
-    bool ok = send_all(fd, b.ptr, b.len);
+    bool ok = request_send_all(fd, b.ptr, b.len, r);
     buf_free(&b);
     return ok;
 }
@@ -7099,7 +7204,10 @@ static bool sse_usage_chunk(int fd, const request *r, const char *id,
 static bool sse_done(int fd, const request *r, const char *id,
                      int prompt_tokens, int completion_tokens) {
     return sse_usage_chunk(fd, r, id, prompt_tokens, completion_tokens) &&
-           send_all(fd, "data: [DONE]\n\n", 14);
+#ifdef DS4_RIA
+           ria_measure_final(fd, r, completion_tokens) &&
+#endif
+           request_send_all(fd, "data: [DONE]\n\n", 14, r);
 }
 
 static bool sse_chat_finish(int fd, const request *r, const char *id, const char *content,
@@ -7136,7 +7244,7 @@ static bool sse_chat_finish(int fd, const request *r, const char *id, const char
     json_escape(&b, finish);
     buf_puts(&b, "}]}\n\n");
 
-    bool ok = send_all(fd, b.ptr, b.len) &&
+    bool ok = request_send_all(fd, b.ptr, b.len, r) &&
               sse_done(fd, r, id, prompt_tokens, completion_tokens);
     buf_free(&b);
     return ok;
@@ -7263,7 +7371,7 @@ static bool sse_chat_delta_n(int fd, const request *r, const char *id,
     buf_putc(&b, ':');
     json_escape_n(&b, text, len);
     buf_puts(&b, "},\"finish_reason\":null}]}\n\n");
-    bool ok = send_all(fd, b.ptr, b.len);
+    bool ok = request_send_all(fd, b.ptr, b.len, r);
     buf_free(&b);
     return ok;
 }
@@ -7287,7 +7395,7 @@ static bool sse_chat_tool_call_start_delta(int fd, const request *r, const char 
     buf_puts(&b, ",\"type\":\"function\",\"function\":{\"name\":");
     json_escape(&b, name ? name : "");
     buf_puts(&b, ",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n");
-    bool ok = send_all(fd, b.ptr, b.len);
+    bool ok = request_send_all(fd, b.ptr, b.len, r);
     buf_free(&b);
     return ok;
 }
@@ -7304,7 +7412,7 @@ static bool sse_chat_tool_call_args_delta_n(int fd, const request *r, const char
     buf_puts(&b, ",\"function\":{\"arguments\":");
     json_escape_n(&b, text, len);
     buf_puts(&b, "}}]},\"finish_reason\":null}]}\n\n");
-    bool ok = send_all(fd, b.ptr, b.len);
+    bool ok = request_send_all(fd, b.ptr, b.len, r);
     buf_free(&b);
     return ok;
 }
@@ -8012,11 +8120,79 @@ static bool openai_tool_stream_update(int fd, server *s, const request *r, const
     return true;
 }
 
+#ifdef DS4_RIA
+static const char *ria_find(const char *s, size_t n, const char *needle) {
+    size_t k = strlen(needle);
+    for (size_t i = 0; k <= n && i <= n - k; i++)
+        if (!memcmp(s + i, needle, k)) return s + i;
+    return NULL;
+}
+/* Stops are validated nonempty UTF8 strings without NUL; generated content is
+ * length-delimited and may contain NUL. Earliest byte offset wins, preserving
+ * request order for equal offsets. */
+static bool ria_stop_find(const stop_list *stops, const char *text, size_t length,
+                          size_t from, size_t *position, size_t *match_length) {
+    if (from > length) return false;
+    bool found = false;
+    for (int i = 0; i < stops->len; i++) {
+        const char *match = ria_find(text + from, length - from, stops->v[i]);
+        if (match && (!found || (size_t)(match - text) < *position)) {
+            found = true;
+            *position = (size_t)(match - text);
+            *match_length = strlen(stops->v[i]);
+        }
+    }
+    return found;
+}
+
+static bool ria_stream_update(int fd, const request *r, const char *id,
+                             openai_stream *st, const char *raw, size_t n, bool final) {
+    if (!st->active || st->mode == OPENAI_STREAM_SUPPRESS) return true;
+    if (st->emit_pos > n) return false;
+    if (st->mode == OPENAI_STREAM_THINKING) {
+        const char *close = ria_find(raw + st->emit_pos, n - st->emit_pos, "</think>");
+        size_t limit = close ? (size_t)(close - raw) : n;
+        if (!close && !final) {
+            size_t hold = 0;
+            for (size_t k = 1; k < 8 && k <= n - st->emit_pos; k++)
+                if (!memcmp(raw + n - k, "</think>", k)) hold = k;
+            limit -= hold;
+        }
+        limit = utf8_stream_safe_len(raw, st->emit_pos, limit, final || close != NULL);
+        if (limit > st->emit_pos && !sse_chat_delta_n(fd, r, id, "reasoning_content",
+                                                     raw + st->emit_pos, limit - st->emit_pos)) return false;
+        st->emit_pos = limit;
+        if (!close) return true;
+        st->emit_pos = (size_t)(close - raw) + 8;
+        st->mode = OPENAI_STREAM_TEXT;
+    }
+    if (st->mode == OPENAI_STREAM_TEXT) {
+        const char *marker = "\n\n<｜DSML｜ calls";
+        const char *tool = ria_find(raw + st->emit_pos, n - st->emit_pos, marker);
+        size_t limit = tool ? (size_t)(tool - raw) : n;
+        if (!tool && !final) {
+            size_t hold = 0;
+            for (size_t k = 1; k < strlen(marker) && k <= n - st->emit_pos; k++)
+                if (!memcmp(raw + n - k, marker, k)) hold = k;
+            limit -= hold;
+        }
+        limit = utf8_stream_safe_len(raw, st->emit_pos, limit, final || tool != NULL);
+        if (limit > st->emit_pos && !sse_chat_delta_n(fd, r, id, "content",
+                                                     raw + st->emit_pos, limit - st->emit_pos)) return false;
+        st->emit_pos = limit;
+        if (tool) st->mode = OPENAI_STREAM_SUPPRESS;
+    }
+    return true;
+}
+#endif
 static bool openai_sse_stream_update(int fd, server *s, const request *r, const char *id,
                                      openai_stream *st,
                                      const char *raw, size_t raw_len,
                                      bool final) {
     if (!st->active || !raw) return true;
+#ifdef DS4_RIA
+    if (server_is_ria(s)) return ria_stream_update(fd, r, id, st, raw, raw_len, final);
+#endif
 
     if (st->mode == OPENAI_STREAM_THINKING) {
         if (!st->checked_think_prefix) {
@@ -8152,7 +8328,7 @@ static bool openai_sse_finish_live(int fd, server *s, const request *r, const ch
     json_escape(&b, finish);
     buf_puts(&b, "}]}\n\n");
 
-    bool ok = send_all(fd, b.ptr, b.len) &&
+    bool ok = request_send_all(fd, b.ptr, b.len, r) &&
               sse_done(fd, r, id, prompt_tokens, completion_tokens);
     buf_free(&b);
     return ok;
@@ -10139,43 +10315,84 @@ static bool id_list_contains(const stop_list *ids, const char *id);
 static void id_list_push_unique(stop_list *ids, const char *id);
 
 struct server {
-    ds4_engine *engine;
-    ds4_tp *tp_leader;
-    server_slot *slots;
-    int slot_count;
-    int ctx_size;
-    bool batched_mode;
-    pthread_t *slot_threads;
-    pthread_t decode_thread;
-    int default_tokens;
-    kv_disk_cache kv;
-    tool_memory tool_mem;
-    server_image_cache image_cache; /* Protected by inference_mu. */
-    bool disable_exact_dsml_tool_replay;
-    bool enable_cors;
-    pthread_mutex_t tool_mu;
-    pthread_mutex_t kv_mu;
-    pthread_mutex_t inference_mu;
-    pthread_mutex_t model_mu;
-    pthread_cond_t model_cv;
-    bool model_busy;
-    bool qwen4_batch_mtp;
-    bool model_stopping;
-    int decode_pending;
-    int active_generations;
-    int mixed_prefill_quantum;
-    int last_prefill_slot;
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
-    pthread_cond_t clients_cv;
-    job *head;
-    job *tail;
-    bool stopping;
-    int clients;
-    FILE *trace;
-    pthread_mutex_t trace_mu;
-    uint64_t trace_seq;
+#ifdef DS4_RIA
+  const ria_service *ria_service;
+  char ria_bearer[4097];
+  size_t ria_bearer_length;
+  uint64_t ria_connections;
+  bool ria_generation_reserved;
+  bool ria_worker_live, ria_ready, ria_drain_failed;
+  int ria_listener;
+  int ria_client_fds[64];
+  ria_admin *ria_admin;
+  pthread_attr_t ria_thread_attributes;
+  bool ria_thread_attributes_ready;
+  pthread_t ria_client_threads[64];
+  bool ria_client_joinable[64];
+#endif
+  ds4_engine *engine;
+  ds4_tp *tp_leader;
+  server_slot *slots;
+  int slot_count;
+  int ctx_size;
+  bool batched_mode;
+  pthread_t *slot_threads;
+  pthread_t decode_thread;
+  int default_tokens;
+  kv_disk_cache kv;
+  tool_memory tool_mem;
+  server_image_cache image_cache; /* Protected by inference_mu. */
+  bool disable_exact_dsml_tool_replay;
+  bool enable_cors;
+  pthread_mutex_t tool_mu;
+  pthread_mutex_t kv_mu;
+  pthread_mutex_t inference_mu;
+  pthread_mutex_t model_mu;
+  pthread_cond_t model_cv;
+  bool model_busy;
+  bool qwen4_batch_mtp;
+  bool model_stopping;
+  int decode_pending;
+  int active_generations;
+  int mixed_prefill_quantum;
+  int last_prefill_slot;
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  pthread_cond_t clients_cv;
+  job *head;
+  job *tail;
+  bool stopping;
+  int clients;
+  FILE *trace;
+  pthread_mutex_t trace_mu;
+  uint64_t trace_seq;
 };
+
+#ifdef DS4_RIA
+static bool server_is_ria(const server *s) { return s->ria_service != NULL; }
+static void ria_thread_status(const server *s, int status, const char *operation) {
+    if (s->ria_service && status) {
+        fprintf(stderr, "ds4-server: fatal native thread %s: %s\n", operation, strerror(status));
+        _exit(1);
+    }
+}
+/* Native joinable owners are reclaimed before slot reuse and before freeing
+ * server state. The monotonically bounded poll avoids an unbounded final join. */
+static void ria_thread_join(server *s, pthread_t thread) {
+    uint64_t deadline;
+    if (!ria_u64_add(ria_monotonic_ms(), s->ria_service->limits.operation_timeout_ms, &deadline))
+        ria_thread_status(s, EOVERFLOW, "join deadline");
+    for (;;) {
+        int status = pthread_tryjoin_np(thread, NULL);
+        if (!status) return;
+        if (status != EBUSY) ria_thread_status(s, status, "join");
+        if (ria_monotonic_ms() >= deadline)
+            ria_thread_status(s, ETIMEDOUT, "join deadline");
+        struct timespec pause = {0, 1000000};
+        while (nanosleep(&pause, &pause) && errno == EINTR) {}
+    }
+}
+#endif
 
 static void server_inference_lock(server *s) {
     pthread_mutex_lock(&s->inference_mu);
@@ -10548,6 +10765,13 @@ static void anthropic_live_clear(server *s, server_slot *slot) {
 }
 
 static void request_live_state_clear(server *s, server_slot *slot) {
+#ifdef DS4_RIA
+    if (s->ria_service) {
+        pthread_mutex_lock(&s->inference_mu);
+        ds4_session_invalidate(slot->session);
+        pthread_mutex_unlock(&s->inference_mu);
+    }
+#endif
     responses_live_clear(s, slot);
     anthropic_live_clear(s, slot);
     thinking_live_clear(s, slot);
@@ -11728,6 +11952,18 @@ static slot_reuse slot_probe_reuse_locked(server *s, server_slot *slot,
 
 static slot_reuse slot_probe_reuse(server *s, server_slot *slot,
                                    const request *req) {
+#ifdef DS4_RIA
+    if (s->ria_service) {
+        int common = ds4_session_common_prefix(slot->session, &req->prompt);
+        int incorporated = ds4_session_pos(slot->session);
+        bool same_images = ds4_session_vision_prefix_matches(
+            slot->session, req->images, req->image_count);
+        return (slot_reuse){incorporated > 0 && common == incorporated && same_images
+                               ? REUSE_MEMORY_TOKEN : REUSE_NONE,
+                           incorporated > 0 && common == incorporated && same_images
+                               ? incorporated : 0, 0, 0};
+    }
+#endif
     pthread_mutex_lock(&s->tool_mu);
     slot_reuse pr = slot_probe_reuse_locked(s, slot, req);
     pthread_mutex_unlock(&s->tool_mu);
@@ -13389,9 +13625,175 @@ static void *decode_worker_main(void *arg) {
  * shorter than the full prompt, we prefill to that boundary, store it, and
  * immediately continue to the real prompt.  The live graph therefore always
  * moves forward. */
+#ifdef DS4_RIA
+static bool ria_response(const request *r, const char *text, size_t length,
+                         bool natural_eos, const char **finish, char **content,
+                         char **reasoning, tool_calls *calls, char *err,
+                         size_t errlen, ria_json_doc *native_result) {
+  ria_error error = {0};
+  char *encoded = NULL;
+  size_t encoded_length = 0;
+  bool thinking = ds4_think_mode_enabled(r->think_mode);
+  if (!strcmp(*finish, "error")) {
+    *content = xstrdup("");
+    *reasoning = xstrdup("");
+    return false;
+  }
+  if (!natural_eos) {
+    const char *end = thinking ? ria_find(text, length, "</think>") : NULL;
+    size_t reason_length = thinking ? (end ? (size_t)(end - text) : length) : 0;
+    const char *body = thinking ? (end ? end + 8 : text + length) : text;
+    size_t body_length = (size_t)(text + length - body);
+    buf partial = {0};
+    buf_puts(&partial, "{\"role\":\"assistant\",\"content\":");
+    json_escape_n(&partial, body, body_length);
+    buf_puts(&partial, ",\"reasoning_content\":");
+    json_escape_n(&partial, text, reason_length);
+    buf_puts(&partial, ",\"tool_calls\":[]}");
+    encoded_length = partial.len;
+    encoded = buf_take(&partial);
+  }
+  if (natural_eos) {
+  size_t eos_length = strlen(RIA_EOS);
+  char *complete = malloc(length + eos_length + 1);
+  if (!complete) {
+    snprintf(err, errlen, "RIA completion allocation failed");
+    *finish = "error";
+    return false;
+  }
+  memcpy(complete, text, length);
+  memcpy(complete + length, RIA_EOS, eos_length + 1);
+  bool generated = ria_prompt_completion(complete, length + eos_length, thinking,
+                                  &encoded, &encoded_length, &error);
+  free(complete);
+  if (!generated) {
+    *finish = "error";
+    snprintf(err, errlen, "RIA completion %d: %.*s", error.code, (int)(errlen > 40 ? errlen - 40 : 0), error.message);
+    return false;
+  }
+  }
+  bool ok = true;
+  ria_json_doc d = {0};
+  if (ok)
+    ok = ria_json_parse(encoded, encoded_length,
+                        (ria_json_limits){67108864, 200000, 64}, &d, &error);
+  free(encoded);
+  if (ok) {
+    const ria_json_node *c = ria_json_at(&d, ria_json_get(&d, 0, "content")),
+                        *reason = ria_json_at(
+                            &d, ria_json_get(&d, 0, "reasoning_content")),
+                        *array =
+                            ria_json_at(&d, ria_json_get(&d, 0, "tool_calls"));
+    *content = xstrndup(c->text, c->length);
+    *reasoning = xstrndup(reason->text, reason->length);
+    for (uint32_t i = array->child; i != RIA_JSON_NONE; i = d.nodes[i].next) {
+      uint32_t function = ria_json_get(&d, i, "function");
+      const ria_json_node *name = ria_json_at(
+                              &d, ria_json_get(&d, function, "name")),
+                          *args = ria_json_at(
+                              &d, ria_json_get(&d, function, "arguments")),
+                          *ns =
+                              ria_json_at(&d, ria_json_get(&d, i, "namespace"));
+      tool_call call = {0};
+      if (ns) {
+        buf b = {0};
+        buf_append(&b, ns->text, ns->length);
+        buf_puts(&b, "::");
+        buf_append(&b, name->text, name->length);
+        call.name = buf_take(&b);
+      } else
+        call.name = xstrndup(name->text, name->length);
+      call.arguments = xstrndup(args->text, args->length);
+      tool_calls_push(calls, call);
+    }
+    if (calls->len && !r->ria_tool_calls_allowed)
+      ok = ria_fail(&error,RIA_INVALID_REQUEST,"tool_choice none forbids generated tool calls");
+    if (ok && calls->len)
+      *finish = "tool_calls";
+  }
+  if (ok) *native_result = d;
+  else ria_json_free(&d);
+  if (!ok) {
+    *finish = "error";
+    snprintf(err, errlen, "RIA completion %d: %.*s", error.code,
+             (int)(errlen > 40 ? errlen - 40 : 0), error.message);
+  }
+  return ok;
+}
+static void ria_wire_calls(buf *out, const ria_json_doc *d, const char *id, bool delta) {
+  const ria_json_node *array = ria_json_at(d, ria_json_get(d, 0, "tool_calls"));
+  buf_putc(out, '[');
+  unsigned index = 0;
+  for (uint32_t i = array->child; i != RIA_JSON_NONE; i = d->nodes[i].next, index++) {
+    uint32_t function = ria_json_get(d, i, "function");
+    const ria_json_node *name = ria_json_at(d, ria_json_get(d, function, "name")),
+                        *args = ria_json_at(d, ria_json_get(d, function, "arguments")),
+                        *ns = ria_json_at(d, ria_json_get(d, i, "namespace"));
+    if (index) buf_putc(out, ',');
+    buf_putc(out, '{');
+    if (delta) buf_printf(out, "\"index\":%u,", index);
+    buf_printf(out, "\"id\":\"%s_tool_%u\",\"type\":\"function\",\"function\":{\"name\":", id, index);
+    json_escape_n(out, name->text, name->length);
+    buf_puts(out, ",\"arguments\":");
+    json_escape_n(out, args->text, args->length);
+    buf_putc(out, '}');
+    if (ns) { buf_puts(out, ",\"namespace\":"); json_escape_n(out, ns->text, ns->length); }
+    buf_putc(out, '}');
+  }
+  buf_putc(out, ']');
+}
+static bool ria_wire_response(int fd, const request *r, const char *id,
+                              const ria_json_doc *d, openai_stream *stream,
+                              const char *raw, size_t raw_length,
+                              const char *finish, int prompt_tokens, int completion_tokens) {
+  const ria_json_node *content = ria_json_at(d, ria_json_get(d, 0, "content")),
+                      *reason = ria_json_at(d, ria_json_get(d, 0, "reasoning_content")),
+                      *calls = ria_json_at(d, ria_json_get(d, 0, "tool_calls"));
+  if (!content || !reason || !calls) return false;
+  buf b = {0};
+  bool ok;
+  if (r->stream) {
+    if (!ria_stream_update(fd, r, id, stream, raw, raw_length, true)) return false;
+    if (calls->child != RIA_JSON_NONE) {
+      buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":", id, (long)time(NULL));
+      json_escape(&b, r->model);
+      buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":");
+      ria_wire_calls(&b, d, id, true);
+      buf_puts(&b, "},\"finish_reason\":null}]}\n\n");
+    }
+    ok = (!b.len || request_send_all(fd, b.ptr, b.len, r)) &&
+         sse_chunk(fd, r, id, NULL, finish) && sse_done(fd, r, id, prompt_tokens, completion_tokens);
+  } else {
+    buf_printf(&b, "{\"id\":\"%s\",\"object\":\"chat.completion\",\"created\":%ld,\"model\":", id, (long)time(NULL));
+    json_escape(&b, r->model);
+    buf_puts(&b, ",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":");
+    json_escape_n(&b, content->text, content->length);
+    if (reason->length) { buf_puts(&b, ",\"reasoning_content\":"); json_escape_n(&b, reason->text, reason->length); }
+    if (calls->child != RIA_JSON_NONE) { buf_puts(&b, ",\"tool_calls\":"); ria_wire_calls(&b, d, id, false); }
+    buf_puts(&b, "},\"finish_reason\":"); json_escape(&b, finish);
+    buf_puts(&b, "}],\"usage\":"); append_openai_usage_json(&b, r, prompt_tokens, completion_tokens);
+    buf_puts(&b, "}\n");
+    ok = http_response(fd, false, 200, "application/json", b.ptr);
+  }
+  buf_free(&b);
+  return ok;
+}
+
+#endif
 static void generate_job_inner(server *s, server_slot *slot, job *j) {
     char err[160];
     err[0] = '\0';
+#ifdef DS4_RIA
+    if (s->ria_service && j->req.ria_measurements) {
+        memset(&j->req.ria_measurement, 0, sizeof j->req.ria_measurement);
+        j->req.ria_observer = &j->req.ria_measurement;
+        ria_error error = {0};
+        if (!ria_monotonic_ns(&j->req.ria_observer->started_ns, &error)) {
+            http_error(j->fd, false, 503, "generation timing observation failed");
+            return;
+        }
+    }
+#endif
     const bool multimodal = j->req.image_count != 0;
     pthread_mutex_lock(&s->inference_mu);
     const int old_pos = ds4_session_pos(slot->session);
@@ -13776,6 +14178,18 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
         send_prefill_failure_response(s, j, &progress, ctx_span, req_flags, err);
         return;
     }
+#ifdef DS4_RIA
+    if (j->req.ria_observer) {
+        ria_error error = {0};
+        if (!ria_engine_sync_observation(ds4_engine_ria(s->engine),
+              &j->req.ria_observer->phase, &j->req.ria_observer->reused_prefix_tokens, &error)) {
+            request_live_state_clear(s, slot);
+            http_error(j->fd, false, 503, "generation prefix observation failed");
+            free(disk_cache_path); ds4_tokens_free(&effective_prompt);
+            return;
+        }
+    }
+#endif
     free(disk_cache_path);
     if (job_cancelled(j)) {
         ds4_session_set_progress(slot->session, NULL, NULL);
@@ -13811,6 +14225,19 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
         }
     }
     char id[96];
+#ifdef DS4_RIA
+    if (s->ria_service) {
+        uint8_t entropy[12]; char hex[25];
+        if (!random_bytes(entropy, sizeof entropy)) {
+            http_error(j->fd, false, 503, "request identity entropy unavailable");
+            ds4_session_invalidate(slot->session);
+            ds4_tokens_free(&effective_prompt);
+            return;
+        }
+        ria_hex_encode(entropy, sizeof entropy, hex);
+        snprintf(id, sizeof id, "chatcmpl-%s", hex);
+    } else
+#endif
     responses_random_id(id, sizeof(id),
                         j->req.kind == REQ_CHAT ? "chatcmpl-" : "cmpl-");
 
@@ -13888,6 +14315,7 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
     bool dsml_recovery_attempted = false;
     int recovery_completion = 0;
     uint64_t rng = j->req.seed;
+    if (!rng && ds4_engine_ria(s->engine))rng=UINT64_C(0x9e3779b97f4a7c15);
     if (!rng && !random_bytes(&rng, sizeof(rng))) {
         rng = ((uint64_t)time(NULL) << 32) ^ (uint64_t)(uintptr_t)j;
     }
@@ -13895,6 +14323,9 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
 decode_again:
     ;
     buf text = {0};
+#ifdef DS4_RIA
+    ria_utf8_decoder source_decoder = {{0},0};
+#endif
     size_t plain_stream_pos = 0;
     size_t stop_scan_from = 0;
     const char *finish = "length";
@@ -13947,7 +14378,7 @@ decode_again:
             if (!j->req.top_p_set) top_p = DS4_DEFAULT_TOP_P;
             if (!j->req.min_p_set) min_p = DS4_DEFAULT_MIN_P;
         }
-        const bool greedy_tool_syntax = !thinking.inside && in_tool_call &&
+        const bool greedy_tool_syntax = !ds4_engine_ria(s->engine) && !thinking.inside && in_tool_call &&
             !dsml_decode_state_uses_payload_sampling(dsml_state);
         const float payload_temperature = temperature;
         if (greedy_tool_syntax) {
@@ -13967,6 +14398,11 @@ decode_again:
         if (ds4_token_is_stop_for_think_mode(s->engine,
                                              token,
                                              j->req.think_mode)) {
+#ifdef DS4_RIA
+            if (s->ria_service && !ria_measure_token(j->fd, &j->req)) {
+                job_mark_cancelled(j); finish = "error"; break;
+            }
+#endif
             finish = "stop";
             stop_detail = "stop token";
             stop_token = token;
@@ -14039,8 +14475,28 @@ decode_again:
                 break;
             }
 
+#ifdef DS4_RIA
+            if (s->ria_service && !ria_measure_token(j->fd, &j->req)) {
+                job_mark_cancelled(j); finish = "error"; stop_decode = true; break;
+            }
+#endif
             size_t piece_len = 0;
             char *piece = ds4_token_text(s->engine, token, &piece_len);
+#ifdef DS4_RIA
+            if (s->ria_service) {
+                size_t capacity = 3 * (piece_len + 4), decoded_len = 0;
+                char *decoded = xmalloc(capacity + 1);
+                ria_error error = {0};
+                bool decoded_ok = ria_utf8_decode(&source_decoder, (const uint8_t *)piece,
+                                                  piece_len, false, decoded, capacity,
+                                                  &decoded_len, &error);
+                free(piece);
+                if (!decoded_ok) { free(decoded); finish = "error"; stop_decode = true; break; }
+                decoded[decoded_len] = 0;
+                piece = decoded;
+                piece_len = decoded_len;
+            }
+#endif
             completion++;
             kept++;
 
@@ -14064,7 +14520,14 @@ decode_again:
             }
 
             size_t stop_pos = 0, stop_len = 0;
-            bool hit_stop = stop_list_find_from(&j->req.stops, text.ptr,
+            bool hit_stop;
+#ifdef DS4_RIA
+            if (s->ria_service) {
+                hit_stop = ria_stop_find(&j->req.stops, text.ptr, text.len,
+                                          stop_scan_from, &stop_pos, &stop_len);
+            } else
+#endif
+                hit_stop = stop_list_find_from(&j->req.stops, text.ptr,
                                                 stop_scan_from,
                                                 &stop_pos, &stop_len);
             size_t stream_len = hit_stop ?
@@ -14132,7 +14595,7 @@ decode_again:
                      * protocol text. A complete block is unambiguous enough to
                      * recover without asking the model to restart it after an
                      * injected close marker. */
-                    if (complete_tool_call_inside_thinking(
+                    if (!ds4_engine_ria(s->engine) && complete_tool_call_inside_thinking(
                             j->req.model_syntax, text.ptr, text.len, &think_recovery_scan_from)) {
                         saw_tool_start = true;
                         saw_tool_end = true;
@@ -14223,7 +14686,7 @@ decode_again:
                 break;
             }
 
-            if (j->req.kind == REQ_CHAT && j->req.has_tools && saw_tool_end) {
+            if (!ds4_engine_ria(s->engine) && j->req.kind == REQ_CHAT && j->req.has_tools && saw_tool_end) {
                 finish = "tool_calls";
                 stop_decode = true;
                 break;
@@ -14256,6 +14719,25 @@ decode_again:
         if (stop_decode) break;
     }
     server_generation_leave(s);
+#ifdef DS4_RIA
+    if (s->ria_service && source_decoder.length && !client_stop) {
+        char final_bytes[12]; size_t final_length = 0; ria_error error = {0};
+        if (!ria_utf8_decode(&source_decoder, NULL, 0, true, final_bytes, sizeof final_bytes,
+                            &final_length, &error)) finish = "error";
+        else {
+            buf_append(&text, final_bytes, final_length);
+            size_t stop_position = 0, stop_length = 0;
+            if (ria_stop_find(&j->req.stops, text.ptr, text.len, stop_scan_from,
+                              &stop_position, &stop_length)) {
+                text.len = stop_position;
+                text.ptr[text.len] = 0;
+                client_stop = true;
+                finish = "stop";
+                ds4_session_invalidate(slot->session);
+            }
+        }
+    }
+#endif
 
     if (job_cancelled(j)) {
         request_live_state_clear(s, slot);
@@ -14273,7 +14755,7 @@ decode_again:
         snprintf(err, sizeof(err), "shutdown requested");
     }
 
-    if (j->req.kind == REQ_CHAT && j->req.has_tools &&
+    if (!ds4_engine_ria(s->engine) && j->req.kind == REQ_CHAT && j->req.has_tools &&
         saw_tool_start && !saw_tool_end && strcmp(finish, "error") != 0)
     {
         server_log(DS4_LOG_WARNING,
@@ -14283,7 +14765,7 @@ decode_again:
         trace_event(s, trace_id, "incomplete tool call: stop=%s token=%d generated=%d limit=%d room=%d",
                     stop_detail, stop_token, completion, max_tokens, room);
     }
-    if (j->req.kind == REQ_CHAT && j->req.has_tools &&
+    if (!ds4_engine_ria(s->engine) && j->req.kind == REQ_CHAT && j->req.has_tools &&
         saw_tool_start && !saw_tool_end && strcmp(finish, "error") != 0 &&
         strcmp(finish, "length") != 0 && !client_stop)
     {
@@ -14376,7 +14858,8 @@ decode_again:
     }
 
     if (j->req.stream && !structured_stream && text.len > plain_stream_pos) {
-        char *tail = xstrndup(text.ptr + plain_stream_pos, text.len - plain_stream_pos);
+        size_t safe_tail = utf8_stream_safe_len(text.ptr, plain_stream_pos, text.len, true);
+        char *tail = xstrndup(text.ptr + plain_stream_pos, safe_tail - plain_stream_pos);
         if (!sse_chunk(j->fd, &j->req, id, tail, NULL)) {
             job_mark_cancelled(j);
             finish = "error";
@@ -14395,26 +14878,31 @@ decode_again:
     }
 
     tool_calls parsed_calls = {0};
+#ifdef DS4_RIA
+    ria_json_doc native_result = {0};
+#endif
     char *parsed_content = NULL;
     char *parsed_reasoning = NULL;
     const char *final_finish = finish;
     bool recovered_tool_parse_failure = false;
     if (j->req.kind == REQ_CHAT) {
-        bool parsed_ok = parse_generated_message_for_response_for_syntax(
-            j->req.model_syntax,
-            text.ptr ? text.ptr : "",
-            j->req.has_tools,
-            saw_tool_start,
-            ds4_think_mode_enabled(j->req.think_mode),
-            &final_finish,
-            err,
-            sizeof(err),
-            &parsed_content,
-            &parsed_reasoning,
-            &parsed_calls,
-            &recovered_tool_parse_failure,
-            &j->req.tool_orders);
-        if (!parsed_ok && recovered_tool_parse_failure && j->req.has_tools && saw_tool_start) {
+        bool parsed_ok;
+#ifdef DS4_RIA
+        if (ds4_engine_ria(s->engine))
+          parsed_ok =
+              ria_response(&j->req, text.ptr ? text.ptr : "", text.len,
+                           stop_token == ds4_token_eos(s->engine),
+                           &final_finish, &parsed_content, &parsed_reasoning,
+                           &parsed_calls, err, sizeof err, &native_result);
+        else
+#endif
+          parsed_ok = parse_generated_message_for_response_for_syntax(
+              j->req.model_syntax, text.ptr ? text.ptr : "", j->req.has_tools,
+              saw_tool_start, ds4_think_mode_enabled(j->req.think_mode),
+              &final_finish, err, sizeof(err), &parsed_content,
+              &parsed_reasoning, &parsed_calls, &recovered_tool_parse_failure,
+              &j->req.tool_orders);
+        if (!ds4_engine_ria(s->engine) && !parsed_ok && recovered_tool_parse_failure && j->req.has_tools && saw_tool_start) {
             /* parse_generated_message failed even though DSML was present.
              * Semantic repair is intentionally avoided: if the parser cannot
              * execute the block, feed the model a tool error and the protocol
@@ -14452,6 +14940,9 @@ decode_again:
                     free(parsed_content);
                     free(parsed_reasoning);
                     tool_calls_free(&parsed_calls);
+#ifdef DS4_RIA
+    ria_json_free(&native_result);
+#endif
                     buf_free(&text);
                     goto decode_again;
                 }
@@ -14498,6 +14989,9 @@ decode_again:
             free(parsed_content);
             free(parsed_reasoning);
             tool_calls_free(&parsed_calls);
+#ifdef DS4_RIA
+    ria_json_free(&native_result);
+#endif
             anthropic_stream_free(&anthropic_live);
             openai_stream_free(&openai_live);
             responses_stream_free(&responses_live);
@@ -14505,12 +14999,14 @@ decode_again:
             ds4_tokens_free(&effective_prompt);
             return;
         }
-        if (parsed_calls.len) {
+        if (parsed_calls.len && (!ds4_engine_ria(s->engine) || strcmp(final_finish,"error"))) {
             if (openai_live_chat) apply_openai_stream_tool_ids(&parsed_calls, &openai_live);
             if (j->req.api == API_ANTHROPIC && j->req.stream)
                 apply_anthropic_stream_tool_ids(&parsed_calls, &anthropic_live);
-            assign_tool_call_ids(s, &parsed_calls, j->req.api);
-            tool_memory_remember(s, &parsed_calls);
+            if (!ds4_engine_ria(s->engine)) {
+                assign_tool_call_ids(s, &parsed_calls, j->req.api);
+                tool_memory_remember(s, &parsed_calls);
+            }
             final_finish = "tool_calls";
         } else if (j->req.api == API_RESPONSES) {
             responses_live_clear(s, slot);
@@ -14522,6 +15018,9 @@ decode_again:
         free(parsed_content);
         free(parsed_reasoning);
         tool_calls_free(&parsed_calls);
+#ifdef DS4_RIA
+    ria_json_free(&native_result);
+#endif
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
@@ -14572,7 +15071,7 @@ decode_again:
 
     if (j->req.kind == REQ_CHAT && parsed_calls.len &&
         j->req.api != API_RESPONSES &&
-        should_canonicalize_tool_checkpoint(s, &parsed_calls))
+        !ds4_engine_ria(s->engine) && should_canonicalize_tool_checkpoint(s, &parsed_calls))
     {
         /* Chat/completions has no protocol object that binds the next request
          * to this live KV state.  Canonicalize only the fallback tool-call
@@ -14584,7 +15083,7 @@ decode_again:
                                      parsed_content ? parsed_content : "",
                                      parsed_reasoning, &parsed_calls);
         thinking_live_clear(s, slot);
-    } else if (parsed_calls.len) {
+    } else if (!ds4_engine_ria(s->engine) && parsed_calls.len) {
         if (!remember_qwen_tool_turn_visible_checkpoint(
                 s, slot, j, ctx_span, finish, thinking.inside,
                 parsed_content ? parsed_content : "",
@@ -14592,7 +15091,7 @@ decode_again:
         {
             thinking_live_clear(s, slot);
         }
-    } else if (!parsed_calls.len &&
+    } else if (!ds4_engine_ria(s->engine) && !parsed_calls.len &&
                should_remember_thinking_checkpoint(&j->req, &thinking, final_finish)) {
         remember_thinking_checkpoint(s, slot, j, ctx_span, trace_id,
                                      parsed_content ? parsed_content : "",
@@ -14603,6 +15102,26 @@ decode_again:
     }
 
     bool response_ok = !job_cancelled(j);
+#ifdef DS4_RIA
+    if (response_ok && ds4_engine_ria(s->engine) &&
+        !strcmp(final_finish, "error")) {
+      if (j->req.stream)
+        response_ok = sse_error_event(j->fd, &j->req,
+                                      err[0] ? err : "RIA inference failed");
+      else
+        response_ok = http_error(j->fd, false, 502,
+                                 err[0] ? err : "RIA inference failed");
+      ds4_session_invalidate(slot->session);
+      response_ok = false;
+    }
+#endif
+#ifdef DS4_RIA
+    if (response_ok && s->ria_service) {
+        response_ok = ria_wire_response(j->fd, &j->req, id, &native_result,
+                                         &openai_live, text.ptr ? text.ptr : "", text.len,
+                                         final_finish, prompt_tokens, completion);
+    } else
+#endif
     if (response_ok && j->req.stream) {
         if (j->req.api == API_ANTHROPIC) {
             response_ok = anthropic_sse_finish_live(j->fd, s, &j->req, id, &anthropic_live,
@@ -14730,6 +15249,9 @@ decode_again:
     free(parsed_content);
     free(parsed_reasoning);
     tool_calls_free(&parsed_calls);
+#ifdef DS4_RIA
+    ria_json_free(&native_result);
+#endif
     anthropic_stream_free(&anthropic_live);
     openai_stream_free(&openai_live);
     responses_stream_free(&responses_live);
@@ -14949,6 +15471,14 @@ static void *worker_main(void *arg) {
         slot_refresh_live_text(s, &s->slots[0]);
         s->slots[0].last_used = time(NULL);
     }
+#ifdef DS4_RIA
+    if (s->ria_service) {
+        pthread_mutex_lock(&s->mu);
+        s->ria_worker_live = false;
+        pthread_cond_broadcast(&s->clients_cv);
+        pthread_mutex_unlock(&s->mu);
+    }
+#endif
     return NULL;
 }
 
@@ -14991,6 +15521,7 @@ typedef struct {
     char path[256];
     char *body;
     size_t body_len;
+    int error_status;
 } http_request;
 
 static void http_request_free(http_request *r) {
@@ -15073,6 +15604,500 @@ fail:
     return false;
 }
 
+#ifdef DS4_RIA
+static bool ria_api_u64(server *, const char *, uint64_t *, ria_error *);
+static const ria_json_node *ria_field(const ria_json_doc *d, uint32_t o,
+                                      const char *key) {
+  return ria_json_at(d, ria_json_get(d, o, key));
+}
+static bool ria_string(const ria_json_node *n, const char *s) {
+  return n && n->type == RIA_JSON_STRING && n->length == strlen(s) &&
+         !memcmp(n->text, s, n->length);
+}
+static bool ria_node_count(const ria_json_doc *d, uint32_t at, uint64_t cap,
+                           uint64_t *count, ria_error *e) {
+  const ria_json_node *n = ria_json_at(d, at);
+  if (!n || n->type != RIA_JSON_ARRAY)
+    return ria_fail(e, RIA_INVALID_REQUEST, "expected bounded array");
+  uint64_t total = 0;
+  for (uint32_t i = n->child; i != RIA_JSON_NONE; i = d->nodes[i].next)
+    if (++total > cap)
+      return ria_fail(e, RIA_RESOURCE_LIMIT, "array exceeds configured bound");
+  *count = total;
+  return true;
+}
+static bool ria_collect_images(const ria_json_doc *d, uint32_t array,
+                               uint32_t *images, size_t *count,
+                               uint64_t maximum, ria_error *e) {
+  const ria_json_node *n = ria_json_at(d, array);
+  if (!n || n->type != RIA_JSON_ARRAY)
+    return true;
+  for (uint32_t i = n->child; i != RIA_JSON_NONE; i = d->nodes[i].next) {
+    if (ria_string(ria_field(d, i, "type"), "image_url")) {
+      if (*count >= maximum || *count >= 16)
+        return ria_fail(e, RIA_RESOURCE_LIMIT,
+                        "image count exceeds configured bound");
+      images[(*count)++] = i;
+    } else if (ria_string(ria_field(d, i, "type"), "tool_result")) {
+      if (!ria_collect_images(d, ria_json_get(d, i, "content"), images, count,
+                              maximum, e))
+        return false;
+    } else if (ria_string(ria_field(d, i, "type"), "image"))
+      return ria_fail(e, RIA_UNSUPPORTED,
+                      "API images require uploaded JPEG/PNG data URLs");
+  }
+  return true;
+}
+static bool ria_append_tokens(server *s, request *r, const char *text,
+                              size_t length, ria_error *e) {
+  if (!length)
+    return true;
+  uint32_t *tokens = NULL;
+  size_t count = 0;
+  if (r->prompt.len < 0 || r->prompt.len >= s->ctx_size)
+    return ria_fail(e, RIA_RESOURCE_LIMIT, "prompt exceeds admitted context");
+  if (!ria_tokenizer_encode(
+          ria_engine_tokenizer(ds4_engine_ria(s->engine)), text, length, true,
+          (uint64_t)(s->ctx_size - r->prompt.len), &tokens, &count, e))
+    return false;
+  for (size_t i = 0; i < count; i++)
+    ds4_tokens_push(&r->prompt, (int)tokens[i]);
+  free(tokens);
+  return true;
+}
+static bool ria_parse_chat(server *s, const char *body, size_t body_length,
+                           request *r, char *err, size_t errlen) {
+  request_init(r, REQ_CHAT, s->default_tokens);
+  r->model_syntax = SERVER_MODEL_SYNTAX_DEEPSEEK41;
+  r->seed = 1;
+  ria_error error = {0};
+  ria_json_doc d = {0};
+  uint64_t depth, nodes, message_cap, tool_cap, image_cap, encoded_cap,
+      decoded_cap;
+  bool ok = ria_api_u64(s, "max_json_depth", &depth, &error) &&
+            ria_api_u64(s, "max_json_nodes", &nodes, &error) &&
+            ria_api_u64(s, "max_messages", &message_cap, &error) &&
+            ria_api_u64(s, "max_tools", &tool_cap, &error) &&
+            ria_api_u64(s, "max_images", &image_cap, &error) &&
+            ria_api_u64(s, "max_encoded_image_bytes", &encoded_cap, &error) &&
+            ria_api_u64(s, "max_decoded_image_bytes", &decoded_cap, &error) &&
+            ria_json_parse(body, body_length,
+                           (ria_json_limits){body_length, (uint32_t)nodes,
+                                             (uint32_t)depth},
+                           &d, &error);
+  static const char *const fields[] = {"model",
+                                       "messages",
+                                       "n",
+                                       "stream",
+                                       "stream_options",
+                                       "max_tokens",
+                                       "max_completion_tokens",
+                                       "temperature",
+                                       "top_p",
+                                       "top_k",
+                                       "min_p",
+                                       "seed",
+                                       "stop",
+                                       "reasoning_effort",
+                                       "thinking",
+                                       "tools",
+                                       "tool_choice",
+                                       "ria_measurements"};
+  static const char *const required[] = {"model", "messages"};
+  if (ok)
+    ok = ria_json_fields(&d, 0, fields, 18, required, 2, &error) &&
+         ria_string(ria_field(&d, 0, "model"), "DeepSeek-V4.1-Flash");
+  uint64_t count = 0;
+  uint32_t messages = ria_json_get(&d, 0, "messages"),
+           tools = ria_json_get(&d, 0, "tools");
+  if (ok)
+    ok = ria_node_count(&d, messages, message_cap, &count, &error) && count > 0;
+  if (ok) {
+    free(r->model);
+    r->model = xstrdup("DeepSeek-V4.1-Flash");
+    r->model_from_request = true;
+  }
+  const ria_json_node *n = ria_field(&d, 0, "n");
+  uint64_t v = 1;
+  if (ok && n)
+    ok = ria_json_u64(&d, (uint32_t)(n - d.nodes), false, &v, &error) && v == 1;
+  n = ria_field(&d, 0, "stream");
+  if (ok && n) {
+    ok = n->type == RIA_JSON_BOOL;
+    r->stream = n->boolean;
+  }
+  if (ok) ok = ria_api_measurements(&d, r->stream, &r->ria_measurements, &error);
+  uint32_t a = ria_json_get(&d, 0, "max_tokens"),
+           b = ria_json_get(&d, 0, "max_completion_tokens");
+  if (ok && a != RIA_JSON_NONE && b != RIA_JSON_NONE)
+    ok = ria_fail(&error, RIA_INVALID_REQUEST,
+                  "conflicting output token limits");
+  if (ok && (a != RIA_JSON_NONE || b != RIA_JSON_NONE)) {
+    ok = ria_json_u64(&d, a != RIA_JSON_NONE ? a : b, false, &v, &error) &&
+         v > 0 && v <= (uint64_t)s->ctx_size;
+    if (ok)
+      r->max_tokens = (int)v;
+  }
+  struct {
+    const char *key;
+    float *value;
+    bool *set;
+    double low, high;
+  } sampling[] = {{"temperature", &r->temperature, &r->temperature_set, 0, 2},
+                  {"top_p", &r->top_p, &r->top_p_set, 0, 1},
+                  {"min_p", &r->min_p, &r->min_p_set, 0, 1}};
+  for (size_t i = 0; ok && i < 3; i++) {
+    n = ria_field(&d, 0, sampling[i].key);
+    if (n) {
+      ok = n->type == RIA_JSON_NUMBER && isfinite(n->number) &&
+           n->number >= sampling[i].low && n->number <= sampling[i].high &&
+           (!i || i == 2 || n->number > 0);
+      if (ok) {
+        *sampling[i].value = (float)n->number;
+        *sampling[i].set = true;
+      }
+    }
+  }
+  n = ria_field(&d, 0, "top_k");
+  if (ok && n) {
+    ok = ria_json_u64(&d, (uint32_t)(n - d.nodes), false, &v, &error) &&
+         v <= 129280;
+    if (ok) {
+      r->top_k = (int)v;
+      r->top_k_set = true;
+    }
+  }
+  n = ria_field(&d, 0, "seed");
+  if (ok && n) {
+    ok = ria_json_u64(&d, (uint32_t)(n - d.nodes), n->type == RIA_JSON_STRING,
+                      &r->seed, &error);
+  }
+  unsigned effort = 75;
+  bool thinking = true;
+  n = ria_field(&d, 0, "reasoning_effort");
+  if (ok && n) {
+    if (ria_string(n, "low"))
+      effort = 50;
+    else if (ria_string(n, "high"))
+      effort = 75;
+    else if (ria_string(n, "max"))
+      effort = 100;
+    else {
+      ok = ria_json_u64(&d, (uint32_t)(n - d.nodes), false, &v, &error) &&
+           v >= 1 && v <= 100;
+      if (ok)
+        effort = (unsigned)v;
+    }
+  }
+  n = ria_field(&d, 0, "thinking");
+  if (ok && n) {
+    ok = n->type == RIA_JSON_BOOL;
+    thinking = n->boolean;
+  }
+  r->think_mode = thinking ? (ds4_think_mode)(DS4_THINK_LEVEL_BASE + effort)
+                           : DS4_THINK_NONE;
+  uint32_t stream_options = ria_json_get(&d, 0, "stream_options");
+  if (ok && stream_options != RIA_JSON_NONE) {
+    static const char *const f[] = {"include_usage"};
+    ok = ria_json_fields(&d, stream_options, f, 1, f, 1, &error);
+    n = ria_field(&d, stream_options, "include_usage");
+    ok = ok && n && n->type == RIA_JSON_BOOL;
+    if (ok)
+      r->stream_include_usage = n->boolean;
+  }
+  n = ria_field(&d, 0, "stop");
+  if (ok && n) {
+    if (n->type == RIA_JSON_STRING) {
+      if (!n->length || n->length > 4096 || memchr(n->text, 0, n->length))
+        ok = false;
+      else
+        stop_list_push(&r->stops, xstrndup(n->text, n->length));
+    } else if (n->type == RIA_JSON_ARRAY) {
+      size_t num = 0;
+      for (uint32_t i = n->child; ok && i != RIA_JSON_NONE;
+           i = d.nodes[i].next) {
+        const ria_json_node *value = &d.nodes[i];
+        if (++num > 16 || value->type != RIA_JSON_STRING || !value->length ||
+            value->length > 4096 || memchr(value->text, 0, value->length))
+          ok = false;
+        else
+          stop_list_push(&r->stops, xstrndup(value->text, value->length));
+      }
+    } else
+      ok = false;
+  }
+  n = ria_field(&d, 0, "tool_choice");
+  bool no_tools = false;
+  if (ok && n) {
+    no_tools = ria_string(n, "none");
+    ok = no_tools || ria_string(n, "auto");
+  }
+  r->ria_tool_calls_allowed = !no_tools;
+  if (ok && no_tools) {
+    const ria_json_node *array = ria_json_at(&d, messages);
+    for (uint32_t i = array->child; i != RIA_JSON_NONE; i = d.nodes[i].next)
+      if (ria_json_get(&d, i, "tools") != RIA_JSON_NONE)
+        ok = ria_fail(
+            &error, RIA_UNSUPPORTED,
+            "tool_choice none conflicts with inline tool declarations");
+  }
+  if (ok && tools != RIA_JSON_NONE) {
+    ok = ria_node_count(&d, tools, tool_cap, &count, &error);
+    if (ok && count && !no_tools) {
+      const ria_json_node *array = ria_json_at(&d, messages);
+      uint32_t first = array->child;
+      if (ria_json_get(&d, first, "tools") != RIA_JSON_NONE)
+        ok = ria_fail(&error, RIA_INVALID_REQUEST,
+                      "duplicate top-level and message tool declarations");
+      else if (!ria_string(ria_field(&d, first, "role"), "system"))
+        ok = ria_fail(&error, RIA_INVALID_REQUEST,
+                      "top-level tools require an initial system message");
+      else {
+        ria_json_node *new_nodes =
+            realloc(d.nodes, (size_t)(d.count + 1) * sizeof *d.nodes);
+        if (!new_nodes)
+          ok = ria_fail(&error, RIA_RESOURCE_LIMIT,
+                        "tool declaration attachment allocation failed");
+        else {
+          d.nodes = new_nodes;
+          uint32_t last = d.nodes[first].child;
+          while (d.nodes[last].next != RIA_JSON_NONE)
+            last = d.nodes[last].next;
+          d.nodes[d.count] = d.nodes[tools];
+          d.nodes[d.count].next = RIA_JSON_NONE;
+          d.nodes[last].next = d.count++;
+          r->has_tools = true;
+        }
+      }
+    }
+  }
+  uint64_t declared_tools=0;
+  const ria_json_node *message_array=ria_json_at(&d,messages);
+  for (uint32_t i=ok ? message_array->child : RIA_JSON_NONE;ok && i!=RIA_JSON_NONE;i=d.nodes[i].next) {
+    uint32_t declarations=ria_json_get(&d,i,"tools");
+    if (declarations==RIA_JSON_NONE) continue;
+    uint64_t ntools=0;
+    ok=ria_node_count(&d,declarations,tool_cap,&ntools,&error) &&
+       ria_u64_add(declared_tools,ntools,&declared_tools) && declared_tools<=tool_cap;
+    if (ok && ntools) r->has_tools=true;
+    if (!ok) break;
+    char *tool_json=NULL;size_t length=0;
+    ok=ria_prompt_json(&d,declarations,&tool_json,&length,&error);
+    if (ok) {
+      const char *tool_cursor=tool_json;char *unused=NULL;
+      ok=parse_tools_value(&tool_cursor,&unused,&r->tool_orders);
+      free(unused);
+    }
+    free(tool_json);
+  }
+  size_t image_count = 0;
+  uint32_t image_nodes[16];
+  const ria_json_node *array = ria_json_at(&d, messages);
+  if (ok)
+    for (uint32_t i = array->child; ok && i != RIA_JSON_NONE;
+         i = d.nodes[i].next) {
+      uint32_t content = ria_json_get(&d, i, "content_blocks");
+      if (content == RIA_JSON_NONE)
+        content = ria_json_get(&d, i, "content");
+      ok = ria_collect_images(&d, content, image_nodes, &image_count, image_cap,
+                              &error);
+    }
+  size_t prompt_length = 0;
+  if (ok)
+    ok = ria_prompt_render(
+        &d, messages, (ria_prompt_options){thinking, true, effort, 67108864},
+        &r->prompt_text, &prompt_length, &error);
+  const char *cursor = r->prompt_text;
+  uint64_t retained = 0, encoded_total = 0;
+  if (ok && image_count) {
+    r->images = calloc(image_count, sizeof *r->images);
+    r->image_markers = calloc(image_count, sizeof *r->image_markers);
+    if (!r->images || !r->image_markers)
+      ok = ria_fail(&error, RIA_RESOURCE_LIMIT, "image span allocation failed");
+  }
+  for (size_t i = 0; ok && i < image_count; i++) {
+    uint32_t block = image_nodes[i],
+             url_object = ria_json_get(&d, block, "image_url");
+    static const char *const bf[] = {"type", "image_url"}, *const uf[] = {
+                                                               "url"};
+    const char *url = NULL;
+    size_t length = 0;
+    ok = ria_json_fields(&d, block, bf, 2, bf, 2, &error) &&
+         ria_json_fields(&d, url_object, uf, 1, uf, 1, &error) &&
+         ria_json_string(&d, ria_json_get(&d, url_object, "url"), &url, &length,
+                         &error) &&
+         !memchr(url, 0, length);
+    if (!ok)
+      break;
+    const char *base64 = NULL;
+    if (!strncmp(url, "data:image/png;base64,", 22))
+      base64 = url + 22;
+    else if (!strncmp(url, "data:image/jpeg;base64,", 23))
+      base64 = url + 23;
+    if (!base64) {
+      ok = ria_fail(
+          &error, RIA_UNSUPPORTED,
+          "remote image URLs and non-JPEG/PNG uploads are unsupported");
+      break;
+    }
+    size_t b64_length = length - (size_t)(base64 - url);
+    if (b64_length > encoded_cap * 4 / 3 + 4) {
+      ok =
+          ria_fail(&error, RIA_RESOURCE_LIMIT, "encoded image budget exceeded");
+      break;
+    }
+    uint8_t *bytes = NULL;
+    size_t byte_count = 0;
+    if (!server_decode_base64(base64, &bytes, &byte_count) ||
+        !ria_u64_add(encoded_total, byte_count, &encoded_total) ||
+        encoded_total > encoded_cap) {
+      free(bytes);
+      ok = ria_fail(&error, RIA_INVALID_REQUEST,
+                    "invalid or oversized base64 image");
+      break;
+    }
+    ds4_vision_embedding embedding = {0};
+    server_inference_lock(s);
+    ok = ria_engine_image(ds4_engine_ria(s->engine), bytes, byte_count,
+                          decoded_cap - retained, &embedding, &error);
+    server_inference_unlock(s);
+    free(bytes);
+    uint64_t add = (uint64_t)embedding.token_count * 5120 * sizeof(float);
+    if (ok &&
+        (!ria_u64_add(retained, add, &retained) || retained > decoded_cap)) {
+      ds4_vision_embedding_free(&embedding);
+      ok = ria_fail(&error, RIA_RESOURCE_LIMIT,
+                    "decoded image expansion budget exceeded");
+    }
+    const char *marker = ok ? ria_find(cursor, prompt_length - (size_t)(cursor-r->prompt_text), RIA_IMAGE_PLACEHOLDER) : NULL;
+    if (ok && !marker)
+      ok = ria_fail(&error, RIA_INTEGRITY_ERROR,
+                    "source image placeholder association lost");
+    if (ok) {
+      ok = ria_append_tokens(s, r, cursor, (size_t)(marker-cursor), &error);
+      ok = ok && ds4_prompt_append_vision(s->engine, &r->prompt, &r->images[i],
+                                          &embedding, err, errlen) != 0;
+      if (ok) {
+        r->image_count++;
+        snprintf(r->image_markers[i], SERVER_IMAGE_MARKER_BYTES, "%s",
+                 RIA_IMAGE_PLACEHOLDER);
+        cursor = marker + strlen(RIA_IMAGE_PLACEHOLDER);
+      }
+    }
+    ds4_vision_embedding_free(&embedding);
+  }
+  if (ok) {
+    ok = ria_append_tokens(s, r, cursor, prompt_length - (size_t)(cursor-r->prompt_text), &error);
+    r->prompt_preserves_reasoning = true;
+  }
+  ria_json_free(&d);
+  if (!ok) {
+    snprintf(err, errlen, "RIA request %d: %.*s",
+             error.code ? error.code : RIA_INVALID_REQUEST,
+             (int)(errlen > 40 ? errlen - 40 : 0),
+             error.message[0] ? error.message
+                              : "unsupported or invalid request field");
+    request_free(r);
+  }
+  return ok;
+}
+#endif
+#ifdef DS4_RIA
+static bool ria_api_u64(server *s, const char *key, uint64_t *v, ria_error *e) {
+  const ria_json_doc *d = &s->ria_service->document;
+  return ria_json_u64(d, ria_json_get(d, ria_json_get(d, 0, "api"), key), false,
+                      v, e);
+}
+static bool ria_read_part(int fd, char *out, size_t capacity, size_t *used,
+                          uint64_t deadline) {
+  for (;;) {
+    uint64_t now = ria_monotonic_ms();
+    if (now >= deadline)
+      return false;
+    struct pollfd p = {fd, POLLIN, 0};
+    int timeout = deadline - now > INT_MAX ? INT_MAX : (int)(deadline - now);
+    int rc = poll(&p, 1, timeout);
+    if (rc < 0 && errno == EINTR)
+      continue;
+    if (rc <= 0 || (p.revents & (POLLERR | POLLNVAL)))
+      return false;
+    ssize_t n = recv(fd, out, capacity, MSG_DONTWAIT);
+    if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+      continue;
+    if (n <= 0)
+      return false;
+    *used = (size_t)n;
+    return true;
+  }
+}
+static bool ria_read_http(server *s, int fd, http_request *r) {
+  r->error_status = 400;
+  uint64_t header_cap, body_cap, header_timeout, body_timeout;
+  ria_error error = {0};
+  if (!ria_api_u64(s, "max_header_bytes", &header_cap, &error) ||
+      !ria_api_u64(s, "max_body_bytes", &body_cap, &error) ||
+      !ria_api_u64(s, "header_timeout_ms", &header_timeout, &error) ||
+      !ria_api_u64(s, "body_timeout_ms", &body_timeout, &error))
+    return false;
+  char *header = malloc((size_t)header_cap + 4097);
+  if (!header)
+    return false;
+  size_t used = 0;
+  ssize_t hend = -1;
+  uint64_t deadline = ria_monotonic_ms() + header_timeout;
+  while (hend < 0 && used < header_cap) {
+    size_t got = 0;
+    if (!ria_read_part(fd, header + used, 4096, &got, deadline)) {
+      r->error_status = 408;
+      free(header);
+      return false;
+    }
+    used += got;
+    hend = header_end(header, used);
+  }
+  if (hend < 0 || (uint64_t)hend > header_cap) {
+    free(header);
+    return false;
+  }
+  ria_http_header parsed;
+  if (!ria_api_header(header, (size_t)hend, s->ria_bearer, s->ria_bearer_length,
+                      body_cap, &parsed, &error)) {
+    r->error_status = error.code == RIA_UNAUTHORIZED ? 401 : 400;
+    free(header);
+    return false;
+  }
+  if (parsed.body_bytes > SIZE_MAX - 1 ||
+      used - (size_t)hend > parsed.body_bytes) {
+    free(header);
+    return false;
+  }
+  memcpy(r->method, parsed.method, sizeof r->method);
+  memcpy(r->path, parsed.path, sizeof r->path);
+  r->body_len = (size_t)parsed.body_bytes;
+  r->body = malloc(r->body_len + 1);
+  if (!r->body) {
+    free(header);
+    return false;
+  }
+  size_t n = used - (size_t)hend;
+  if (n)
+    memcpy(r->body, header + hend, n);
+  free(header);
+  deadline = ria_monotonic_ms() + body_timeout;
+  while (n < r->body_len) {
+    size_t got = 0;
+    if (!ria_read_part(fd, r->body + n, r->body_len - n, &got, deadline)) {
+      r->error_status = 408;
+      return false;
+    }
+    n += got;
+  }
+  r->body[r->body_len] = 0;
+  if (memchr(r->body, 0, r->body_len))
+    return false;
+  return true;
+}
+#endif
 typedef struct {
     server *srv;
     int fd;
@@ -15116,6 +16141,17 @@ static void append_model_json_values(buf *b, const char *id, const char *name,
 }
 
 static void append_model_json(buf *b, const server *s, const char *id) {
+#ifdef DS4_RIA
+    if (s->ria_service) {
+        char logical[65], operators[65];
+        ria_hex_encode(s->ria_service->logical_model_digest, 32, logical);
+        ria_hex_encode(s->ria_service->operator_contract_digest, 32, operators);
+        buf_puts(b, "{\"id\":"); json_escape(b,id);
+        buf_puts(b, ",\"object\":\"model\",\"owned_by\":\"deepseek\",\"profile\":"); json_escape(b,s->ria_service->profile);
+        buf_printf(b, ",\"context_length\":%d,\"logical_model_digest\":\"%s\",\"operator_contract_digest\":\"%s\",\"max_active_generations\":1,\"max_queued_generations\":0,\"supported_endpoints\":[\"/v1/chat/completions\"]}",s->ctx_size,logical,operators);
+        return;
+    }
+#endif
     append_model_json_values(b,
                              id,
                              ds4_engine_model_name(s->engine),
@@ -15184,7 +16220,7 @@ static bool client_recv_errno_disconnected(int err) {
 /* The request body has already been consumed and this one-request server sends
  * Connection: close, so EOF is cancellation. Discard unsupported pipelined
  * bytes nonblockingly: otherwise they can hide the FIN behind readable data. */
-static bool client_socket_disconnected(int fd) {
+static bool client_socket_disconnected(int fd, bool reject_extra_bytes) {
     struct pollfd pfd = {.fd = fd, .events = POLLIN};
     int rc;
     do {
@@ -15198,7 +16234,7 @@ static bool client_socket_disconnected(int fd) {
     char discard[256];
     for (;;) {
         ssize_t n = recv(fd, discard, sizeof(discard), 0);
-        if (n > 0) continue;
+        if (n > 0) { if (reject_extra_bytes) return true; continue; }
         if (n == 0) return true;
         if (errno == EINTR) continue;
         return client_recv_errno_disconnected(errno);
@@ -15254,12 +16290,12 @@ static void wait_for_job_or_disconnect(server *s, job *j) {
     pthread_mutex_lock(&j->mu);
     while (!j->done) {
         struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
+        clock_gettime(ds4_engine_ria(s->engine) ? CLOCK_MONOTONIC : CLOCK_REALTIME, &deadline);
         timespec_add_us(&deadline, 100000);
         (void)pthread_cond_timedwait(&j->cv, &j->mu, &deadline);
         bool done = j->done;
         pthread_mutex_unlock(&j->mu);
-        if (!done && client_socket_disconnected(j->fd)) {
+        if (!done && client_socket_disconnected(j->fd, ds4_engine_ria(s->engine) != NULL)) {
             server_cancel_job(s, j);
         }
         pthread_mutex_lock(&j->mu);
@@ -15274,11 +16310,36 @@ static void *client_main(void *arg) {
     free(ca);
 
     http_request hr = {0};
-    if (!read_http_request(fd, &hr)) {
-        http_error(fd, s->enable_cors, 400, "bad HTTP request");
-        goto done;
+    bool reserved=false;
+#ifdef DS4_RIA
+    bool ria = s->ria_service != NULL;
+    bool read_ok = ria ? ria_read_http(s, fd, &hr) : read_http_request(fd, &hr);
+#else
+    bool read_ok = read_http_request(fd, &hr);
+#endif
+    if(!read_ok){http_error(fd,s->enable_cors,hr.error_status?hr.error_status:400,"invalid or unauthorized HTTP request");http_request_free(&hr);goto done;}
+#ifdef DS4_RIA
+    if (ria && strcmp(hr.path, "/v1/models") &&
+        strcmp(hr.path, "/v1/chat/completions")) {
+      http_error(fd, false, 501, "endpoint is not source-qualified for RIA");
+      http_request_free(&hr);
+      goto done;
     }
-
+    if (ria && !strcmp(hr.method, "POST")) {
+      pthread_mutex_lock(&s->mu);
+      if (!s->stopping && !s->ria_generation_reserved) {
+        s->ria_generation_reserved = true;
+        reserved = true;
+      }
+      pthread_mutex_unlock(&s->mu);
+      if (!reserved) {
+        http_error(fd, false, 429,
+                   "one generation is active; RIA queue capacity is zero");
+        http_request_free(&hr);
+        goto done;
+      }
+    }
+#endif
     if (!strcmp(hr.method, "OPTIONS")) {
         http_response(fd, s->enable_cors, 204, NULL, "");
         http_request_free(&hr);
@@ -15305,22 +16366,31 @@ static void *client_main(void *arg) {
     char err[160];
     bool ok = false;
     const int ctx_size = s->ctx_size;
-    if (!strcmp(hr.method, "POST") && !strcmp(hr.path, "/v1/messages")) {
-        ok = parse_anthropic_request(s->engine, s, hr.body, s->default_tokens,
-                                     ctx_size, &req, err, sizeof(err));
-    } else if (!strcmp(hr.method, "POST") && !strcmp(hr.path, "/v1/chat/completions")) {
-        ok = parse_chat_request(s->engine, s, hr.body, s->default_tokens,
-                                ctx_size, &req, err, sizeof(err));
-    } else if (!strcmp(hr.method, "POST") && !strcmp(hr.path, "/v1/responses")) {
-        ok = parse_responses_request(s->engine, s, hr.body, s->default_tokens,
-                                     ctx_size, &req, err, sizeof(err));
-    } else if (!strcmp(hr.method, "POST") && !strcmp(hr.path, "/v1/completions")) {
-        ok = parse_completion_request(s->engine, hr.body, s->default_tokens,
-                                      ctx_size, &req, err, sizeof(err));
+#ifdef DS4_RIA
+    if (ria && !strcmp(hr.method, "POST") &&
+        !strcmp(hr.path, "/v1/chat/completions"))
+      ok = ria_parse_chat(s, hr.body, hr.body_len, &req, err, sizeof err);
+    else
+#endif
+        if (!strcmp(hr.method, "POST") && !strcmp(hr.path, "/v1/messages")) {
+      ok = parse_anthropic_request(s->engine, s, hr.body, s->default_tokens,
+                                   ctx_size, &req, err, sizeof(err));
+    } else if (!strcmp(hr.method, "POST") &&
+               !strcmp(hr.path, "/v1/chat/completions")) {
+      ok = parse_chat_request(s->engine, s, hr.body, s->default_tokens,
+                              ctx_size, &req, err, sizeof(err));
+    } else if (!strcmp(hr.method, "POST") &&
+               !strcmp(hr.path, "/v1/responses")) {
+      ok = parse_responses_request(s->engine, s, hr.body, s->default_tokens,
+                                   ctx_size, &req, err, sizeof(err));
+    } else if (!strcmp(hr.method, "POST") &&
+               !strcmp(hr.path, "/v1/completions")) {
+      ok = parse_completion_request(s->engine, hr.body, s->default_tokens,
+                                    ctx_size, &req, err, sizeof(err));
     } else {
-        http_error(fd, s->enable_cors, 404, "unknown endpoint");
-        http_request_free(&hr);
-        goto done;
+      http_error(fd, s->enable_cors, 404, "unknown endpoint");
+      http_request_free(&hr);
+      goto done;
     }
     if (ok) req.raw_body = xstrndup(hr.body, hr.body_len);
     http_request_free(&hr);
@@ -15343,8 +16413,20 @@ static void *client_main(void *arg) {
     memset(&j, 0, sizeof(j));
     j.fd = fd;
     j.req = req;
-    pthread_mutex_init(&j.mu, NULL);
-    pthread_cond_init(&j.cv, NULL);
+#ifdef DS4_RIA
+    if (s->ria_service) {
+        ria_thread_status(s, pthread_mutex_init(&j.mu, NULL), "job mutex");
+        pthread_condattr_t attributes;
+        ria_thread_status(s, pthread_condattr_init(&attributes), "job condition attributes");
+        ria_thread_status(s, pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC), "job monotonic condition");
+        ria_thread_status(s, pthread_cond_init(&j.cv, &attributes), "job condition");
+        ria_thread_status(s, pthread_condattr_destroy(&attributes), "job condition attributes cleanup");
+    } else
+#endif
+    {
+        pthread_mutex_init(&j.mu, NULL);
+        pthread_cond_init(&j.cv, NULL);
+    }
 
     if (!enqueue(s, &j)) {
         http_error(fd, s->enable_cors, 503, "server shutting down");
@@ -15359,36 +16441,72 @@ static void *client_main(void *arg) {
     pthread_mutex_destroy(&j.mu);
     request_free(&j.req);
 done:
-    close(fd);
-    client_done(s);
-    return NULL;
+#ifdef DS4_RIA
+  if (reserved) {
+    pthread_mutex_lock(&s->mu);
+    s->ria_generation_reserved = false;
+    pthread_mutex_unlock(&s->mu);
+  }
+  if (s->ria_service) {
+    pthread_mutex_lock(&s->mu);
+    for (size_t i = 0; i < 64; i++)
+      if (s->ria_client_fds[i] == fd) s->ria_client_fds[i] = -1;
+    pthread_mutex_unlock(&s->mu);
+  }
+#else
+  (void)reserved;
+#endif
+  close(fd);
+  client_done(s);
+  return NULL;
 }
 
-static int listen_on(const char *host, int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+static int listen_on(const char *host, int port, int backlog, bool native) {
+    int family = native && strchr(host, ':') ? AF_INET6 : AF_INET;
+    int socket_flags = SOCK_STREAM;
+#ifdef DS4_RIA
+    if (native) socket_flags |= SOCK_CLOEXEC;
+#endif
+    int fd = socket(family, socket_flags, 0);
     if (fd < 0) return -1;
     int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((uint16_t)port);
-    if (!strcmp(host, "localhost")) host = "127.0.0.1";
-    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
-        close(fd);
-        errno = EINVAL;
-        return -1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) && native) goto failed;
+    if (native) {
+        /* Bound accepted and pending TCP socket buffers. Linux doubles these
+         * user limits; admission reserves 64KiB per direction plus metadata. */
+        int limit = 32768;
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &limit, sizeof limit) ||
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &limit, sizeof limit) ||
+            (family == AF_INET6 && setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &yes, sizeof yes))) goto failed;
+        for (int i = 0; i < 2; i++) {
+            socklen_t length = sizeof limit;
+            if (getsockopt(fd, SOL_SOCKET, i ? SO_SNDBUF : SO_RCVBUF, &limit, &length) || limit > 65536) {
+                errno = ENOBUFS;
+                goto failed;
+            }
+        }
     }
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        close(fd);
-        return -1;
+    struct sockaddr_storage address = {0};
+    socklen_t length;
+    if (family == AF_INET6) {
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&address;
+        v6->sin6_family = AF_INET6;
+        v6->sin6_port = htons((uint16_t)port);
+        length = sizeof *v6;
+        if (inet_pton(AF_INET6, host, &v6->sin6_addr) != 1) { errno = EINVAL; goto failed; }
+    } else {
+        struct sockaddr_in *v4 = (struct sockaddr_in *)&address;
+        v4->sin_family = AF_INET;
+        v4->sin_port = htons((uint16_t)port);
+        length = sizeof *v4;
+        if (!strcmp(host, "localhost")) host = "127.0.0.1";
+        if (inet_pton(AF_INET, host, &v4->sin_addr) != 1) { errno = EINVAL; goto failed; }
     }
-    if (listen(fd, 128) != 0) {
-        close(fd);
-        return -1;
-    }
+    if (bind(fd, (struct sockaddr *)&address, length) || listen(fd, backlog)) goto failed;
     return fd;
+failed:
+    { int saved = errno; close(fd); errno = saved; }
+    return -1;
 }
 
 static void configure_client_socket(int fd) {
@@ -15415,6 +16533,7 @@ typedef struct {
     int port;
     int ctx_size;
     int default_tokens;
+    bool default_tokens_set;
     const char *chdir_path;
     const char *trace_path;
     const char *kv_disk_dir;
@@ -15513,6 +16632,10 @@ static void server_close_resources(server *s) {
         free(slot->live_text);
         if (slot->session) ds4_session_free(slot->session);
     }
+#ifdef DS4_RIA
+    if (s->ria_thread_attributes_ready)
+        ria_thread_status(s, pthread_attr_destroy(&s->ria_thread_attributes), "attribute destruction");
+#endif
     free(s->slot_threads);
     free(s->slots);
     pthread_mutex_destroy(&s->tool_mu);
@@ -15532,6 +16655,9 @@ static void server_close_resources(server *s) {
 
 static void usage(FILE *fp, const char *topic) {
     ds4_help_print(fp, DS4_HELP_SERVER, topic);
+    if (!topic || !strcmp(topic,"all"))
+      fputs("\nRIA native service: --config PATH (alias --ria-service PATH) selects\n"
+            "the verified CUDA client configuration and its admitted source model.\n",fp);
 }
 
 static ds4_backend parse_backend_arg(const char *s, const char *arg) {
@@ -15579,8 +16705,21 @@ static server_config parse_options(int argc, char **argv) {
     c.kv_cache = kv_cache_default_options();
 
     bool directional_steering_scale_set = false;
+    const char *ria_conflicting_option = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
+        if (!strcmp(arg, "-m") || !strcmp(arg, "--model") ||
+            !strcmp(arg, "-c") || !strcmp(arg, "--ctx") ||
+            !strcmp(arg, "--host") || !strcmp(arg, "--port") ||
+            !strcmp(arg, "--backend") || !strcmp(arg, "--cpu") ||
+            !strcmp(arg, "--metal") || !strcmp(arg, "--mtp-margin") ||
+            !strcmp(arg, "--mixed-prefill-quantum") ||
+            !strcmp(arg, "--tool-memory-max-ids") ||
+            !strcmp(arg, "--disable-exact-dsml-tool-replay") ||
+            !strcmp(arg, "--gpu-vram") || !strcmp(arg, "--gpu-devices"))
+            ria_conflicting_option = arg;
+        if(!strcmp(arg,"--config") || !strcmp(arg,"--ria-service")){c.engine.ria_service_path=need_arg(&i,argc,argv,arg);c.engine.model_path=NULL;c.engine.backend=DS4_BACKEND_CUDA;c.engine.mtp_draft_tokens=0;continue;}
+
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             const char *topic = (i + 1 < argc && argv[i + 1][0] != '-') ?
                 argv[i + 1] : NULL;
@@ -15653,6 +16792,7 @@ static server_config parse_options(int argc, char **argv) {
             c.ctx_size = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
             c.default_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+            c.default_tokens_set = true;
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--chdir")) {
@@ -15812,9 +16952,171 @@ static server_config parse_options(int argc, char **argv) {
                    "ds4-server: --role worker is a serving mode; start tensor-parallel workers with ./ds4");
         exit(2);
     }
+    if (c.engine.ria_service_path && ria_conflicting_option) {
+        server_log(DS4_LOG_DEFAULT, "ds4-server: %s conflicts with the authoritative RIA service configuration", ria_conflicting_option);
+        exit(2);
+    }
     return c;
 }
 
+#ifdef DS4_RIA
+static bool ria_server_policy(server *s, server_config *cfg, char host[256],
+                              ria_error *e) {
+  ria_engine *engine = ds4_engine_ria(s->engine);
+  if (!engine)
+    return true;
+  s->ria_service = ria_engine_service(engine);
+  cfg->ctx_size = (int)ria_engine_context(engine);
+  s->ctx_size = cfg->ctx_size;
+  if (cfg->default_tokens > cfg->ctx_size) {
+    if (cfg->default_tokens_set)
+      return ria_fail(e, RIA_RESOURCE_LIMIT, "explicit output token cap exceeds admitted context");
+    cfg->default_tokens = cfg->ctx_size;
+  }
+  s->default_tokens = cfg->default_tokens;
+  if (cfg->kv_disk_dir || cfg->batched_sessions || cfg->enable_cors ||
+      cfg->gpu_vram_arg || cfg->gpu_devices_arg ||
+      cfg->engine.distributed.role || cfg->engine.tp.role)
+    return ria_fail(e, RIA_UNSUPPORTED,
+                    "RIA forbids disk KV, batch sessions, CORS wildcard and "
+                    "donor GPU placement flags");
+  const ria_json_doc *d = &s->ria_service->document;
+  uint32_t api = ria_json_get(d, 0, "api");
+  static const char *const fields[] = {"bind_address",
+                                       "bearer_token_file",
+                                       "max_body_bytes",
+                                       "header_timeout_ms",
+                                       "body_timeout_ms",
+                                       "stream_write_timeout_ms",
+                                       "max_active_generations",
+                                       "max_queued_generations",
+                                       "allow_remote_image_urls",
+                                       "cors_allowed_origins",
+                                       "max_header_bytes",
+                                       "max_json_depth",
+                                       "max_json_nodes",
+                                       "max_messages",
+                                       "max_tools",
+                                       "max_images",
+                                       "max_encoded_image_bytes",
+                                       "max_decoded_image_bytes",
+                                       "max_http_connections"};
+  if (!ria_json_fields(d, api, fields, 19, fields, 19, e))
+    return false;
+  uint64_t values[17];
+  const char *const names[] = {"max_body_bytes",
+                               "header_timeout_ms",
+                               "body_timeout_ms",
+                               "stream_write_timeout_ms",
+                               "max_active_generations",
+                               "max_queued_generations",
+                               "max_header_bytes",
+                               "max_json_depth",
+                               "max_json_nodes",
+                               "max_messages",
+                               "max_tools",
+                               "max_images",
+                               "max_encoded_image_bytes",
+                               "max_decoded_image_bytes",
+                               "max_http_connections"};
+  for (unsigned i = 0; i < 15; i++)
+    if (!ria_api_u64(s, names[i], &values[i], e))
+      return false;
+  if (!values[0] || values[0] > 67108864 || !values[1] || values[1] > INT_MAX ||
+      !values[2] || values[2] > INT_MAX || !values[3] || values[3] > INT_MAX ||
+      values[4] != 1 || values[5] != 0 || values[6] < 128 ||
+      values[6] > 65536 || !values[7] || values[7] > 64 || !values[8] ||
+      values[8] > 200000 || !values[9] || values[9] > 10000 ||
+      values[10] > 1024 || values[11] > 16 || !values[12] ||
+      values[12] > 67108864 || !values[13] || !values[14] || values[14] > 64)
+    return ria_fail(e, RIA_RESOURCE_LIMIT,
+                    "API limits exceed supported bounded native domain");
+  const ria_json_node *urls = ria_field(d, api, "allow_remote_image_urls"),
+                      *cors = ria_field(d, api, "cors_allowed_origins");
+  if (!urls || urls->type != RIA_JSON_BOOL || urls->boolean || !cors ||
+      cors->type != RIA_JSON_ARRAY || cors->child != RIA_JSON_NONE)
+    return ria_fail(e, RIA_UNSUPPORTED,
+                    "remote images and nonempty CORS origins are not enabled "
+                    "in RIA baseline");
+  uint64_t connections, parser, images, output, threads, total,
+      context = (uint64_t)cfg->ctx_size;
+  uint64_t max_token =
+      ria_tokenizer_max_token_bytes(ria_engine_tokenizer(engine));
+  if (!ria_u64_add(values[0], values[6] + 4097, &connections) ||
+      !ria_u64_mul(connections, values[14], &connections) ||
+      !ria_u64_mul(values[8] + 1, sizeof(ria_json_node) + sizeof(void *) * 2,
+                   &parser) ||
+      !ria_u64_add(parser, values[0] * 3, &parser) ||
+      !ria_u64_add(values[12], values[13], &images) ||
+      !ria_u64_mul(context, max_token * 12 + sizeof(int) * 3, &output) ||
+      !ria_u64_add(connections, parser, &total) ||
+      !ria_u64_add(total, images, &total) ||
+      !ria_u64_add(total, output, &total) ||
+      !ria_u64_mul(values[14] + 1, RIA_FRONTEND_THREAD_STACK + RIA_FRONTEND_THREAD_GUARD, &threads) ||
+      !ria_u64_add(total, threads, &total) ||
+      !ria_u64_add(total, ria_admin_reserved_bytes(), &total) ||
+      !ria_u64_add(total, values[14] * 2u * 3u * UINT64_C(65536), &total) ||
+      !ria_u64_add(total, sizeof *s + sizeof(server_slot) + sizeof(job), &total) ||
+      total > ria_engine_frontend_budget(engine))
+    return ria_fail(e, RIA_RESOURCE_LIMIT,
+                    "configured simultaneous API parser/image/output peak "
+                    "exceeds frontend reservation");
+  const char *bind = NULL, *token_path = NULL;
+  size_t length = 0;
+  if (!ria_json_string(d, ria_json_get(d, api, "bind_address"), &bind, &length,
+                       e) ||
+      length >= 256 ||
+      !ria_json_string(d, ria_json_get(d, api, "bearer_token_file"),
+                       &token_path, &length, e) ||
+      !length || token_path[0] != '/')
+    return false;
+  struct sockaddr_storage address;
+  socklen_t address_length;
+  if (!ria_address(bind, true, &address, &address_length, e)) return false;
+  (void)address_length;
+  uint16_t port;
+  const void *ip;
+  if (address.ss_family == AF_INET) {
+    const struct sockaddr_in *v4 = (const struct sockaddr_in *)&address;
+    port = ntohs(v4->sin_port);
+    ip = &v4->sin_addr;
+  } else {
+    const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)&address;
+    port = ntohs(v6->sin6_port);
+    ip = &v6->sin6_addr;
+  }
+  if (!inet_ntop(address.ss_family, ip, host, 256))
+    return ria_fail(e, RIA_INTERNAL_ERROR, "cannot render validated API address");
+  cfg->host = host;
+  cfg->port = port;
+  FILE *f = fopen(token_path, "rb");
+  if (!f)
+    return ria_fail(e, RIA_UNAUTHORIZED,
+                    "cannot read provisioned API bearer token");
+  size_t n = fread(s->ria_bearer, 1, sizeof s->ria_bearer, f);
+  bool ok = !ferror(f) && n < sizeof s->ria_bearer;
+  if (fclose(f))
+    ok = false;
+  if (n && s->ria_bearer[n - 1] == '\n') {
+    n--;
+    if (n && s->ria_bearer[n - 1] == '\r')
+      n--;
+  }
+  if (!n || n > 4096)
+    ok = false;
+  for (size_t i = 0; ok && i < n; i++)
+    if ((unsigned char)s->ria_bearer[i] <= 32 ||
+        (unsigned char)s->ria_bearer[i] >= 127)
+      ok = false;
+  if (!ok)
+    return ria_fail(e, RIA_UNAUTHORIZED,
+                    "invalid provisioned API bearer token");
+  s->ria_bearer[n] = 0;
+  s->ria_bearer_length = n;
+  s->ria_connections = values[14];
+  return true;
+}
+#endif
 #ifndef DS4_SERVER_TEST
 static void server_request_worker_stop(server *s) {
     pthread_mutex_lock(&s->mu);
@@ -15831,6 +17133,56 @@ static void server_request_decode_stop(server *s) {
     pthread_cond_broadcast(&s->model_cv);
     pthread_mutex_unlock(&s->model_mu);
 }
+
+#ifdef DS4_RIA
+static bool ria_client_health(void *context, bool *ready, bool *active, ria_error *error) {
+    server *s = context;
+    (void)error;
+    pthread_mutex_lock(&s->mu);
+    *ready = s->ria_ready && !s->stopping;
+    *active = s->ria_generation_reserved;
+    pthread_mutex_unlock(&s->mu);
+    return true;
+}
+
+static bool ria_client_drain(void *context, uint64_t deadline, ria_error *error) {
+    server *s = context;
+    pthread_mutex_lock(&s->mu);
+    s->stopping = true;
+    s->ria_ready = false;
+    if (s->ria_listener >= 0) (void)shutdown(s->ria_listener, SHUT_RDWR);
+    for (size_t i = 0; i < 64; i++)
+        if (s->ria_client_fds[i] >= 0) (void)shutdown(s->ria_client_fds[i], SHUT_RDWR);
+    for (job *j = s->head; j; j = j->next) job_mark_cancelled(j);
+    pthread_cond_broadcast(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+    pthread_mutex_lock(&s->model_mu);
+    for (int i = 0; i < s->slot_count; i++) job_mark_cancelled(s->slots[i].running);
+    pthread_mutex_unlock(&s->model_mu);
+    pthread_mutex_lock(&s->mu);
+    while (s->clients || s->ria_worker_live) {
+        uint64_t now = ria_monotonic_ms();
+        if (now >= deadline) {
+            s->ria_drain_failed = true;
+            pthread_mutex_unlock(&s->mu);
+            return ria_fail(error, RIA_DEADLINE_EXCEEDED, "client drain did not reach generation quiescence");
+        }
+        struct timespec until = {(time_t)(deadline / 1000),
+                                 (long)((deadline % 1000) * 1000000)};
+        int status = pthread_cond_timedwait(&s->clients_cv, &s->mu, &until);
+        if (status && status != ETIMEDOUT) {
+            s->ria_drain_failed = true;
+            pthread_mutex_unlock(&s->mu);
+            return ria_fail(error, RIA_INTERNAL_ERROR, "client drain wait failed");
+        }
+    }
+    pthread_mutex_unlock(&s->mu);
+    /* All graph calls return only after their CUDA output/state is complete.
+     * The worker and HTTP image users have exited; abort the idle binding. */
+    for (int i = 0; i < s->slot_count; i++) ds4_session_invalidate(s->slots[i].session);
+    return true;
+}
+#endif
 
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
@@ -15921,14 +17273,26 @@ int main(int argc, char **argv) {
         }
     }
 
+    server s = {0};s.engine=engine;
+#ifdef DS4_RIA
+    s.ria_listener = -1;
+    for (size_t i = 0; i < 64; i++) s.ria_client_fds[i] = -1;
+    char ria_bind_host[256];
+    ria_error ria_policy_error = {0};
+    if (!ria_server_policy(&s, &cfg, ria_bind_host, &ria_policy_error)) {
+      fprintf(stderr, "ds4-server: RIA %d: %s\n", ria_policy_error.code,
+              ria_policy_error.message);
+      ds4_engine_close(engine);
+      return 1;
+    }
+#endif
     const int slot_count = cfg.batched_sessions > 0 ? cfg.batched_sessions : 1;
-    log_context_memory(cfg.engine.backend,
+    if(!ds4_engine_ria(engine))log_context_memory(cfg.engine.backend,
                        cfg.ctx_size,
                        ds4_engine_prefill_chunk(engine),
                        cfg.engine.ssd_streaming,
                        slot_count);
 
-    server s = {0};
     s.engine = engine;
     s.tp_leader = tp_leader;
     s.ctx_size = cfg.ctx_size;
@@ -15949,19 +17313,81 @@ int main(int argc, char **argv) {
         memset(s.slot_threads, 0, (size_t)slot_count * sizeof(*s.slot_threads));
     }
 
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutex_init(&s.mu, NULL), "synchronization initialization");
+#else
     pthread_mutex_init(&s.mu, NULL);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_cond_init(&s.cv, NULL), "synchronization initialization");
+#else
     pthread_cond_init(&s.cv, NULL);
-    pthread_cond_init(&s.clients_cv, NULL);
+#endif
+    pthread_condattr_t clients_attr;
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_condattr_init(&clients_attr), "synchronization initialization");
+#else
+    pthread_condattr_init(&clients_attr);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_condattr_setclock(&clients_attr, CLOCK_MONOTONIC), "synchronization initialization");
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_cond_init(&s.clients_cv, &clients_attr), "synchronization initialization");
+#else
+    pthread_cond_init(&s.clients_cv, &clients_attr);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_condattr_destroy(&clients_attr), "synchronization initialization");
+#else
+    pthread_condattr_destroy(&clients_attr);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutex_init(&s.tool_mu, NULL), "synchronization initialization");
+#else
     pthread_mutex_init(&s.tool_mu, NULL);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutex_init(&s.kv_mu, NULL), "synchronization initialization");
+#else
     pthread_mutex_init(&s.kv_mu, NULL);
+#endif
     pthread_mutexattr_t inference_attr;
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutexattr_init(&inference_attr), "synchronization initialization");
+#else
     pthread_mutexattr_init(&inference_attr);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutexattr_settype(&inference_attr, PTHREAD_MUTEX_RECURSIVE), "synchronization initialization");
+#else
     pthread_mutexattr_settype(&inference_attr, PTHREAD_MUTEX_RECURSIVE);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutex_init(&s.inference_mu, &inference_attr), "synchronization initialization");
+#else
     pthread_mutex_init(&s.inference_mu, &inference_attr);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutexattr_destroy(&inference_attr), "synchronization initialization");
+#else
     pthread_mutexattr_destroy(&inference_attr);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutex_init(&s.model_mu, NULL), "synchronization initialization");
+#else
     pthread_mutex_init(&s.model_mu, NULL);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_cond_init(&s.model_cv, NULL), "synchronization initialization");
+#else
     pthread_cond_init(&s.model_cv, NULL);
+#endif
+#ifdef DS4_RIA
+    ria_thread_status(&s, pthread_mutex_init(&s.trace_mu, NULL), "synchronization initialization");
+#else
     pthread_mutex_init(&s.trace_mu, NULL);
+#endif
 
     for (int i = 0; i < slot_count; i++) {
         server_slot *slot = &s.slots[i];
@@ -16008,6 +17434,14 @@ int main(int argc, char **argv) {
         server_log(DS4_LOG_DEFAULT, "ds4-server: tracing session to %s", cfg.trace_path);
     }
 
+#ifdef DS4_RIA
+    if (s.ria_service) {
+        ria_thread_status(&s, pthread_attr_init(&s.ria_thread_attributes), "attribute initialization");
+        s.ria_thread_attributes_ready = true;
+        ria_thread_status(&s, pthread_attr_setstacksize(&s.ria_thread_attributes, RIA_FRONTEND_THREAD_STACK), "stack size");
+        ria_thread_status(&s, pthread_attr_setguardsize(&s.ria_thread_attributes, RIA_FRONTEND_THREAD_GUARD), "stack guard");
+    }
+#endif
     pthread_t worker = (pthread_t){0};
     int slot_threads_started = 0;
     bool decode_thread_started = false;
@@ -16035,13 +17469,27 @@ int main(int argc, char **argv) {
             }
             slot_threads_started++;
         }
-    } else if (pthread_create(&worker, NULL, worker_main, &s) != 0) {
+    } else {
+#ifdef DS4_RIA
+        s.ria_worker_live = true;
+#endif
+        const pthread_attr_t *worker_attributes = NULL;
+#ifdef DS4_RIA
+        if (s.ria_service) worker_attributes = &s.ria_thread_attributes;
+#endif
+        if (pthread_create(&worker, worker_attributes, worker_main, &s) != 0) {
         server_log(DS4_LOG_DEFAULT, "ds4-server: failed to start worker");
         server_close_resources(&s);
         return 1;
+        }
     }
 
-    int lfd = listen_on(cfg.host, cfg.port);
+    bool native_listener = ds4_engine_ria(engine) != NULL;
+    int listener_backlog = 128;
+#ifdef DS4_RIA
+    if (native_listener) listener_backlog = (int)s.ria_connections;
+#endif
+    int lfd = listen_on(cfg.host, cfg.port, listener_backlog, native_listener);
     if (lfd < 0) {
         server_log(DS4_LOG_DEFAULT, "ds4-server: failed to listen on %s:%d: %s", cfg.host, cfg.port, strerror(errno));
         server_request_worker_stop(&s);
@@ -16057,14 +17505,62 @@ int main(int argc, char **argv) {
         server_close_resources(&s);
         return 1;
     }
+    int exit_status = 0;
+#ifdef DS4_RIA
+    if (s.ria_service) {
+        g_ria_signal_mode = 1;
+        int flags = fcntl(lfd, F_GETFL, 0);
+        if (flags < 0 || fcntl(lfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            server_log(DS4_LOG_DEFAULT, "ds4-server: cannot establish bounded RIA listener: %s", strerror(errno));
+            exit_status = 1;
+        }
+    }
+#endif
     g_listen_fd = lfd;
+#ifdef DS4_RIA
+    if (s.ria_service) {
+        s.ria_listener = lfd;
+        s.ria_ready = true;
+        ria_error error = {0};
+        if (!ria_admin_start(s.ria_service->admin_socket, 10001,
+                             s.ria_service->limits.operation_timeout_ms,
+                             (ria_admin_callbacks){&s, ria_client_health, ria_client_drain},
+                             &s.ria_admin, &error)) {
+            fprintf(stderr, "ds4-server: admin startup %d: %s\n", error.code, error.message);
+            exit_status = 1;
+            s.ria_ready = false;
+        }
+    }
+#endif
     server_log(DS4_LOG_DEFAULT, "ds4-server: listening on http://%s:%d", cfg.host, cfg.port);
 
-    while (!g_stop_requested) {
+    while (!g_stop_requested && !exit_status) {
+        pthread_mutex_lock(&s.mu);
+        bool admission_stopped = s.stopping;
+        pthread_mutex_unlock(&s.mu);
+        if (admission_stopped) break;
+#ifdef DS4_RIA
+        if (s.ria_service) {
+            struct pollfd listener = {.fd = lfd, .events = POLLIN};
+            int status = poll(&listener, 1, 50);
+            if (status < 0 && errno == EINTR) continue;
+            if (!status) continue;
+            if (status < 0 || (listener.revents & (POLLERR | POLLNVAL))) {
+                pthread_mutex_lock(&s.mu);
+                admission_stopped = s.stopping;
+                pthread_mutex_unlock(&s.mu);
+                if (!admission_stopped && !g_stop_requested) exit_status = 1;
+                break;
+            }
+        }
+#endif
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) {
-            if (g_stop_requested) break;
-            if (errno == EINTR) continue;
+            pthread_mutex_lock(&s.mu);
+            admission_stopped = s.stopping;
+            pthread_mutex_unlock(&s.mu);
+            if (g_stop_requested || admission_stopped) break;
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             server_log(DS4_LOG_DEFAULT, "ds4-server: accept failed: %s", strerror(errno));
             continue;
         }
@@ -16074,30 +17570,125 @@ int main(int argc, char **argv) {
         }
 
         configure_client_socket(fd);
+#ifdef DS4_RIA
+        if (s.ria_service) {
+          pthread_mutex_lock(&s.mu);
+          bool available = (uint64_t)s.clients < s.ria_connections;
+          pthread_mutex_unlock(&s.mu);
+          if (!available) {
+            close(fd);
+            continue;
+          }
+          uint64_t timeout = 0;
+          ria_error error = {0};
+          if (!ria_api_u64(&s, "stream_write_timeout_ms", &timeout, &error)) {
+            close(fd);
+            continue;
+          }
+          struct timeval tv = {(time_t)(timeout / 1000),
+                               (suseconds_t)((timeout % 1000) * 1000)};
+          /* Read framing uses its own absolute poll deadlines; zero receive
+           * timeout also identifies this socket's whole-write deadline policy. */
+          struct timeval receive_timeout = {0};
+          if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) ||
+              setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof receive_timeout)) {
+            close(fd);
+            continue;
+          }
+        }
+#endif
+#ifdef DS4_RIA
+        size_t client_index = 0;
+#endif
         client_arg *ca = xmalloc(sizeof(*ca));
         ca->srv = &s;
         ca->fd = fd;
         pthread_mutex_lock(&s.mu);
+#ifdef DS4_RIA
+        if (s.ria_service) {
+            if (s.stopping) {
+                pthread_mutex_unlock(&s.mu);
+                free(ca);
+                close(fd);
+                continue;
+            }
+            size_t index = 0;
+            while (index < 64 && s.ria_client_fds[index] >= 0) index++;
+            if (index == 64) {
+                pthread_mutex_unlock(&s.mu);
+                free(ca);
+                close(fd);
+                continue;
+            }
+            s.ria_client_fds[index] = fd;
+            client_index = index;
+        }
+#endif
         s.clients++;
         pthread_mutex_unlock(&s.mu);
+        const pthread_attr_t *client_attributes = NULL;
+#ifdef DS4_RIA
+        if (s.ria_service) {
+            client_attributes = &s.ria_thread_attributes;
+            if (s.ria_client_joinable[client_index]) {
+                ria_thread_join(&s, s.ria_client_threads[client_index]);
+                s.ria_client_joinable[client_index] = false;
+            }
+        }
+#endif
         pthread_t th;
-        if (pthread_create(&th, NULL, client_main, ca) != 0) {
+        if (pthread_create(&th, client_attributes, client_main, ca) != 0) {
             pthread_mutex_lock(&s.mu);
             s.clients--;
+#ifdef DS4_RIA
+            if (s.ria_service) for (size_t i = 0; i < 64; i++)
+                if (s.ria_client_fds[i] == fd) s.ria_client_fds[i] = -1;
+#endif
             pthread_cond_broadcast(&s.clients_cv);
             pthread_mutex_unlock(&s.mu);
             free(ca);
             close(fd);
             continue;
         }
-        pthread_detach(th);
+#ifdef DS4_RIA
+        if (s.ria_service) {
+            s.ria_client_threads[client_index] = th;
+            s.ria_client_joinable[client_index] = true;
+        } else
+#endif
+            pthread_detach(th);
     }
     if (g_listen_fd >= 0) {
+#ifdef DS4_RIA
+        pthread_mutex_lock(&s.mu);
+        s.ria_listener = -1;
+#endif
         close(lfd);
         g_listen_fd = -1;
+#ifdef DS4_RIA
+        pthread_mutex_unlock(&s.mu);
+#endif
     }
 
     server_log(DS4_LOG_DEFAULT, "ds4-server: shutdown requested, draining requests");
+#ifdef DS4_RIA
+    if (s.ria_service) {
+        ria_error error = {0};
+        if (!ria_admin_stop(s.ria_admin, s.ria_service->limits.operation_timeout_ms, &error)) {
+            fprintf(stderr, "ds4-server: fatal admin stop %d: %s\n", error.code, error.message);
+            _exit(1);
+        }
+        s.ria_admin = NULL;
+        if (s.ria_drain_failed) _exit(1);
+        uint64_t deadline;
+        if (!ria_u64_add(ria_monotonic_ms(), s.ria_service->limits.operation_timeout_ms, &deadline) ||
+            !ria_client_drain(&s, deadline, &error)) {
+            fprintf(stderr, "ds4-server: fatal client drain %d: %s\n", error.code, error.message);
+            _exit(1);
+        }
+
+    }
+#endif
     server_request_worker_stop(&s);
     if (s.batched_mode) {
         for (int i = 0; i < slot_threads_started; i++) {
@@ -16106,11 +17697,21 @@ int main(int argc, char **argv) {
         server_request_decode_stop(&s);
         if (decode_thread_started) pthread_join(s.decode_thread, NULL);
     } else {
-        pthread_join(worker, NULL);
+#ifdef DS4_RIA
+        if (s.ria_service) ria_thread_join(&s, worker); else
+#endif
+            pthread_join(worker, NULL);
     }
     pthread_mutex_lock(&s.mu);
     while (s.clients > 0) pthread_cond_wait(&s.clients_cv, &s.mu);
     pthread_mutex_unlock(&s.mu);
+#ifdef DS4_RIA
+    if (s.ria_service) for (size_t i = 0; i < 64; i++)
+        if (s.ria_client_joinable[i]) {
+            ria_thread_join(&s, s.ria_client_threads[i]);
+            s.ria_client_joinable[i] = false;
+        }
+#endif
 
     for (int i = 0; s.kv.enabled && i < s.slot_count; i++) {
         server_slot *slot = &s.slots[i];
@@ -16122,7 +17723,7 @@ int main(int argc, char **argv) {
         kv_cache_store_current(&s, slot, "shutdown");
     }
     server_close_resources(&s);
-    return 0;
+    return exit_status;
 }
 #else
 
@@ -20802,6 +22403,11 @@ static void test_stop_list_parses_all_sequences(void) {
     TEST_ASSERT(stop_list_find_from(&stops, "hello STOP tail END", 0, &pos, &len));
     TEST_ASSERT(pos == strlen("hello "));
     TEST_ASSERT(len == strlen("STOP"));
+#ifdef DS4_RIA
+    const char content[] = "a\0STOP tail";
+    TEST_ASSERT(ria_stop_find(&stops, content, sizeof content - 1, 0, &pos, &len));
+    TEST_ASSERT(pos == 2 && len == 4);
+#endif
     TEST_ASSERT(stop_list_stream_safe_len(&stops, strlen("abcdef")) == 3);
     stop_list_clear(&stops);
     free(stops.v);
@@ -21141,16 +22747,16 @@ static void test_client_disconnect_probe(void) {
     if (sv[0] < 0 || sv[1] < 0) return;
     set_client_socket_nonblocking(sv[0]);
 
-    TEST_ASSERT(!client_socket_disconnected(sv[0]));
+    TEST_ASSERT(!client_socket_disconnected(sv[0], false));
     TEST_ASSERT(write(sv[1], "x", 1) == 1);
-    TEST_ASSERT(!client_socket_disconnected(sv[0]));
+    TEST_ASSERT(!client_socket_disconnected(sv[0], false));
     char byte = '\0';
     TEST_ASSERT(recv(sv[0], &byte, 1, 0) < 0);
     TEST_ASSERT(errno == EAGAIN || errno == EWOULDBLOCK);
 
     close(sv[1]);
     sv[1] = -1;
-    TEST_ASSERT(client_socket_disconnected(sv[0]));
+    TEST_ASSERT(client_socket_disconnected(sv[0], false));
     close(sv[0]);
 
     TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
@@ -21161,7 +22767,7 @@ static void test_client_disconnect_probe(void) {
     TEST_ASSERT(write(sv[1], "extra", 5) == 5);
     close(sv[1]);
     sv[1] = -1;
-    TEST_ASSERT(client_socket_disconnected(sv[0]));
+    TEST_ASSERT(client_socket_disconnected(sv[0], false));
     close(sv[0]);
 
     TEST_ASSERT(client_poll_revents_disconnected(POLLERR));

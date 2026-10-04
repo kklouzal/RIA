@@ -1,0 +1,538 @@
+{
+  "$defs": {
+    "bind_request": {
+      "additionalProperties": false,
+      "properties": {
+        "client_layout_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "encoding_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        },
+        "logical_model_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "operator_contract_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "placement_plan_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "profile": {
+          "enum": [
+            "nvfp4",
+            "fp8",
+            "bf16"
+          ]
+        },
+        "role": {
+          "const": "client"
+        },
+        "server_executor": {
+          "enum": [
+            "cpu",
+            "cuda"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "logical_model_digest",
+        "operator_contract_digest",
+        "encoding_digest",
+        "client_layout_digest",
+        "placement_plan_digest",
+        "profile",
+        "server_executor",
+        "limits"
+      ],
+      "type": "object"
+    },
+    "bind_response": {
+      "additionalProperties": false,
+      "properties": {
+        "bulk_capability": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "client_layout_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "encoding_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "epoch": {
+          "maxLength": 20,
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string",
+          "x-native-maximum": "18446744073709551615"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        },
+        "logical_model_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "operator_contract_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "placement_plan_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "profile": {
+          "enum": [
+            "nvfp4",
+            "fp8",
+            "bf16"
+          ]
+        },
+        "role": {
+          "const": "client"
+        },
+        "server_executor": {
+          "enum": [
+            "cpu",
+            "cuda"
+          ]
+        },
+        "server_layout_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "session_id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "logical_model_digest",
+        "operator_contract_digest",
+        "encoding_digest",
+        "client_layout_digest",
+        "placement_plan_digest",
+        "profile",
+        "server_executor",
+        "limits",
+        "server_layout_digest",
+        "session_id",
+        "epoch",
+        "bulk_capability"
+      ],
+      "type": "object"
+    },
+    "bulk_bind_request": {
+      "additionalProperties": false,
+      "properties": {
+        "bulk_capability": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "epoch": {
+          "maxLength": 20,
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string",
+          "x-native-maximum": "18446744073709551615"
+        },
+        "logical_model_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "operator_contract_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "session_id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "epoch",
+        "logical_model_digest",
+        "operator_contract_digest",
+        "bulk_capability"
+      ],
+      "type": "object"
+    },
+    "bulk_bind_response": {
+      "additionalProperties": false,
+      "properties": {
+        "bound": {
+          "const": true
+        }
+      },
+      "required": [
+        "bound"
+      ],
+      "type": "object"
+    },
+    "error_response": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maximum": 11,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "message": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "health_request": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "health_response": {
+      "additionalProperties": false,
+      "properties": {
+        "counters": {
+          "additionalProperties": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "state": {
+          "maxLength": 32,
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "ready",
+        "counters"
+      ],
+      "type": "object"
+    },
+    "limits": {
+      "additionalProperties": false,
+      "properties": {
+        "bulk_data_bytes": {
+          "maximum": 4194304,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expert_requests": {
+          "maximum": 2,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expert_rows": {
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "frame_io_timeout_ms": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "frame_payload_bytes": {
+          "maximum": 16777216,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "inflight_payload_bytes": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "operation_timeout_ms": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "row_lookup_rows": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "write_timeout_ms": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "frame_payload_bytes",
+        "bulk_data_bytes",
+        "expert_rows",
+        "expert_requests",
+        "row_lookup_rows",
+        "inflight_payload_bytes",
+        "operation_timeout_ms",
+        "frame_io_timeout_ms",
+        "write_timeout_ms"
+      ],
+      "type": "object"
+    },
+    "safe_integer": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "u64": {
+      "maxLength": 20,
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "type": "string",
+      "x-native-maximum": "18446744073709551615"
+    }
+  },
+  "$id": "https://ria.dwarfstar.invalid/protocol/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DSER revision 1 exact protocol registry",
+  "x-wire": {
+    "byte_order": "little-endian",
+    "cancel_request": {
+      "fields": [
+        "target_request_id:u64",
+        "target_epoch:u64"
+      ],
+      "length": 16
+    },
+    "cancel_response": {
+      "fields": [
+        "target_request_id:u64",
+        "target_epoch:u64",
+        "cancel_state:u32=0..2",
+        "reserved:u32=0"
+      ],
+      "length": 24
+    },
+    "chunk_request": {
+      "fields": [
+        "shard_handle:u64",
+        "chunk_index:u64"
+      ],
+      "length": 16
+    },
+    "chunk_response": {
+      "fields": [
+        "shard_handle:u64",
+        "chunk_index:u64",
+        "logical_offset:u64",
+        "data_length:u32",
+        "reserved:u32=0",
+        "sha256:32bytes",
+        "data"
+      ],
+      "length": "64+data_length"
+    },
+    "close_request": {
+      "length": 0
+    },
+    "close_response": {
+      "length": 0
+    },
+    "cross_field_validation": [
+      "u64 decimal range",
+      "Bind header session and epoch match JSON",
+      "agreed limits never enlarge request or local ceilings",
+      "bulk <= frame-64",
+      "operation bound dimensions/handle/exact lengths",
+      "CSR monotone with distinct expert and slot per row",
+      "BF16-rounded widening when declared",
+      "chunk expected hash and complete final chunk",
+      "cancellation target smaller than cancel id on same control channel",
+      "control and bulk IDs independent",
+      "quiescence before terminal credit release"
+    ],
+    "error_maximum_bytes": 16384,
+    "expert_request": {
+      "fields": [
+        "operation_handle:u64",
+        "invocation_id:u64",
+        "row_count:u32",
+        "input_width:u32",
+        "output_width:u32",
+        "entry_count:u32",
+        "quantizer_context_bytes:u32",
+        "reserved:u32=0"
+      ],
+      "length": "40+8*R+4*(R+1)+8*E+4*R*D+Q",
+      "prefix_bytes": 40
+    },
+    "expert_response": {
+      "fields": [
+        "operation_handle:u64",
+        "invocation_id:u64",
+        "row_count:u32",
+        "output_width:u32",
+        "entry_count:u32",
+        "reserved:u32=0"
+      ],
+      "length": "32+4*E*output_width",
+      "prefix_bytes": 32
+    },
+    "float_encoding": "IEEE754 binary32",
+    "header": [
+      {
+        "bytes": 4,
+        "contract": "DSER",
+        "field": "magic",
+        "offset": 0
+      },
+      {
+        "bytes": 2,
+        "contract": 1,
+        "field": "revision",
+        "offset": 4
+      },
+      {
+        "bytes": 2,
+        "contract": null,
+        "field": "kind",
+        "offset": 6
+      },
+      {
+        "bytes": 4,
+        "contract": "response bit0; all others zero",
+        "field": "flags",
+        "offset": 8
+      },
+      {
+        "bytes": 4,
+        "contract": "0..11; request=0",
+        "field": "status",
+        "offset": 12
+      },
+      {
+        "bytes": 8,
+        "contract": 16777216,
+        "field": "payload_length",
+        "offset": 16
+      },
+      {
+        "bytes": 8,
+        "contract": "nonzero monotone per connection",
+        "field": "request_id",
+        "offset": 24
+      },
+      {
+        "bytes": 16,
+        "contract": "random server bytes",
+        "field": "session_id",
+        "offset": 32
+      },
+      {
+        "bytes": 8,
+        "contract": "server u64",
+        "field": "epoch",
+        "offset": 48
+      },
+      {
+        "bytes": 8,
+        "contract": 0,
+        "field": "reserved",
+        "offset": 56
+      }
+    ],
+    "header_bytes": 64,
+    "messages": [
+      {
+        "kind": 1,
+        "maximum_payload_bytes": 262144,
+        "operation": "bind"
+      },
+      {
+        "kind": 2,
+        "maximum_payload_bytes": 262144,
+        "operation": "bind_bulk"
+      },
+      {
+        "kind": 10,
+        "maximum_payload_bytes": 16777216,
+        "operation": "evaluate_experts"
+      },
+      {
+        "kind": 11,
+        "maximum_payload_bytes": 16777216,
+        "operation": "lookup_rows"
+      },
+      {
+        "kind": 12,
+        "maximum_payload_bytes": 4194368,
+        "operation": "read_chunk"
+      },
+      {
+        "kind": 13,
+        "maximum_payload_bytes": 16777216,
+        "operation": "evaluate_shared"
+      },
+      {
+        "kind": 20,
+        "maximum_payload_bytes": 24,
+        "operation": "cancel"
+      },
+      {
+        "kind": 21,
+        "maximum_payload_bytes": 16384,
+        "operation": "health"
+      },
+      {
+        "kind": 22,
+        "maximum_payload_bytes": 0,
+        "operation": "close"
+      }
+    ],
+    "outstanding": {
+      "bulk": 1,
+      "control": 4,
+      "expert": 2,
+      "rows": 2
+    },
+    "row_request": {
+      "fields": [
+        "table_handle:u64",
+        "row_count:u32",
+        "reserved:u32=0",
+        "pairs:R*(row_id:u64,association:u64)"
+      ],
+      "length": "16+16*R"
+    },
+    "row_response": {
+      "fields": [
+        "table_handle:u64",
+        "row_count:u32",
+        "packed_row_stride:u32",
+        "representation_handle:u64",
+        "pairs:R*(row_id:u64,association:u64)",
+        "packed_rows"
+      ],
+      "length": "24+16*R+R*packed_row_stride"
+    },
+    "terminal_history_entries": 16
+  }
+}

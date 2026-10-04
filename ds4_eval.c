@@ -1,4 +1,8 @@
 #include "ds4.h"
+#ifdef DS4_RIA
+#include "ria/engine.h"
+#include <openssl/evp.h>
+#endif
 #include "ds4_distributed.h"
 #include "ds4_eval_cases.h"
 #include "ds4_help.h"
@@ -32,6 +36,7 @@
 #include <strings.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -1173,6 +1178,8 @@ typedef struct {
 
 typedef struct {
     const char *model_path;
+    const char *ria_service_path;
+    const char *teacher_forced,*logits_output;
     const char *mtp_path;
     const char *trace_path;
     const char *regrade_trace_path;
@@ -1596,6 +1603,13 @@ static ds4_backend default_backend(void) {
 
 static void usage(FILE *fp, const char *topic) {
     ds4_help_print(fp, DS4_HELP_EVAL, topic);
+    if (!topic || !strcmp(topic,"all"))
+      fputs("\nRIA native service: --config PATH (alias --ria-service PATH) selects\n"
+            "the verified CUDA client configuration and its admitted source model.\n",fp);
+    if (!topic || !strcmp(topic,"all"))
+      fputs("RIA fidelity: --teacher-forced TOKENS.json --logits-output FILE\n"
+            "records FP32LE RIALOG1 logits and masked shifted-label NLL; inputs\n"
+            "require schema_revision=1, tokens and optional boolean label_mask.\n",fp);
 }
 
 static eval_config parse_options(int argc, char **argv) {
@@ -1613,8 +1627,21 @@ static eval_config parse_options(int argc, char **argv) {
         .think_mode = DS4_THINK_HIGH,
     };
 
+    const char *ria_conflicting_option = NULL, *teacher_extra_option = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
+        if (strcmp(arg, "--config") && strcmp(arg, "--ria-service") &&
+            strcmp(arg, "--teacher-forced") && strcmp(arg, "--logits-output"))
+            teacher_extra_option = arg;
+        if (!strcmp(arg, "-m") || !strcmp(arg, "--model") ||
+            !strcmp(arg, "--backend") || !strcmp(arg, "--cpu") ||
+            !strcmp(arg, "--metal") || !strcmp(arg, "--gpu-vram") ||
+            !strcmp(arg, "--gpu-devices"))
+            ria_conflicting_option = arg;
+        if(!strcmp(arg,"--teacher-forced")){c.teacher_forced=need_arg(&i,argc,argv,arg);continue;}if(!strcmp(arg,"--logits-output")){c.logits_output=need_arg(&i,argc,argv,arg);continue;}
+
+        if(!strcmp(arg,"--config")||!strcmp(arg,"--ria-service")){c.ria_service_path=need_arg(&i,argc,argv,arg);c.model_path=NULL;c.backend=DS4_BACKEND_CUDA;continue;}
+
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             const char *topic = (i + 1 < argc && argv[i + 1][0] != '-') ?
                 argv[i + 1] : NULL;
@@ -1782,6 +1809,12 @@ static eval_config parse_options(int argc, char **argv) {
             usage(stderr, NULL);
             exit(2);
         }
+    }
+    if ((c.ria_service_path && ria_conflicting_option) ||
+        (c.teacher_forced && teacher_extra_option)) {
+        fprintf(stderr, "ds4-eval: %s conflicts with the selected native evaluation contract\n",
+                c.teacher_forced && teacher_extra_option ? teacher_extra_option : ria_conflicting_option);
+        exit(2);
     }
     if (c.self_test_extractors || c.validate_cases || c.list_cases ||
         c.regrade_trace_path)
@@ -4729,8 +4762,249 @@ static void list_eval_cases(const eval_case *cases, int ncases) {
     }
 }
 
+#ifdef DS4_RIA
+/* RIALOG1 header is 128 bytes: magic[8], rev:u32, vocab:u32,
+ * positions:u64, masked shifted labels:u64, logical/op/input SHA256[32] each.
+ * Rows are explicit FP32 little endian, one authoritative incorporated token.
+ * Publication follows complete validation, fsync and rename; failures unlink
+ * the owned temporary, leaving the old target untouched. */
+static int teacher_forced(const eval_config *cfg) {
+  ria_error error = {0};
+  ria_json_doc d = {0};
+  ds4_engine *engine = NULL;
+  ds4_session *session = NULL;
+  float *logits = NULL;
+  uint8_t *row = NULL;
+  char *temporary = NULL;
+  FILE *output = NULL;
+  bool published = false;
+  EVP_MD_CTX *digest_context = NULL;
+  uint8_t output_digest[32];
+  ds4_engine_options options = {.ria_service_path = cfg->ria_service_path,
+                                .backend = DS4_BACKEND_CUDA,
+                                .power_percent = 100};
+  bool ok = cfg->ria_service_path && cfg->logits_output && cfg->teacher_forced &&
+            ds4_engine_open(&engine, &options) == 0;
+  uint64_t input_bytes = 0;
+  if (ok) {
+    struct stat input_stat;
+    if (stat(cfg->teacher_forced, &input_stat) || !S_ISREG(input_stat.st_mode) ||
+        input_stat.st_size <= 0 || input_stat.st_size > 16777216)
+      ok = ria_fail(&error, RIA_RESOURCE_LIMIT, "teacher input must be a bounded nonempty regular file");
+    else input_bytes = (uint64_t)input_stat.st_size;
+  }
+  if (ok) {
+    uint64_t capacity = input_bytes / 2 + 1, parser, canonical, peak;
+    if (capacity > 1000000) capacity = 1000000;
+    ok = ria_u64_mul(capacity, sizeof(ria_json_node), &parser) &&
+         ria_u64_add(parser, input_bytes + 1, &parser) &&
+         ria_u64_mul(capacity, 64, &canonical) &&
+         ria_u64_add(canonical, input_bytes * 6 + 1, &canonical) &&
+         ria_u64_add(parser, canonical > input_bytes + 1 ? canonical : input_bytes + 1, &peak) &&
+         ria_u64_add(peak, 2 * 129280 * sizeof(float) + 4096 + strlen(cfg->logits_output) + 16, &peak) &&
+         peak <= ria_engine_frontend_budget(ds4_engine_ria(engine));
+    if (!ok) ria_error_set(&error, RIA_RESOURCE_LIMIT, "teacher input/parser/canonical peak exceeds admitted frontend reservation");
+  }
+  if (ok) ok = ria_json_read(cfg->teacher_forced,
+                             (ria_json_limits){(size_t)input_bytes, 1000000, 8}, &d, &error);
+  static const char *const fields[] = {"schema_revision", "tokens",
+                                       "label_mask"},
+                           *const required[] = {"schema_revision", "tokens"};
+  uint64_t revision = 0;
+  if (ok)
+    ok = ria_json_fields(&d, 0, fields, 3, required, 2, &error) &&
+         ria_json_u64(&d, ria_json_get(&d, 0, "schema_revision"), false,
+                      &revision, &error) &&
+         revision == 1;
+  const ria_json_node *tokens = ria_json_at(&d, ria_json_get(&d, 0, "tokens")),
+                      *mask =
+                          ria_json_at(&d, ria_json_get(&d, 0, "label_mask"));
+  uint64_t count = 0, labels = 0;
+  if (ok) {
+    ok = tokens && tokens->type == RIA_JSON_ARRAY;
+    for (uint32_t i = ok ? tokens->child : RIA_JSON_NONE;
+         ok && i != RIA_JSON_NONE; i = d.nodes[i].next) {
+      uint64_t token = 0;
+      ok = ria_json_u64(&d, i, false, &token, &error) && token < 129280 &&
+           ++count <= 1048576;
+    }
+    ok = ok && count >= 2;
+  }
+  if (ok && mask) {
+    ok = mask->type == RIA_JSON_ARRAY;
+    uint64_t masks = 0;
+    for (uint32_t i = ok ? mask->child : RIA_JSON_NONE;
+         ok && i != RIA_JSON_NONE; i = d.nodes[i].next) {
+      ok = d.nodes[i].type == RIA_JSON_BOOL;
+      if (ok) {
+        masks++;
+        labels += d.nodes[i].boolean;
+      }
+    }
+    ok = ok && masks == count - 1;
+  } else if (ok)
+    labels = count - 1;
+  if (ok)
+    ok = count <= ria_engine_context(ds4_engine_ria(engine)) &&
+         ds4_session_create(&session, engine, (int)count) == 0;
+  if (ok) {
+    uint64_t workspace;
+    ok = ria_u64_add(d.allocated_bytes, 2 * 129280 * sizeof(float) + 4096, &workspace) &&
+         workspace <= ria_engine_frontend_budget(ds4_engine_ria(engine));
+    if (!ok) ria_error_set(&error, RIA_RESOURCE_LIMIT, "teacher input/logit work exceeds admitted frontend reservation");
+  }
+  if (ok) {
+    digest_context = EVP_MD_CTX_new();
+    ok = digest_context && EVP_DigestInit_ex(digest_context, EVP_sha256(), NULL) == 1;
+    if (!ok) ria_error_set(&error, RIA_INTERNAL_ERROR, "teacher digest initialization failed");
+  }
+  if (ok) {
+    logits = malloc(129280 * sizeof(float));
+    row = malloc(129280 * 4);
+    temporary = malloc(strlen(cfg->logits_output) + 16);
+    if (!logits || !row || !temporary)
+      ok = ria_fail(&error, RIA_RESOURCE_LIMIT,
+                    "teacher-forced work allocation failed");
+  }
+  if (ok) {
+    sprintf(temporary, "%s.tmp.XXXXXX", cfg->logits_output);
+    int fd = mkstemp(temporary);
+    if (fd < 0)
+      ok = ria_fail(&error, RIA_INTEGRITY_ERROR, "cannot stage teacher logits");
+    else {
+      output = fdopen(fd, "wb");
+      if (!output) {
+        close(fd);
+        ok = false;
+      }
+    }
+  }
+  uint8_t header[128] = {0}, input_digest[32];
+  if (ok) {
+    const ria_service *service = ria_engine_service(ds4_engine_ria(engine));
+    memcpy(header, "RIALOG1", 7);
+    ria_write_u32(header + 8, 1);
+    ria_write_u32(header + 12, 129280);
+    ria_write_u64(header + 16, count);
+    ria_write_u64(header + 24, labels);
+    memcpy(header + 32, service->logical_model_digest, 32);
+    memcpy(header + 64, service->operator_contract_digest, 32);
+    ok = ria_json_sha256(&d, false, input_digest, &error);
+    if (ok) {
+      memcpy(header + 96, input_digest, 32);
+      ok = fwrite(header, 1, sizeof header, output) == sizeof header &&
+           EVP_DigestUpdate(digest_context, header, sizeof header) == 1;
+    }
+  }
+  uint32_t mask_index = mask ? mask->child : RIA_JSON_NONE;
+  double loss = 0;
+  uint64_t position = 0;
+  char detail[256] = {0};
+  for (uint32_t i = ok ? tokens->child : RIA_JSON_NONE;
+       ok && i != RIA_JSON_NONE; i = d.nodes[i].next) {
+    int token = (int)d.nodes[i].number;
+    if (!position) {
+      ds4_tokens prompt = {0};
+      ds4_tokens_push(&prompt, token);
+      ok = ds4_session_sync(session, &prompt, detail, sizeof detail) == 0;
+      ds4_tokens_free(&prompt);
+    } else
+      ok = ds4_session_eval(session, token, detail, sizeof detail) == 0;
+    if (ok)
+      ok = ds4_session_copy_logits(session, logits, 129280) == 129280;
+    for (unsigned j = 0; ok && j < 129280; j++) {
+      if (!isfinite(logits[j])) {
+        ok = ria_fail(&error, RIA_EXECUTOR_ERROR, "nonfinite teacher logits");
+        break;
+      }
+      ria_write_f32(row + j * 4u, logits[j]);
+    }
+    if (ok)
+      ok = fwrite(row, 1, 129280 * 4, output) == 129280 * 4 &&
+           EVP_DigestUpdate(digest_context, row, 129280 * 4) == 1;
+    uint32_t next = d.nodes[i].next;
+    if (ok && next != RIA_JSON_NONE) {
+      bool include = !mask || d.nodes[mask_index].boolean;
+      if (include) {
+        double nll;
+        ok = ria_logits_nll(logits, (uint32_t)d.nodes[next].number, &nll,
+                            &error);
+        if (ok)
+          loss += nll;
+      }
+      if (mask)
+        mask_index = d.nodes[mask_index].next;
+    }
+    if (ok)
+      position++;
+  }
+  if (!ok && detail[0] && !error.message[0])
+    ria_error_set(&error, RIA_EXECUTOR_ERROR,
+                  "teacher-forced graph failed: %.200s", detail);
+  if (ok) {
+    unsigned digest_length = 0;
+    ok = EVP_DigestFinal_ex(digest_context, output_digest, &digest_length) == 1 && digest_length == 32;
+    if (!ok) ria_error_set(&error, RIA_INTERNAL_ERROR, "teacher digest finalization failed");
+  }
+  if (output) {
+    if (ok && (fflush(output) || fsync(fileno(output))))
+      ok = ria_fail(&error, RIA_INTEGRITY_ERROR,
+                    "cannot flush complete teacher logits");
+    if (fclose(output) && ok)
+      ok = ria_fail(&error, RIA_INTEGRITY_ERROR,
+                    "cannot close complete teacher logits");
+    output = NULL;
+  }
+  if (ok) {
+    if (rename(temporary, cfg->logits_output))
+      ok = ria_fail(&error, RIA_INTEGRITY_ERROR,
+                    "cannot publish teacher logits");
+    else
+      published = true;
+  }
+  if (ok) {
+    char hex[65];
+    if (ok) {
+      ria_hex_encode(output_digest, 32, hex);
+      printf("{\"schema_revision\":1,\"teacher_forced_positions\":%llu,"
+             "\"shifted_labels\":%llu,\"negative_log_likelihood\":%.17g,\"mean_"
+             "negative_log_likelihood\":",
+             (unsigned long long)position, (unsigned long long)labels, loss);
+      if (labels)
+        printf("%.17g", loss / (double)labels);
+      else
+        printf("null");
+      printf(",\"logits_sha256\":\"%s\"}\n", hex);
+    }
+  }
+  if (temporary && !published)
+    (void)unlink(temporary);
+  EVP_MD_CTX_free(digest_context);
+  free(temporary);
+  free(row);
+  free(logits);
+  ds4_session_free(session);
+  ds4_engine_close(engine);
+  ria_json_free(&d);
+  if (!ok)
+    fprintf(stderr, "ds4-eval: teacher-forced %d: %s\n", error.code,
+            error.message[0] ? error.message
+                             : "invalid input or unavailable admitted runtime");
+  return ok ? 0 : 1;
+}
+#endif
 int main(int argc, char **argv) {
     eval_config cfg = parse_options(argc, argv);
+    if(cfg.teacher_forced||cfg.logits_output){
+#ifdef DS4_RIA
+      return teacher_forced(&cfg);
+#else
+      fprintf(stderr,
+              "ds4-eval: teacher-forced collection requires the RIA build\n");
+      return 2;
+#endif
+    }
+
     if (cfg.self_test_extractors) return run_extractor_self_tests();
     if (cfg.validate_cases) return validate_eval_cases(true);
     if (cfg.regrade_trace_path) return regrade_trace_file(cfg.regrade_trace_path);
@@ -4770,11 +5044,12 @@ int main(int argc, char **argv) {
 
     ds4_engine_options opt = {
         .model_path = cfg.model_path,
+        .ria_service_path = cfg.ria_service_path,
         .mtp_path = cfg.mtp_path,
         .backend = cfg.backend,
         .n_threads = cfg.threads,
         .context_size = cfg.ctx_size > 0 ? cfg.ctx_size : 0,
-        .mtp_draft_tokens = 1,
+        .mtp_draft_tokens = cfg.ria_service_path ? 0 : 1,
         .mtp_margin = 3.0f,
         .power_percent = cfg.power_percent,
         .prefill_chunk = cfg.prefill_chunk,
@@ -4819,6 +5094,22 @@ int main(int argc, char **argv) {
     int max_prompt_tokens = 0;
     int max_prompt_case = -1;
     int max_generation_tokens = eval_max_generation_budget(&cfg, cases, ncases);
+#ifdef DS4_RIA
+    if (ds4_engine_ria(engine)) {
+      uint64_t admitted = ria_engine_context(ds4_engine_ria(engine));
+      if (cfg.ctx_size <= 0)
+        cfg.ctx_size = (int)admitted;
+      if ((uint64_t)cfg.ctx_size > admitted) {
+        fprintf(stderr, "ds4-eval: context exceeds RIA admission\n");
+        ds4_engine_close(engine);
+        if (trace)
+          fclose(trace);
+        free(case_sequence);
+        free(cases);
+        return 2;
+      }
+    }
+#endif
     const bool auto_ctx = cfg.ctx_size <= 0;
     if (auto_ctx) {
         cfg.ctx_size = eval_auto_context_size(engine, &cfg, cases, ncases,

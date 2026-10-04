@@ -42,6 +42,9 @@
 #include <unistd.h>
 
 #include "ds4.h"
+#ifdef DS4_RIA
+#include "ria/engine.h"
+#endif
 #include "ds4_tool_text.h"
 #include "ds4_distributed.h"
 #include "ds4_image.h"
@@ -42234,15 +42237,18 @@ typedef enum {
 } ds4_vision_kind;
 
 struct ds4_engine {
-    char *model_path;
-    uint64_t ds41_session_bytes;
-    ds4_model model;
-    ds4_model mtp_model;
-    ds4_model vision_model;
-    ds4_vocab vocab;
-    ds4_weights weights;
-    ds4_mtp_weights mtp_weights;
-    ds4_dspark_weights dspark_weights;
+#ifdef DS4_RIA
+  ria_engine *ria;
+#endif
+  char *model_path;
+  uint64_t ds41_session_bytes;
+  ds4_model model;
+  ds4_model mtp_model;
+  ds4_model vision_model;
+  ds4_vocab vocab;
+  ds4_weights weights;
+  ds4_mtp_weights mtp_weights;
+  ds4_dspark_weights dspark_weights;
 #ifndef DS4_NO_GPU
     ds4_glm53_vision_weights vision_weights;
     ds4_deepseek4_vision_weights deepseek4_vision_weights;
@@ -43565,8 +43571,40 @@ static void encode_chat_prompt(
     }
 }
 
+struct ria_engine *ds4_engine_ria(ds4_engine *e) {
+#ifdef DS4_RIA
+  return e ? e->ria : NULL;
+#else
+  (void)e;
+  return NULL;
+#endif
+}
+#ifdef DS4_RIA
+static void ria_tokenize_append(ds4_engine *e, const char *text, bool special,
+                                ds4_tokens *out) {
+  ria_error error = {0};
+  uint32_t *ids = NULL;
+  size_t count = 0;
+  uint64_t context = ria_engine_context(e->ria);
+  if (out->len < 0 || (uint64_t)out->len >= context ||
+      !ria_tokenizer_encode(ria_engine_tokenizer(e->ria), text ? text : "",
+                            strlen(text ? text : ""), special,
+                            context - (uint64_t)out->len, &ids, &count, &error))
+    ds4_die(error.message);
+  for (size_t i = 0; i < count; i++)
+    ds4_tokens_push(out, (int)ids[i]);
+  free(ids);
+}
+#endif
 void ds4_tokenize_text(ds4_engine *e, const char *text, ds4_tokens *out) {
-    bpe_tokenize_text(&e->vocab, text ? text : "", out);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    ria_tokenize_append(e, text, true, out);
+    return;
+  }
+#endif
+
+  bpe_tokenize_text(&e->vocab, text ? text : "", out);
 }
 
 static bool special_token_at(const ds4_vocab *vocab, const char *p, int *token, size_t *len) {
@@ -43644,11 +43682,25 @@ static void tokenize_rendered_chat_vocab(const ds4_vocab *vocab, const char *tex
 }
 
 void ds4_tokenize_rendered_chat(ds4_engine *e, const char *text, ds4_tokens *out) {
-    tokenize_rendered_chat_vocab(&e->vocab, text, out);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    ria_tokenize_append(e, text, true, out);
+    return;
+  }
+#endif
+
+  tokenize_rendered_chat_vocab(&e->vocab, text, out);
 }
 
 void ds4_chat_begin(ds4_engine *e, ds4_tokens *tokens) {
-    chat_push_bos_sequence(&e->vocab, tokens);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    ds4_tokens_push(tokens, e->vocab.bos_id);
+    return;
+  }
+#endif
+
+  chat_push_bos_sequence(&e->vocab, tokens);
 }
 
 void ds4_encode_chat_prompt(
@@ -43657,15 +43709,99 @@ void ds4_encode_chat_prompt(
         const char *prompt,
         ds4_think_mode think_mode,
         ds4_tokens *out) {
-    encode_chat_prompt(&e->vocab, system, prompt ? prompt : "", think_mode, out);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    ria_json_node nodes[8];
+    memset(nodes, 0, sizeof nodes);
+    for (unsigned i = 0; i < 8; i++) {
+      nodes[i].child = RIA_JSON_NONE;
+      nodes[i].next = RIA_JSON_NONE;
+    }
+    nodes[0].type = RIA_JSON_ARRAY;
+    nodes[0].child = system && system[0] ? 1 : 4;
+    nodes[1].type = RIA_JSON_OBJECT;
+    nodes[1].child = 2;
+    nodes[1].next = 4;
+    nodes[2].type = RIA_JSON_STRING;
+    nodes[2].key = "role";
+    nodes[2].key_length = 4;
+    nodes[2].text = "system";
+    nodes[2].length = 6;
+    nodes[2].next = 3;
+    nodes[3].type = RIA_JSON_STRING;
+    nodes[3].key = "content";
+    nodes[3].key_length = 7;
+    nodes[3].text = system ? system : "";
+    nodes[3].length = strlen(nodes[3].text);
+    nodes[4].type = RIA_JSON_OBJECT;
+    nodes[4].child = 5;
+    nodes[5].type = RIA_JSON_STRING;
+    nodes[5].key = "role";
+    nodes[5].key_length = 4;
+    nodes[5].text = "user";
+    nodes[5].length = 4;
+    nodes[5].next = 6;
+    nodes[6].type = RIA_JSON_STRING;
+    nodes[6].key = "content";
+    nodes[6].key_length = 7;
+    nodes[6].text = prompt ? prompt : "";
+    nodes[6].length = strlen(nodes[6].text);
+    ria_json_doc doc = {.nodes=nodes, .count=8};
+    ria_error error = {0};
+    char *text = NULL;
+    size_t n = 0;
+    unsigned effort = think_mode == DS4_THINK_MAX   ? 100
+                      : think_mode == DS4_THINK_LOW ? 50
+                                                    : 75;
+    if (think_mode >= DS4_THINK_LEVEL_BASE)
+      effort = (unsigned)(think_mode - DS4_THINK_LEVEL_BASE);
+    if (think_mode == DS4_THINK_MEDIUM ||
+        !ria_prompt_render(
+            &doc, 0,
+            (ria_prompt_options){ds4_think_mode_enabled(think_mode), true,
+                                 effort, 67108864},
+            &text, &n, &error))
+      ds4_die(error.message);
+    ria_tokenize_append(e, text, true, out);
+    free(text);
+    return;
+  }
+#endif
+
+  encode_chat_prompt(&e->vocab, system, prompt ? prompt : "", think_mode, out);
 }
 
 void ds4_chat_append_max_effort_prefix(ds4_engine *e, ds4_tokens *tokens) {
+#ifdef DS4_RIA
+    if (e && e->ria) { ds4_chat_append_think_prefix(e,tokens,DS4_THINK_MAX); return; }
+#endif
     chat_push_think_prefix(&e->vocab, DS4_THINK_MAX, tokens);
 }
 
 void ds4_chat_append_think_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode mode) {
-    chat_push_think_prefix(&e->vocab, mode, tokens);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    if (ds4_think_mode_enabled(mode)) {
+      unsigned effort = mode == DS4_THINK_MAX   ? 100
+                        : mode == DS4_THINK_LOW ? 50
+                                                : 75;
+      if (mode >= DS4_THINK_LEVEL_BASE)
+        effort = (unsigned)(mode - DS4_THINK_LEVEL_BASE);
+      if (effort < 1 || effort > 100 || mode == DS4_THINK_MEDIUM)
+        ds4_die("unsupported RIA reasoning effort");
+      char text[160];
+      snprintf(text, sizeof text,
+               "Reasoning Effort: %u (range 1-100, the higher the value, the "
+               "more thorough the reasoning)\n\n",
+               effort);
+      ds4_tokens_push(tokens, e->vocab.system_id);
+      ria_tokenize_append(e, text, true, tokens);
+    }
+    return;
+  }
+#endif
+
+  chat_push_think_prefix(&e->vocab, mode, tokens);
 }
 
 static void ds41_chat_system_marker(const ds4_vocab *vocab, ds4_tokens *tokens) {
@@ -43712,76 +43848,112 @@ static void bpe_tokenize_tool_response_text(ds4_vocab *vocab, const char *conten
 }
 
 void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role, const char *content) {
-    ds4_vocab *vocab = &e->vocab;
-    if (!role) role = "user";
-    if (!content) content = "";
-
-    if (ds4_model_is_qwen4()) {
-        if (!strcmp(role, "tool") || !strcmp(role, "function")) {
-            qwen4_chat_open(vocab, "user", tokens);
-            bpe_tokenize_text(vocab, "<tool_response>\n", tokens);
-            bpe_tokenize_tool_response_text(vocab, content, tokens);
-            bpe_tokenize_text(vocab, "\n</tool_response>", tokens);
-        } else {
-            const char *name = (!strcmp(role, "system") || !strcmp(role, "developer")) ? "system" :
-                               !strcmp(role, "assistant") ? "assistant" : "user";
-            qwen4_chat_open(vocab, name, tokens);
-            if (!strcmp(name, "assistant")) {
-                tokenize_rendered_chat_vocab(vocab, content, tokens);
-            } else {
-                bpe_tokenize_text(vocab, content, tokens);
-            }
-        }
-        qwen4_chat_close(vocab, tokens);
-        return;
-    }
-
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
-        if (!strcmp(role, "system") || !strcmp(role, "developer")) {
-            if (vocab->system_id >= 0) token_vec_push(tokens, vocab->system_id);
-            tokenize_rendered_chat_vocab(vocab, content, tokens);
-        } else if (!strcmp(role, "assistant")) {
-            token_vec_push(tokens, vocab->assistant_id);
-            if (strncmp(content, "<think>", 7) != 0 &&
-                strncmp(content, "</think>", 8) != 0) {
-                token_vec_push(tokens, vocab->think_start_id);
-                token_vec_push(tokens, vocab->think_end_id);
-            }
-            tokenize_rendered_chat_vocab(vocab, content, tokens);
-        } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
-            if (vocab->observation_id >= 0) token_vec_push(tokens, vocab->observation_id);
-            tokenize_rendered_chat_vocab(vocab, "<tool_response>", tokens);
-            bpe_tokenize_tool_response_text(vocab, content, tokens);
-            tokenize_rendered_chat_vocab(vocab, "</tool_response>", tokens);
-        } else {
-            token_vec_push(tokens, vocab->user_id);
-            bpe_tokenize_text(vocab, content, tokens);
-        }
-        return;
-    }
-
-    if (!strcmp(role, "system") || !strcmp(role, "developer")) {
-        if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41)
-            ds41_chat_system_marker(vocab, tokens);
-        bpe_tokenize_text(vocab, content, tokens);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    if (!role)
+      role = "user";
+    if (!content)
+      content = "";
+    if (!strcmp(role, "system")) {
+      ds41_chat_system_marker(&e->vocab, tokens);
+      ria_tokenize_append(e, content, true, tokens);
+    } else if (!strcmp(role, "user")) {
+      ds4_tokens_push(tokens, e->vocab.user_id);
+      ria_tokenize_append(e, content, true, tokens);
     } else if (!strcmp(role, "assistant")) {
-        token_vec_push(tokens, vocab->assistant_id);
-        if (strncmp(content, "<think>", 7) != 0 && strncmp(content, "</think>", 8) != 0) {
-            token_vec_push(tokens, vocab->think_end_id);
-        }
-        bpe_tokenize_text(vocab, content, tokens);
-    } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
-        token_vec_push(tokens, vocab->user_id);
-        bpe_tokenize_text(vocab, "<tool_result>", tokens);
-        bpe_tokenize_tool_result_text(vocab, content, tokens);
-        bpe_tokenize_text(vocab, "</tool_result>", tokens);
+      ria_tokenize_append(e, content, true, tokens);
+      ds4_tokens_push(tokens, e->vocab.eos_id);
+    } else if (!strcmp(role, "tool")) {
+      ds4_tokens_push(tokens, e->vocab.user_id);
+      ria_tokenize_append(e, "<tool_result>", true, tokens);
+      ria_tokenize_append(e, content, true, tokens);
+      ria_tokenize_append(e, "</tool_result>", true, tokens);
+    } else
+      ds4_die("unsupported RIA message role");
+    return;
+  }
+#endif
+
+  ds4_vocab *vocab = &e->vocab;
+  if (!role)
+    role = "user";
+  if (!content)
+    content = "";
+
+  if (ds4_model_is_qwen4()) {
+    if (!strcmp(role, "tool") || !strcmp(role, "function")) {
+      qwen4_chat_open(vocab, "user", tokens);
+      bpe_tokenize_text(vocab, "<tool_response>\n", tokens);
+      bpe_tokenize_tool_response_text(vocab, content, tokens);
+      bpe_tokenize_text(vocab, "\n</tool_response>", tokens);
     } else {
-        token_vec_push(tokens, vocab->user_id);
+      const char *name = (!strcmp(role, "system") || !strcmp(role, "developer"))
+                             ? "system"
+                         : !strcmp(role, "assistant") ? "assistant"
+                                                      : "user";
+      qwen4_chat_open(vocab, name, tokens);
+      if (!strcmp(name, "assistant")) {
+        tokenize_rendered_chat_vocab(vocab, content, tokens);
+      } else {
         bpe_tokenize_text(vocab, content, tokens);
+      }
     }
+    qwen4_chat_close(vocab, tokens);
+    return;
+  }
+
+  if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
+    if (!strcmp(role, "system") || !strcmp(role, "developer")) {
+      if (vocab->system_id >= 0)
+        token_vec_push(tokens, vocab->system_id);
+      tokenize_rendered_chat_vocab(vocab, content, tokens);
+    } else if (!strcmp(role, "assistant")) {
+      token_vec_push(tokens, vocab->assistant_id);
+      if (strncmp(content, "<think>", 7) != 0 &&
+          strncmp(content, "</think>", 8) != 0) {
+        token_vec_push(tokens, vocab->think_start_id);
+        token_vec_push(tokens, vocab->think_end_id);
+      }
+      tokenize_rendered_chat_vocab(vocab, content, tokens);
+    } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
+      if (vocab->observation_id >= 0)
+        token_vec_push(tokens, vocab->observation_id);
+      tokenize_rendered_chat_vocab(vocab, "<tool_response>", tokens);
+      bpe_tokenize_tool_response_text(vocab, content, tokens);
+      tokenize_rendered_chat_vocab(vocab, "</tool_response>", tokens);
+    } else {
+      token_vec_push(tokens, vocab->user_id);
+      bpe_tokenize_text(vocab, content, tokens);
+    }
+    return;
+  }
+
+  if (!strcmp(role, "system") || !strcmp(role, "developer")) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41)
+      ds41_chat_system_marker(vocab, tokens);
+    bpe_tokenize_text(vocab, content, tokens);
+  } else if (!strcmp(role, "assistant")) {
+    token_vec_push(tokens, vocab->assistant_id);
+    if (strncmp(content, "<think>", 7) != 0 &&
+        strncmp(content, "</think>", 8) != 0) {
+      token_vec_push(tokens, vocab->think_end_id);
+    }
+    bpe_tokenize_text(vocab, content, tokens);
+  } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
+    token_vec_push(tokens, vocab->user_id);
+    bpe_tokenize_text(vocab, "<tool_result>", tokens);
+    bpe_tokenize_tool_result_text(vocab, content, tokens);
+    bpe_tokenize_text(vocab, "</tool_result>", tokens);
+  } else {
+    token_vec_push(tokens, vocab->user_id);
+    bpe_tokenize_text(vocab, content, tokens);
+  }
 }
 
 void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode think_mode) {
+#ifdef DS4_RIA
+    if (e && e->ria) { ds4_tokens_push(tokens,e->vocab.assistant_id); ds4_tokens_push(tokens,ds4_think_mode_enabled(think_mode) ? e->vocab.think_start_id : e->vocab.think_end_id); return; }
+#endif
     if (ds4_model_is_qwen4()) {
         qwen4_chat_assistant_prefix(&e->vocab, think_mode, tokens);
         return;
@@ -43873,33 +44045,51 @@ static bool vocab_token_is_literal_special(ds4_str s) {
 }
 
 char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
-    ds4_vocab *vocab = &e->vocab;
-    if (token < 0 || token >= vocab->n_vocab) {
-        if (len) *len = 0;
-        char *out = xmalloc(1);
-        out[0] = '\0';
-        return out;
-    }
-
-    ds4_str s = vocab->token[token];
-    char *out = xmalloc((size_t)s.len + 1);
-    if (vocab_token_is_literal_special(s)) {
-        memcpy(out, s.ptr, (size_t)s.len);
-        out[s.len] = '\0';
-        if (len) *len = (size_t)s.len;
-        return out;
-    }
-
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    ria_error error = {0};
+    char *out = NULL;
     size_t n = 0;
-    uint64_t pos = 0;
-    while (pos < s.len) {
-        uint32_t cp = utf8_decode_one(s.ptr, s.len, &pos);
-        int b = gpt2_codepoint_to_byte(cp);
-        if (b >= 0) out[n++] = (char)b;
-    }
-    out[n] = '\0';
-    if (len) *len = n;
+    if (token < 0 || !ria_tokenizer_decode(ria_engine_tokenizer(e->ria),
+                                           (uint32_t)token, &out, &n, &error))
+      ds4_die(error.message);
+    if (len)
+      *len = n;
     return out;
+  }
+#endif
+
+  ds4_vocab *vocab = &e->vocab;
+  if (token < 0 || token >= vocab->n_vocab) {
+    if (len)
+      *len = 0;
+    char *out = xmalloc(1);
+    out[0] = '\0';
+    return out;
+  }
+
+  ds4_str s = vocab->token[token];
+  char *out = xmalloc((size_t)s.len + 1);
+  if (vocab_token_is_literal_special(s)) {
+    memcpy(out, s.ptr, (size_t)s.len);
+    out[s.len] = '\0';
+    if (len)
+      *len = (size_t)s.len;
+    return out;
+  }
+
+  size_t n = 0;
+  uint64_t pos = 0;
+  while (pos < s.len) {
+    uint32_t cp = utf8_decode_one(s.ptr, s.len, &pos);
+    int b = gpt2_codepoint_to_byte(cp);
+    if (b >= 0)
+      out[n++] = (char)b;
+  }
+  out[n] = '\0';
+  if (len)
+    *len = n;
+  return out;
 }
 
 static bool vocab_token_is_generation_stop(const ds4_vocab *vocab, int token) {
@@ -43920,6 +44110,9 @@ int ds4_token_eos(ds4_engine *e) {
 }
 
 bool ds4_token_is_stop(ds4_engine *e, int token) {
+#ifdef DS4_RIA
+    if (e && e->ria) return token==e->vocab.eos_id;
+#endif
     return e ? vocab_token_is_generation_stop(&e->vocab, token) : false;
 }
 
@@ -43935,6 +44128,9 @@ bool ds4_token_is_stop_for_think_mode(
         ds4_engine      *e,
         int              token,
         ds4_think_mode   mode) {
+#ifdef DS4_RIA
+    if (e && e->ria) return token==e->vocab.eos_id;
+#endif
     if (ds4_token_is_stop(e, token)) return true;
     /* In no-thinking mode the prompt already supplied the protocol close tag.
      * If the model emits another thinking tag, do not print or feed it back:
@@ -61432,16 +61628,24 @@ uint64_t ds4_session_layer_payload_bytes(ds4_session *s,
 int ds4_session_save_layer_payload(ds4_session *s, FILE *fp,
                                    uint32_t layer_start, uint32_t layer_end,
                                    char *err, size_t errlen) {
-    if (!s || !fp || !s->checkpoint_valid ||
-        !ds4_layer_payload_range_valid(layer_start, layer_end)) {
-        payload_set_err(err, errlen, "invalid session layer payload save");
-        return 1;
-    }
-    if (ds4_session_is_cpu(s)) {
-        payload_set_err(err, errlen, "distributed layer payloads require the graph backend");
-        return 1;
-    }
-    if (ds4_session_is_glm(s)) {
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    snprintf(err, errlen, "RIA disk state and snapshots are unsupported");
+    return 1;
+  }
+#endif
+
+  if (!s || !fp || !s->checkpoint_valid ||
+      !ds4_layer_payload_range_valid(layer_start, layer_end)) {
+    payload_set_err(err, errlen, "invalid session layer payload save");
+    return 1;
+  }
+  if (ds4_session_is_cpu(s)) {
+    payload_set_err(err, errlen,
+                    "distributed layer payloads require the graph backend");
+    return 1;
+  }
+  if (ds4_session_is_glm(s)) {
 #ifdef DS4_NO_GPU
         payload_set_err(err, errlen, "graph backend support is not compiled in");
         return 1;
@@ -61700,16 +61904,24 @@ int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
                                    const int *tokens, uint32_t n_tokens,
                                    uint32_t layer_start, uint32_t layer_end,
                                    char *err, size_t errlen) {
-    if (!s || !fp || !tokens ||
-        !ds4_layer_payload_range_valid(layer_start, layer_end)) {
-        payload_set_err(err, errlen, "invalid session layer payload load");
-        return 1;
-    }
-    if (ds4_session_is_cpu(s)) {
-        payload_set_err(err, errlen, "distributed layer payloads require the graph backend");
-        return 1;
-    }
-    if (ds4_session_is_glm(s)) {
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    snprintf(err, errlen, "RIA disk state and snapshots are unsupported");
+    return 1;
+  }
+#endif
+
+  if (!s || !fp || !tokens ||
+      !ds4_layer_payload_range_valid(layer_start, layer_end)) {
+    payload_set_err(err, errlen, "invalid session layer payload load");
+    return 1;
+  }
+  if (ds4_session_is_cpu(s)) {
+    payload_set_err(err, errlen,
+                    "distributed layer payloads require the graph backend");
+    return 1;
+  }
+  if (ds4_session_is_glm(s)) {
 #ifdef DS4_NO_GPU
         (void)payload_bytes;
         (void)n_tokens;
@@ -62169,6 +62381,12 @@ int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
 
 int ds4_engine_routed_quant_bits(ds4_engine *e) {
     if (!e) return 0;
+#ifdef DS4_RIA
+    if (e->ria) {
+        const char *profile = ria_engine_service(e->ria)->profile;
+        return !strcmp(profile, "nvfp4") ? 4 : !strcmp(profile, "fp8") ? 8 : 16;
+    }
+#endif
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         const ds4_tensor *gate = e->weights.layer[il].ffn_gate_exps;
         if (!gate) continue;
@@ -62179,6 +62397,9 @@ int ds4_engine_routed_quant_bits(ds4_engine *e) {
 }
 
 bool ds4_engine_has_output_head(ds4_engine *e) {
+#ifdef DS4_RIA
+    if (e && e->ria) return true;
+#endif
     return e && weights_have_output_head(&e->weights);
 }
 
@@ -62567,56 +62788,64 @@ void ds4_session_payload_file_free(ds4_session_payload_file *payload) {
 
 int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
                               char *err, size_t errlen) {
-    if (!out) {
-        payload_set_err(err, errlen, "invalid session payload staging request");
-        return 1;
-    }
-    memset(out, 0, sizeof(*out));
-    if (!s || !s->checkpoint_valid) {
-        payload_set_err(err, errlen, "session has no valid checkpoint to stage");
-        return 1;
-    }
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    snprintf(err, errlen, "RIA disk state and snapshots are unsupported");
+    return 1;
+  }
+#endif
 
-    char tmpl[] = "/tmp/ds4-session-payload.XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) {
-        payload_set_err(err, errlen, "failed to create staged session payload");
-        return 1;
-    }
-    FILE *fp = fdopen(fd, "wb");
-    if (!fp) {
-        int saved = errno;
-        close(fd);
-        unlink(tmpl);
-        if (errlen) snprintf(err, errlen, "failed to open staged session payload: %s",
-                             strerror(saved));
-        return 1;
-    }
+  if (!out) {
+    payload_set_err(err, errlen, "invalid session payload staging request");
+    return 1;
+  }
+  memset(out, 0, sizeof(*out));
+  if (!s || !s->checkpoint_valid) {
+    payload_set_err(err, errlen, "session has no valid checkpoint to stage");
+    return 1;
+  }
 
-    int rc = ds4_session_save_payload(s, fp, err, errlen);
-    if (rc == 0 && fflush(fp) != 0) {
-        payload_set_err(err, errlen, "failed to flush staged session payload");
-        rc = 1;
+  char tmpl[] = "/tmp/ds4-session-payload.XXXXXX";
+  int fd = mkstemp(tmpl);
+  if (fd < 0) {
+    payload_set_err(err, errlen, "failed to create staged session payload");
+    return 1;
+  }
+  FILE *fp = fdopen(fd, "wb");
+  if (!fp) {
+    int saved = errno;
+    close(fd);
+    unlink(tmpl);
+    if (errlen)
+      snprintf(err, errlen, "failed to open staged session payload: %s",
+               strerror(saved));
+    return 1;
+  }
+
+  int rc = ds4_session_save_payload(s, fp, err, errlen);
+  if (rc == 0 && fflush(fp) != 0) {
+    payload_set_err(err, errlen, "failed to flush staged session payload");
+    rc = 1;
+  }
+  off_t pos = -1;
+  if (rc == 0) {
+    pos = ftello(fp);
+    if (pos < 0) {
+      payload_set_err(err, errlen, "failed to measure staged session payload");
+      rc = 1;
     }
-    off_t pos = -1;
-    if (rc == 0) {
-        pos = ftello(fp);
-        if (pos < 0) {
-            payload_set_err(err, errlen, "failed to measure staged session payload");
-            rc = 1;
-        }
-    }
-    if (fclose(fp) != 0 && rc == 0) {
-        payload_set_err(err, errlen, "failed to close staged session payload");
-        rc = 1;
-    }
-    if (rc != 0) {
-        unlink(tmpl);
-        return 1;
-    }
-    out->path = ds4_strdup(tmpl);
-    out->bytes = (uint64_t)pos;
-    return 0;
+  }
+  if (fclose(fp) != 0 && rc == 0) {
+    payload_set_err(err, errlen, "failed to close staged session payload");
+    rc = 1;
+  }
+  if (rc != 0) {
+    unlink(tmpl);
+    return 1;
+  }
+  out->path = ds4_strdup(tmpl);
+  out->bytes = (uint64_t)pos;
+  return 0;
 }
 
 #ifdef DS4_HAS_QWEN4_GPU
@@ -62855,13 +63084,20 @@ static int qwen4_session_load_payload(ds4_session *s, FILE *fp, const uint32_t *
 #endif
 
 int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen) {
-    if (!s || !fp || !s->checkpoint_valid) {
-        payload_set_err(err, errlen, "session has no valid checkpoint to save");
-        return 1;
-    }
-    if (s->distributed) {
-        return ds4_dist_session_save_payload(s->distributed, s, fp, err, errlen);
-    }
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    snprintf(err, errlen, "RIA disk state and snapshots are unsupported");
+    return 1;
+  }
+#endif
+
+  if (!s || !fp || !s->checkpoint_valid) {
+    payload_set_err(err, errlen, "session has no valid checkpoint to save");
+    return 1;
+  }
+  if (s->distributed) {
+    return ds4_dist_session_save_payload(s->distributed, s, fp, err, errlen);
+  }
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (ds4_session_is_ds41(s)) return ds41_save_payload(s, fp, err, errlen);
 #endif
@@ -63206,49 +63442,59 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
 }
 
 int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
-    if (!s || !fp) {
-        payload_set_err(err, errlen, "invalid session payload load");
-        return 1;
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    snprintf(err, errlen, "RIA disk state and snapshots are unsupported");
+    return 1;
+  }
+#endif
+
+  if (!s || !fp) {
+    payload_set_err(err, errlen, "invalid session payload load");
+    return 1;
+  }
+  if (s->distributed) {
+    return ds4_dist_session_load_payload(s->distributed, s, fp, payload_bytes,
+                                         err, errlen);
+  }
+  uint64_t remaining = payload_bytes;
+  uint32_t h[DS4_SESSION_PAYLOAD_U32_FIELDS];
+  for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
+    if (payload_read_u32(fp, &h[i], &remaining, err, errlen) != 0)
+      return 1;
+  }
+  if (h[0] != DS4_SESSION_PAYLOAD_MAGIC ||
+      h[1] != DS4_SESSION_PAYLOAD_VERSION) {
+    payload_set_err(err, errlen, "unsupported session payload version");
+    return 1;
+  }
+  if (s->engine && s->engine->tp.active) {
+    /* A local payload cannot restore another rank's caches. Keep the exact
+     * saved tokens, consume the payload (leaving trailers readable), and
+     * rebuild both ranks through the ordinary mirrored sync protocol. */
+    if (!ds4_session_tp_leader(s) || h[7] >= (uint32_t)s->ctx_size ||
+        h[11] != DS4_N_VOCAB) {
+      payload_set_err(err, errlen, "invalid TP checkpoint token history");
+      return 1;
     }
-    if (s->distributed) {
-        return ds4_dist_session_load_payload(s->distributed, s, fp, payload_bytes, err, errlen);
+    ds4_tokens tokens = {0};
+    int rc = payload_read_tokens_for_rebuild(fp, h[7], remaining, &tokens, err,
+                                             errlen);
+    if (rc == 0) {
+      /* A load may hold the disk-cache lock. Do not call progress hooks
+       * that can recursively save another cache entry during rebuild. */
+      ds4_session_progress_fn progress = s->progress;
+      ds4_session_progress_fn display_progress = s->display_progress;
+      s->progress = NULL;
+      s->display_progress = NULL;
+      ds4_session_invalidate(s);
+      rc = ds4_session_sync(s, &tokens, err, errlen);
+      s->progress = progress;
+      s->display_progress = display_progress;
     }
-    uint64_t remaining = payload_bytes;
-    uint32_t h[DS4_SESSION_PAYLOAD_U32_FIELDS];
-    for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
-        if (payload_read_u32(fp, &h[i], &remaining, err, errlen) != 0) return 1;
-    }
-    if (h[0] != DS4_SESSION_PAYLOAD_MAGIC || h[1] != DS4_SESSION_PAYLOAD_VERSION) {
-        payload_set_err(err, errlen, "unsupported session payload version");
-        return 1;
-    }
-    if (s->engine && s->engine->tp.active) {
-        /* A local payload cannot restore another rank's caches. Keep the exact
-         * saved tokens, consume the payload (leaving trailers readable), and
-         * rebuild both ranks through the ordinary mirrored sync protocol. */
-        if (!ds4_session_tp_leader(s) ||
-            h[7] >= (uint32_t)s->ctx_size || h[11] != DS4_N_VOCAB) {
-            payload_set_err(err, errlen, "invalid TP checkpoint token history");
-            return 1;
-        }
-        ds4_tokens tokens = {0};
-        int rc = payload_read_tokens_for_rebuild(fp, h[7], remaining,
-                                                  &tokens, err, errlen);
-        if (rc == 0) {
-            /* A load may hold the disk-cache lock. Do not call progress hooks
-             * that can recursively save another cache entry during rebuild. */
-            ds4_session_progress_fn progress = s->progress;
-            ds4_session_progress_fn display_progress = s->display_progress;
-            s->progress = NULL;
-            s->display_progress = NULL;
-            ds4_session_invalidate(s);
-            rc = ds4_session_sync(s, &tokens, err, errlen);
-            s->progress = progress;
-            s->display_progress = display_progress;
-        }
-        ds4_tokens_free(&tokens);
-        return rc;
-    }
+    ds4_tokens_free(&tokens);
+    return rc;
+  }
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (ds4_session_is_ds41(s)) return ds41_load_payload(s, fp, h, remaining, err, errlen);
 #endif
@@ -63835,76 +64081,99 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
 }
 
 int ds4_session_save_snapshot(ds4_session *s, ds4_session_snapshot *snap, char *err, size_t errlen) {
-    if (!s || !snap) {
-        payload_set_err(err, errlen, "invalid session snapshot save");
-        return 1;
-    }
-    if (s->distributed) {
-        payload_set_err(err, errlen, "distributed session snapshots are not supported yet");
-        return 1;
-    }
-    const uint64_t bytes = ds4_session_payload_bytes(s);
-    if (bytes == 0) {
-        payload_set_err(err, errlen, "session has no valid checkpoint to snapshot");
-        return 1;
-    }
-    if (bytes >= (uint64_t)SIZE_MAX) {
-        payload_set_err(err, errlen, "session snapshot is too large for this platform");
-        return 1;
-    }
-    /* fmemopen appends a NUL even in binary mode. Keep it outside the payload
-     * or fclose can overwrite the final byte of the last cache tensor. */
-    const uint64_t capacity = bytes + 1;
-    if (snap->cap < capacity) {
-        uint8_t *p = realloc(snap->ptr, (size_t)capacity);
-        if (!p) {
-            payload_set_err(err, errlen, "out of memory while allocating session snapshot");
-            return 1;
-        }
-        snap->ptr = p;
-        snap->cap = capacity;
-    }
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    snprintf(err, errlen, "RIA disk state and snapshots are unsupported");
+    return 1;
+  }
+#endif
 
-    FILE *fp = fmemopen(snap->ptr, (size_t)capacity, "wb");
-    if (!fp) {
-        payload_set_err(err, errlen, "failed to open memory stream for session snapshot");
-        return 1;
+  if (!s || !snap) {
+    payload_set_err(err, errlen, "invalid session snapshot save");
+    return 1;
+  }
+  if (s->distributed) {
+    payload_set_err(err, errlen,
+                    "distributed session snapshots are not supported yet");
+    return 1;
+  }
+  const uint64_t bytes = ds4_session_payload_bytes(s);
+  if (bytes == 0) {
+    payload_set_err(err, errlen, "session has no valid checkpoint to snapshot");
+    return 1;
+  }
+  if (bytes >= (uint64_t)SIZE_MAX) {
+    payload_set_err(err, errlen,
+                    "session snapshot is too large for this platform");
+    return 1;
+  }
+  /* fmemopen appends a NUL even in binary mode. Keep it outside the payload
+   * or fclose can overwrite the final byte of the last cache tensor. */
+  const uint64_t capacity = bytes + 1;
+  if (snap->cap < capacity) {
+    uint8_t *p = realloc(snap->ptr, (size_t)capacity);
+    if (!p) {
+      payload_set_err(err, errlen,
+                      "out of memory while allocating session snapshot");
+      return 1;
     }
-    const int rc = ds4_session_save_payload(s, fp, err, errlen);
-    if (fclose(fp) != 0 && rc == 0) {
-        payload_set_err(err, errlen, "failed to finalize memory session snapshot");
-        return 1;
-    }
-    if (rc != 0) return 1;
-    snap->len = bytes;
-    return 0;
+    snap->ptr = p;
+    snap->cap = capacity;
+  }
+
+  FILE *fp = fmemopen(snap->ptr, (size_t)capacity, "wb");
+  if (!fp) {
+    payload_set_err(err, errlen,
+                    "failed to open memory stream for session snapshot");
+    return 1;
+  }
+  const int rc = ds4_session_save_payload(s, fp, err, errlen);
+  if (fclose(fp) != 0 && rc == 0) {
+    payload_set_err(err, errlen, "failed to finalize memory session snapshot");
+    return 1;
+  }
+  if (rc != 0)
+    return 1;
+  snap->len = bytes;
+  return 0;
 }
 
 int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, char *err, size_t errlen) {
-    if (!s || !snap || !snap->ptr || snap->len == 0) {
-        payload_set_err(err, errlen, "invalid session snapshot load");
-        return 1;
-    }
-    if (s->distributed) {
-        payload_set_err(err, errlen, "distributed session snapshots are not supported yet");
-        return 1;
-    }
-    if (snap->len > (uint64_t)SIZE_MAX) {
-        payload_set_err(err, errlen, "session snapshot is too large for this platform");
-        return 1;
-    }
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    snprintf(err, errlen, "RIA disk state and snapshots are unsupported");
+    return 1;
+  }
+#endif
 
-    FILE *fp = fmemopen((void *)snap->ptr, (size_t)snap->len, "rb");
-    if (!fp) {
-        payload_set_err(err, errlen, "failed to open memory stream for session snapshot restore");
-        return 1;
-    }
-    const int rc = ds4_session_load_payload(s, fp, snap->len, err, errlen);
-    if (fclose(fp) != 0 && rc == 0) {
-        payload_set_err(err, errlen, "failed to close memory session snapshot");
-        return 1;
-    }
-    return rc;
+  if (!s || !snap || !snap->ptr || snap->len == 0) {
+    payload_set_err(err, errlen, "invalid session snapshot load");
+    return 1;
+  }
+  if (s->distributed) {
+    payload_set_err(err, errlen,
+                    "distributed session snapshots are not supported yet");
+    return 1;
+  }
+  if (snap->len > (uint64_t)SIZE_MAX) {
+    payload_set_err(err, errlen,
+                    "session snapshot is too large for this platform");
+    return 1;
+  }
+
+  FILE *fp = fmemopen((void *)snap->ptr, (size_t)snap->len, "rb");
+  if (!fp) {
+    payload_set_err(
+        err, errlen,
+        "failed to open memory stream for session snapshot restore");
+    return 1;
+  }
+  const int rc = ds4_session_load_payload(s, fp, snap->len, err, errlen);
+  if (fclose(fp) != 0 && rc == 0) {
+    payload_set_err(err, errlen, "failed to close memory session snapshot");
+    return 1;
+  }
+  return rc;
 }
 
 void ds4_session_snapshot_free(ds4_session_snapshot *snap) {
@@ -64583,11 +64852,22 @@ static bool ds4_session_greedy_splitkv_replay_exact(
 #endif
 
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
-    if (!s) return -1;
-    if (ds4_session_is_cpu(s) || ds4_session_is_glm(s) || ds4_session_is_ds41(s)) {
-        if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
-        return ds4_session_argmax(s);
-    }
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    if (ds4_session_eval(s, token, err, errlen))
+      return -1;
+    return ds4_session_argmax(s);
+  }
+#endif
+
+  if (!s)
+    return -1;
+  if (ds4_session_is_cpu(s) || ds4_session_is_glm(s) ||
+      ds4_session_is_ds41(s)) {
+    if (ds4_session_eval(s, token, err, errlen) != 0)
+      return -1;
+    return ds4_session_argmax(s);
+  }
 #ifdef DS4_NO_GPU
     (void)token;
     snprintf(err, errlen, "GPU support is not compiled in");
@@ -70446,6 +70726,81 @@ static int ds4_engine_open_internal(ds4_engine **out,
     g_glm_rocm_guard_available_baseline = 0;
     (void)ds4_linux_nonmovable_memory(&g_glm_rocm_guard_available_baseline);
 #endif
+    if(opt->ria_service_path) {
+#ifdef DS4_RIA
+      ria_error error = {0};
+      if (opt->backend != DS4_BACKEND_CUDA || opt->model_path || opt->mtp_path ||
+          opt->vision_path || opt->ssd_streaming || opt->cuda_tensor_parallel ||
+          opt->glm_mtp || opt->dspark || opt->mtp_draft_tokens || opt->dspark_exact_sampling ||
+          opt->simulate_used_memory_bytes || opt->quality || opt->first_token_test ||
+          opt->metal_graph_test || opt->directional_steering_file ||
+          opt->n_threads || (opt->prefill_chunk && opt->prefill_chunk != 1) ||
+          opt->glm_mtp_timing || opt->dspark_confidence_threshold_set ||
+          opt->dspark_strict || opt->ssd_streaming_cold ||
+          opt->ssd_streaming_cache_experts || opt->ssd_streaming_cache_bytes ||
+          opt->ssd_streaming_full_layers_set || opt->ssd_streaming_full_layers ||
+          opt->ssd_streaming_preload_experts ||
+          opt->expert_profile_path || opt->inspect_only || opt->load_slice ||
+          opt->distributed.role || opt->tp.role ||
+          (gpu_cfg && gpu_cfg->n_gpus > 1) ||
+          opt->placement_session_count_hint > 1 ||
+          (opt->power_percent && opt->power_percent != 100)) {
+        fprintf(stderr, "ds4: unsupported RIA engine option; service owns "
+                        "admission and placement\n");
+        free(e);
+        *out = NULL;
+        return 1;
+      }
+      if (!ria_engine_open(opt->ria_service_path,
+                           sizeof *e + sizeof(ds4_session) +
+                               2 * 129280 * sizeof(float),
+                           &e->ria, &error)) {
+        fprintf(stderr, "ds4: RIA %d: %s\n", error.code, error.message);
+        free(e);
+        *out = NULL;
+        return 1;
+      }
+      e->backend = DS4_BACKEND_CUDA;
+      e->power_percent = 100;
+      e->prefill_chunk = 1;
+      e->vision_ready = true;
+      e->vocab.n_vocab = 129280;
+      e->vocab.bos_id = 0;
+      e->vocab.eos_id = 1;
+      e->vocab.endoftext_id = -1;
+      e->vocab.observation_id = -1;
+      e->vocab.im_start_id = -1;
+      e->vocab.im_end_id = -1;
+      struct {
+        const char *text;
+        int *id;
+      } markers[] = {{RIA_USER, &e->vocab.user_id},
+                     {RIA_ASSISTANT, &e->vocab.assistant_id},
+                     {RIA_SYSTEM, &e->vocab.system_id},
+                     {"<think>", &e->vocab.think_start_id},
+                     {"</think>", &e->vocab.think_end_id},
+                     {RIA_IMAGE_PLACEHOLDER, &e->vision_image_token}};
+      for (size_t i = 0; i < sizeof markers / sizeof markers[0]; i++) {
+        uint32_t id;
+        if (!ria_tokenizer_special(ria_engine_tokenizer(e->ria),
+                                   markers[i].text, &id, &error)) {
+          fprintf(stderr, "ds4: %s\n", error.message);
+          ds4_engine_close(e);
+          *out = NULL;
+          return 1;
+        }
+        *markers[i].id = (int)id;
+      }
+      *out = e;
+      return 0;
+#else
+      fprintf(stderr,
+              "ds4: this build does not include the RIA CUDA runtime\n");
+      free(e);
+      *out = NULL;
+      return 1;
+#endif
+    }
     e->model.fd = -1;
     e->mtp_model.fd = -1;
     e->vision_model.fd = -1;
@@ -71731,25 +72086,36 @@ static int ds4_engine_open_internal(ds4_engine **out,
 }
 
 void ds4_engine_summary(ds4_engine *e) {
-    model_summary(&e->model);
-    if (e->mtp_model.map) {
-        printf("\nsupport model");
-        if (e->support_kind != DS4_SUPPORT_NONE) {
-            printf(" (%s", support_kind_name(e->support_kind));
-            if (e->support_stages) printf(", stages=%u", e->support_stages);
-            printf(")");
-        }
-        printf(":\n");
-        model_summary(&e->mtp_model);
-        if (e->support_kind == DS4_SUPPORT_DSPARK &&
-            e->dspark_weights.n_stages != 0) {
-            printf("support binding: tensors=%u missing=%u invalid=%u metadata_errors=%u\n",
-                   e->dspark_weights.present_tensors,
-                   e->dspark_weights.missing_tensors,
-                   e->dspark_weights.invalid_tensors,
-                   e->dspark_weights.metadata_errors);
-        }
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    printf("DeepSeek-V4.1-Flash RIA profile=%s context=%llu resident=%llu\n",
+           ria_engine_service(e->ria)->profile,
+           (unsigned long long)ria_engine_context(e->ria),
+           (unsigned long long)ria_engine_model_bytes(e->ria));
+    return;
+  }
+#endif
+
+  model_summary(&e->model);
+  if (e->mtp_model.map) {
+    printf("\nsupport model");
+    if (e->support_kind != DS4_SUPPORT_NONE) {
+      printf(" (%s", support_kind_name(e->support_kind));
+      if (e->support_stages)
+        printf(", stages=%u", e->support_stages);
+      printf(")");
     }
+    printf(":\n");
+    model_summary(&e->mtp_model);
+    if (e->support_kind == DS4_SUPPORT_DSPARK &&
+        e->dspark_weights.n_stages != 0) {
+      printf(
+          "support binding: tensors=%u missing=%u invalid=%u "
+          "metadata_errors=%u\n",
+          e->dspark_weights.present_tensors, e->dspark_weights.missing_tensors,
+          e->dspark_weights.invalid_tensors, e->dspark_weights.metadata_errors);
+    }
+  }
 }
 
 int ds4_engine_vocab_size(ds4_engine *e) {
@@ -71771,29 +72137,56 @@ int ds4_engine_set_power(ds4_engine *e, int power_percent) {
 }
 
 const char *ds4_engine_model_name(ds4_engine *e) {
-    (void)e;
-    return DS4_MODEL_SHAPE_NAME;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return "DeepSeek-V4.1-Flash";
+#endif
+
+  (void)e;
+  return DS4_MODEL_SHAPE_NAME;
 }
 
 int ds4_engine_layer_count(ds4_engine *e) {
-    (void)e;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
-        if (DS4_N_LAYER <= DS4_N_NEXTN_PREDICT) return 0;
-        return (int)(DS4_N_LAYER - DS4_N_NEXTN_PREDICT);
-    }
-    return (int)DS4_N_LAYER;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return 40;
+#endif
+
+  (void)e;
+  if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
+    if (DS4_N_LAYER <= DS4_N_NEXTN_PREDICT)
+      return 0;
+    return (int)(DS4_N_LAYER - DS4_N_NEXTN_PREDICT);
+  }
+  return (int)DS4_N_LAYER;
 }
 
 uint32_t ds4_engine_layer_compress_ratio(ds4_engine *e, uint32_t layer) {
-    (void)e;
-    if (layer >= DS4_N_LAYER) return 0;
-    return ds4_layer_compress_ratio(layer);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    uint32_t ratio, kv, index;
+    ria_error error = {0};
+    return ria_graph_dependencies(layer, &kv, &index, &ratio, &error) ? ratio
+                                                                      : 0;
+  }
+#endif
+
+  (void)e;
+  if (layer >= DS4_N_LAYER)
+    return 0;
+  return ds4_layer_compress_ratio(layer);
 }
 
 uint64_t ds4_engine_hidden_f32_values(ds4_engine *e) {
-    (void)e;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) return DS4_N_EMBD;
-    return (uint64_t)DS4_N_HC * DS4_N_EMBD;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return 5120 * 4;
+#endif
+
+  (void)e;
+  if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA)
+    return DS4_N_EMBD;
+  return (uint64_t)DS4_N_HC * DS4_N_EMBD;
 }
 
 bool ds4_engine_glm_layer_payload_bytes(ds4_engine *e,
@@ -71828,18 +72221,33 @@ bool ds4_engine_glm_layer_payload_bytes(ds4_engine *e,
 }
 
 int ds4_engine_model_id(ds4_engine *e) {
-    (void)e;
-    return (int)DS4_MODEL_VARIANT;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return DS4_VARIANT_FLASH41;
+#endif
+
+  (void)e;
+  return (int)DS4_MODEL_VARIANT;
 }
 
 bool ds4_engine_is_glm53(ds4_engine *e) {
-    (void)e;
-    return ds4_model_is_glm53();
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return false;
+#endif
+
+  (void)e;
+  return ds4_model_is_glm53();
 }
 
 bool ds4_engine_is_qwen4(ds4_engine *e) {
-    (void)e;
-    return ds4_model_is_qwen4();
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return false;
+#endif
+
+  (void)e;
+  return ds4_model_is_qwen4();
 }
 
 /* The official template's default effort is xhigh; medium adds no text. */
@@ -71904,12 +72312,22 @@ void ds4_engine_tp_gate_schedule(ds4_engine *e,
 }
 
 int ds4_engine_embd_dim(ds4_engine *e) {
-    (void)e;
-    return (int)DS4_N_EMBD;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return 5120;
+#endif
+
+  (void)e;
+  return (int)DS4_N_EMBD;
 }
 
 uint64_t ds4_engine_model_bytes(ds4_engine *e) {
-    return e->model.size;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return ria_engine_model_bytes(e->ria);
+#endif
+
+  return e->model.size;
 }
 
 bool ds4_engine_has_vision(ds4_engine *e) {
@@ -72078,29 +72496,50 @@ int ds4_prompt_append_vision(
         ds4_vision_embedding *embedding,
         char *error,
         size_t error_cap) {
-    if (!e || !tokens || !span || !embedding || !embedding->data ||
-        embedding->token_count == 0 || !e->vision_ready) {
-        if (error && error_cap) snprintf(error, error_cap, "invalid vision prompt input");
-        return 0;
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    if (!embedding || embedding->layout != RIA_IMAGE_LAYOUT ||
+        !embedding->data || !span || !tokens ||
+        (uint64_t)tokens->len + embedding->token_count >
+            ria_engine_context(e->ria)) {
+      snprintf(error, error_cap, "invalid admitted RIA image expansion");
+      return 0;
     }
-    if (e->vision_kind == DS4_VISION_DEEPSEEK4) {
-        return ds4_prompt_append_deepseek4_vision(
-                e, tokens, span, embedding, error, error_cap);
-    }
-    if ((uint64_t)tokens->len + embedding->token_count + 2u > INT_MAX) {
-        if (error && error_cap) snprintf(error, error_cap, "vision prompt is too large");
-        return 0;
-    }
-    memset(span, 0, sizeof(*span));
-    ds4_tokens_push(tokens, e->vision_start_token);
+    memset(span, 0, sizeof *span);
     span->token_start = (uint32_t)tokens->len;
-    for (uint32_t i = 0; i < embedding->token_count; i++) {
-        ds4_tokens_push(tokens, e->vision_image_token);
-    }
-    ds4_tokens_push(tokens, e->vision_end_token);
+    for (uint32_t i = 0; i < embedding->token_count; i++)
+      ds4_tokens_push(tokens, e->vision_image_token);
     span->embedding = *embedding;
-    memset(embedding, 0, sizeof(*embedding));
+    memset(embedding, 0, sizeof *embedding);
     return 1;
+  }
+#endif
+
+  if (!e || !tokens || !span || !embedding || !embedding->data ||
+      embedding->token_count == 0 || !e->vision_ready) {
+    if (error && error_cap)
+      snprintf(error, error_cap, "invalid vision prompt input");
+    return 0;
+  }
+  if (e->vision_kind == DS4_VISION_DEEPSEEK4) {
+    return ds4_prompt_append_deepseek4_vision(e, tokens, span, embedding, error,
+                                              error_cap);
+  }
+  if ((uint64_t)tokens->len + embedding->token_count + 2u > INT_MAX) {
+    if (error && error_cap)
+      snprintf(error, error_cap, "vision prompt is too large");
+    return 0;
+  }
+  memset(span, 0, sizeof(*span));
+  ds4_tokens_push(tokens, e->vision_start_token);
+  span->token_start = (uint32_t)tokens->len;
+  for (uint32_t i = 0; i < embedding->token_count; i++) {
+    ds4_tokens_push(tokens, e->vision_image_token);
+  }
+  ds4_tokens_push(tokens, e->vision_end_token);
+  span->embedding = *embedding;
+  memset(embedding, 0, sizeof(*embedding));
+  return 1;
 }
 
 int ds4_chat_append_multimodal_message(
@@ -72397,6 +72836,34 @@ int ds4_engine_vision_encode_file(
         ds4_vision_embedding *out,
         char *error,
         size_t error_cap) {
+#ifdef DS4_RIA
+    if (e && e->ria) {
+        ria_error re = {0};
+        uint8_t *bytes = NULL;
+        FILE *fp = path ? fopen(path, "rb") : NULL;
+        bool ok = fp != NULL;
+        size_t length = 0;
+        if (ok) {
+            if (fseek(fp, 0, SEEK_END) || ftell(fp) < 0) ok = false;
+            else {
+                long size = ftell(fp);
+                if (size <= 0 || (uint64_t)size > 67108864 ||
+                    (uint64_t)size > ria_engine_frontend_budget(e->ria)) ok = false;
+                else length = (size_t)size;
+            }
+        }
+        if (ok) { bytes = malloc(length); ok = bytes && !fseek(fp, 0, SEEK_SET) && fread(bytes, 1, length, fp) == length; }
+        if (fp && fclose(fp)) ok = false;
+        if (ok) ok = ria_engine_image(e->ria, bytes, length,
+                                       ria_engine_frontend_budget(e->ria) - length,
+                                       out, &re);
+        else ria_error_set(&re, RIA_INVALID_REQUEST, "cannot read bounded RIA JPEG/PNG image file");
+        free(bytes);
+        if (!ok && error && error_cap) snprintf(error, error_cap, "RIA %d: %.*s", re.code,
+                                                (int)(error_cap > 32 ? error_cap - 32 : 0), re.message);
+        return ok ? 1 : 0;
+    }
+#endif
     ds4_image image = {0};
     if (!ds4_image_decode_file(&image, path, error, error_cap)) return 0;
     int ok = ds4_engine_vision_encode_image(e, &image, out, error, error_cap);
@@ -72411,11 +72878,23 @@ int ds4_engine_vision_encode_memory(
         ds4_vision_embedding *out,
         char *error,
         size_t error_cap) {
-    ds4_image image = {0};
-    if (!ds4_image_decode_memory(&image, encoded, encoded_len, error, error_cap)) return 0;
-    int ok = ds4_engine_vision_encode_image(e, &image, out, error, error_cap);
-    ds4_image_free(&image);
-    return ok;
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    ria_error re = {0};
+    bool ok = ria_engine_image(e->ria, encoded, encoded_len,
+                               ria_engine_frontend_budget(e->ria), out, &re);
+    if (!ok && error && error_cap)
+      snprintf(error, error_cap, "RIA %d: %s", re.code, re.message);
+    return ok ? 1 : 0;
+  }
+#endif
+
+  ds4_image image = {0};
+  if (!ds4_image_decode_memory(&image, encoded, encoded_len, error, error_cap))
+    return 0;
+  int ok = ds4_engine_vision_encode_image(e, &image, out, error, error_cap);
+  ds4_image_free(&image);
+  return ok;
 }
 
 int ds4_engine_tp_vocab_split(ds4_engine *e) {
@@ -72609,25 +73088,50 @@ void ds4_engine_tp_unbind(ds4_engine *e) {
 }
 
 bool ds4_engine_is_glm_dsa(ds4_engine *e) {
-    (void)e;
-    return DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return false;
+#endif
+
+  (void)e;
+  return DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA;
 }
 
 bool ds4_engine_is_deepseek41(ds4_engine *e) {
-    (void)e;
-    return DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41;
+#ifdef DS4_RIA
+  if (e && e->ria)
+    return true;
+#endif
+
+  (void)e;
+  return DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41;
 }
 
 void ds4_engine_close(ds4_engine *e) {
-    if (!e) return;
-    ds4_engine_tp_unbind(e);
-    ds4_expert_profile_close();
-    weights_free(&e->weights);
-    vocab_free(&e->vocab);
-    ds4_threads_shutdown();
-    if (e->mtp_model.map) model_close(&e->mtp_model);
-    if (e->vision_model.map) model_close(&e->vision_model);
-    model_close(&e->model);
+#ifdef DS4_RIA
+  if (e && e->ria) {
+    ria_error error = {0};
+    if (!ria_engine_close(e->ria, &error)) {
+      fprintf(stderr, "ds4: fatal RIA cleanup: %s\n", error.message);
+      abort();
+    }
+    free(e);
+    return;
+  }
+#endif
+
+  if (!e)
+    return;
+  ds4_engine_tp_unbind(e);
+  ds4_expert_profile_close();
+  weights_free(&e->weights);
+  vocab_free(&e->vocab);
+  ds4_threads_shutdown();
+  if (e->mtp_model.map)
+    model_close(&e->mtp_model);
+  if (e->vision_model.map)
+    model_close(&e->vision_model);
+  model_close(&e->model);
 #ifndef DS4_NO_GPU
 #ifdef DS4_HAS_QWEN4_GPU
     qwen4_state_pool_free(e);
@@ -72789,36 +73293,64 @@ static int ds4_session_tp_register(ds4_session *s) {
 }
 
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
-    if (!out || !e || ctx_size <= 0) return 1;
-    if (e->backend == DS4_BACKEND_CPU) {
-        if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
-            fprintf(stderr, "ds4: GLM sessions currently require a graph backend\n");
-            return 1;
-        }
-        if (ds4_model_is_qwen4()) {
-            fprintf(stderr, "ds4: Qwen3.8 sessions require Metal or CUDA\n");
-            return 1;
-        }
-        if (e->distributed.role == DS4_DISTRIBUTED_COORDINATOR) {
-            fprintf(stderr, "ds4: distributed coordinator sessions require the graph backend\n");
-            return 1;
-        }
-        ds4_session *s = xcalloc(1, sizeof(*s));
-        s->engine = e;
-        s->ctx_size = ctx_size;
-        s->prefill_cap = ds4_prefill_cap_for_prompt(ctx_size,
-                                                     e->prefill_chunk);
-        kv_cache_init(&s->cpu_cache, (uint32_t)ctx_size, 0);
-        cpu_decode_scratch_init(&s->cpu_scratch, (uint32_t)ctx_size);
-        s->logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
-        s->sample_probs = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->sample_probs[0]));
-        if (!ds4_session_tp_register(s)) {
-            ds4_session_free(s);
-            return 1;
-        }
-        *out = s;
-        return 0;
+#ifdef DS4_RIA
+  if (out && e && e->ria) {
+    ria_error error = {0};
+    if (!ria_engine_claim(e->ria, (uint64_t)ctx_size, &error)) {
+      fprintf(stderr, "ds4: %s\n", error.message);
+      return 1;
     }
+    ds4_session *s = calloc(1, sizeof *s);
+    if (!s) {
+      ria_engine_release(e->ria);
+      return 1;
+    }
+    s->engine = e;
+    s->ctx_size = ctx_size;
+    s->prefill_cap = 1;
+    s->logits = malloc(129280 * sizeof(float));
+    s->sample_probs = malloc(129280 * sizeof(float));
+    if (!s->logits || !s->sample_probs) {
+      ds4_session_free(s);
+      return 1;
+    }
+    *out = s;
+    return 0;
+  }
+#endif
+
+  if (!out || !e || ctx_size <= 0)
+    return 1;
+  if (e->backend == DS4_BACKEND_CPU) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
+      fprintf(stderr, "ds4: GLM sessions currently require a graph backend\n");
+      return 1;
+    }
+    if (ds4_model_is_qwen4()) {
+      fprintf(stderr, "ds4: Qwen3.8 sessions require Metal or CUDA\n");
+      return 1;
+    }
+    if (e->distributed.role == DS4_DISTRIBUTED_COORDINATOR) {
+      fprintf(
+          stderr,
+          "ds4: distributed coordinator sessions require the graph backend\n");
+      return 1;
+    }
+    ds4_session *s = xcalloc(1, sizeof(*s));
+    s->engine = e;
+    s->ctx_size = ctx_size;
+    s->prefill_cap = ds4_prefill_cap_for_prompt(ctx_size, e->prefill_chunk);
+    kv_cache_init(&s->cpu_cache, (uint32_t)ctx_size, 0);
+    cpu_decode_scratch_init(&s->cpu_scratch, (uint32_t)ctx_size);
+    s->logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
+    s->sample_probs = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->sample_probs[0]));
+    if (!ds4_session_tp_register(s)) {
+      ds4_session_free(s);
+      return 1;
+    }
+    *out = s;
+    return 0;
+  }
 #ifdef DS4_NO_GPU
     return 1;
 #else
@@ -73254,23 +73786,35 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
 }
 
 void ds4_session_free(ds4_session *s) {
-    if (!s) return;
-    if (s->glm_reserved_graph_bytes && s->engine) {
-        s->engine->glm_session_graph_bytes -= s->glm_reserved_graph_bytes;
-        s->engine->glm_session_count--;
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    ria_engine_release(s->engine->ria);
+    token_vec_free(&s->checkpoint);
+    free(s->checkpoint_images);
+    free(s->logits);
+    free(s->sample_probs);
+    free(s);
+    return;
+  }
+#endif
+
+  if (!s)
+    return;
+  if (s->glm_reserved_graph_bytes && s->engine) {
+    s->engine->glm_session_graph_bytes -= s->glm_reserved_graph_bytes;
+    s->engine->glm_session_count--;
+  }
+  if (ds4_session_tp_leader(s) && s->tp_session_id != 0 &&
+      !ds4_tp_failed(s->engine->tp.ctx)) {
+    char err[256] = "";
+    if (!ds4_tp_send_session_destroy(s->engine->tp.ctx, s->tp_session_id) ||
+        !ds4_tp_wait_command_ack(s->engine->tp.ctx, s->tp_session_id,
+                                 "session destroy", err, sizeof(err))) {
+      fprintf(stderr, "ds4: %s\n",
+              err[0] ? err : "tp: worker session destroy send failed");
     }
-    if (ds4_session_tp_leader(s) && s->tp_session_id != 0 &&
-        !ds4_tp_failed(s->engine->tp.ctx)) {
-        char err[256] = "";
-        if (!ds4_tp_send_session_destroy(s->engine->tp.ctx,
-                                         s->tp_session_id) ||
-            !ds4_tp_wait_command_ack(s->engine->tp.ctx, s->tp_session_id,
-                                     "session destroy", err, sizeof(err))) {
-            fprintf(stderr, "ds4: %s\n",
-                    err[0] ? err : "tp: worker session destroy send failed");
-        }
-        s->tp_session_id = 0;
-    }
+    s->tp_session_id = 0;
+  }
 #ifndef DS4_NO_GPU
     ds4_session_print_dspark_stats(s);
 #endif
@@ -75076,10 +75620,35 @@ static int ds4_session_sync_lockstep(ds4_session *s, const ds4_tokens *prompt,
  * once its matching prefill completes, surfacing worker-side failures
  * here instead of as a gate timeout mid-decode. */
 int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
-    if (s && s->checkpoint_valid && !ds4_session_vision_prefix_matches(
-                     s, s->sync_images, s->sync_image_count)) {
-        ds4_session_invalidate(s);
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    ria_error error = {0};
+    if (!prompt || prompt->len > s->ctx_size ||
+        !ria_engine_sync(s->engine->ria, prompt, s->sync_images,
+                         s->sync_image_count, s->logits, s->cancel,
+                         s->cancel_ud, &error)) {
+      s->checkpoint_valid = false;
+      snprintf(err, errlen, "RIA %d: %s", error.code, error.message);
+      return error.code == RIA_CANCELLED ? DS4_SESSION_SYNC_INTERRUPTED : 1;
     }
+    s->checkpoint.len = 0;
+    for (int i = 0; i < prompt->len; i++)
+      token_vec_push(&s->checkpoint, prompt->v[i]);
+    s->checkpoint_valid = true;
+    if (!ds4_session_store_vision_identities(s)) {
+      ds4_session_invalidate(s);
+      snprintf(err, errlen, "unable to retain incorporated image identities");
+      return 1;
+    }
+    return 0;
+  }
+#endif
+
+  if (s && s->checkpoint_valid &&
+      !ds4_session_vision_prefix_matches(s, s->sync_images,
+                                         s->sync_image_count)) {
+    ds4_session_invalidate(s);
+  }
 #ifndef DS4_NO_GPU
     ds4_session_dspark_scheduler_begin_request(s);
 #endif
@@ -76441,18 +77010,18 @@ int ds4_session_common_prefix(ds4_session *s, const ds4_tokens *prompt) {
 
 int ds4_session_argmax(ds4_session *s) {
     if (!s || !s->checkpoint_valid || !s->logits) return -1;
-    return sample_argmax(s->logits, DS4_N_VOCAB);
+    return sample_argmax(s->logits, ds4_engine_vocab_size(s->engine));
 }
 
 int ds4_session_argmax_excluding(ds4_session *s, int excluded_id) {
     if (!s || !s->checkpoint_valid || !s->logits) return -1;
     if (getenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
         return argmax_f32_excluding_unrolled8(
-                s->logits, DS4_N_VOCAB, excluded_id);
+                s->logits, ds4_engine_vocab_size(s->engine), excluded_id);
     }
     int best = -1;
     float best_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < (uint32_t)ds4_engine_vocab_size(s->engine); i++) {
         if ((int)i == excluded_id) continue;
         const float v = s->logits[i];
         if (best < 0 || v > best_logit) {
@@ -76468,7 +77037,7 @@ int ds4_session_argmax_ignoring_eos(ds4_session *s,
     if (!s || !s->checkpoint_valid || !s->logits) return -1;
     int best = -1;
     float best_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < (uint32_t)ds4_engine_vocab_size(s->engine); i++) {
         if (ds4_token_is_stop_for_think_mode(s->engine, (int)i,
                                              think_mode)) {
             continue;
@@ -76495,13 +77064,13 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
 
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!s || !s->checkpoint_valid || !s->logits) return -1;
-    return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
+    return sample_top_p_min_p(s->logits, ds4_engine_vocab_size(s->engine), temperature, top_k,
                               top_p, min_p, rng, s->sample_probs);
 }
 
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     if (!s || !out || k <= 0) return 0;
-    if (k > (int)DS4_N_VOCAB) k = (int)DS4_N_VOCAB;
+    if (k > (int)ds4_engine_vocab_size(s->engine)) k = (int)ds4_engine_vocab_size(s->engine);
     for (int i = 0; i < k; i++) {
         out[i].id = -1;
         out[i].logit = DS4_NEG_INF;
@@ -76509,7 +77078,7 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     }
 
     float max_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < (uint32_t)ds4_engine_vocab_size(s->engine); i++) {
         const float v = s->logits[i];
         if (!isfinite(v)) continue;
         if (v > max_logit) max_logit = v;
@@ -76525,7 +77094,7 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     if (!isfinite(max_logit)) return 0;
 
     double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < (uint32_t)ds4_engine_vocab_size(s->engine); i++) {
         const float v = s->logits[i];
         if (isfinite(v)) sum += exp((double)v - (double)max_logit);
     }
@@ -76537,17 +77106,17 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
 }
 
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
-    if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
+    if (!s || !out || token < 0 || token >= (int)ds4_engine_vocab_size(s->engine)) return 0;
 
     float max_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < (uint32_t)ds4_engine_vocab_size(s->engine); i++) {
         const float v = s->logits[i];
         if (isfinite(v) && v > max_logit) max_logit = v;
     }
     if (!isfinite(max_logit)) return 0;
 
     double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < (uint32_t)ds4_engine_vocab_size(s->engine); i++) {
         const float v = s->logits[i];
         if (isfinite(v)) sum += exp((double)v - (double)max_logit);
     }
@@ -76559,14 +77128,14 @@ int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
 }
 
 int ds4_session_copy_logits(ds4_session *s, float *out, int cap) {
-    if (!s || !out || cap < (int)DS4_N_VOCAB) return 0;
-    memcpy(out, s->logits, (size_t)DS4_N_VOCAB * sizeof(out[0]));
-    return (int)DS4_N_VOCAB;
+    if (!s || !out || cap < (int)ds4_engine_vocab_size(s->engine)) return 0;
+    memcpy(out, s->logits, (size_t)ds4_engine_vocab_size(s->engine) * sizeof(out[0]));
+    return (int)ds4_engine_vocab_size(s->engine);
 }
 
 int ds4_session_set_logits(ds4_session *s, const float *logits, int n) {
-    if (!s || !logits || n != (int)DS4_N_VOCAB) return 1;
-    memcpy(s->logits, logits, (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
+    if (!s || !logits || n != (int)ds4_engine_vocab_size(s->engine)) return 1;
+    memcpy(s->logits, logits, (size_t)ds4_engine_vocab_size(s->engine) * sizeof(s->logits[0]));
     return 0;
 }
 
@@ -76578,6 +77147,11 @@ int ds4_session_set_logits(ds4_session *s, const float *logits, int n) {
  * on the M5 Max pair -- the whole first-run TP deficit vs single
  * node, which pays the same cost before its timing window starts). */
 void ds4_session_gpu_warmup(ds4_session *s) {
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria)
+    return;
+#endif
+
 #ifndef DS4_NO_GPU
     if (!s || ds4_session_is_cpu(s)) return;
     if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_DEEPSEEK4) return;
@@ -77519,7 +78093,26 @@ static int ds4_session_eval_probe_tp(ds4_session *s, int token, bool probe_mtp,
 }
 
 int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
-    bool probe_mtp = true;
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    ria_error error = {0};
+    if (s->cancel && s->cancel(s->cancel_ud)) {
+      ds4_session_invalidate(s);
+      snprintf(err, errlen, "generation cancelled");
+      return 1;
+    }
+    if (!s->checkpoint_valid || s->checkpoint.len >= s->ctx_size || token < 0 ||
+        !ria_engine_eval(s->engine->ria, (uint32_t)token, s->logits, &error)) {
+      ds4_session_invalidate(s);
+      snprintf(err, errlen, "RIA %d: %s", error.code, error.message);
+      return 1;
+    }
+    token_vec_push(&s->checkpoint, token);
+    return 0;
+  }
+#endif
+
+  bool probe_mtp = true;
 #ifndef DS4_NO_GPU
     if (s && s->engine && s->engine->support_kind == DS4_SUPPORT_DSPARK) {
         probe_mtp = false;
@@ -84136,30 +84729,49 @@ static int ds4_session_eval_speculative_argmax_impl(
         bool ignore_eos, ds4_think_mode think_mode,
         int *accepted, int accepted_cap,
         char *err, size_t errlen) {
-    if (!s || max_tokens <= 0 || accepted_cap <= 0) return 0;
-    if (!s->checkpoint_valid) {
-        payload_set_err(err, errlen, "speculative decode requires a synchronized checkpoint");
-        return -1;
-    }
-    if (accepted_cap > max_tokens) accepted_cap = max_tokens;
-    if (s->distributed) {
-        if (!accepted) return 0;
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
-        accepted[0] = first_token;
-        return 1;
-    }
-    if (ds4_session_is_cpu(s)) {
-        (void)max_tokens;
-        (void)eos_token;
-        if (!accepted || accepted_cap <= 0) return 0;
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
-        accepted[0] = first_token;
-        return 1;
-    }
-    if (ds4_session_is_qwen4(s)) {
-        (void)max_tokens;
-        (void)eos_token;
-        if (!accepted || accepted_cap <= 0) return 0;
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    if (!accepted || accepted_cap <= 0 || max_tokens <= 0)
+      return 0;
+    if (ds4_session_eval(s, first_token, err, errlen))
+      return -1;
+    accepted[0] = first_token;
+    return 1;
+  }
+#endif
+
+  if (!s || max_tokens <= 0 || accepted_cap <= 0)
+    return 0;
+  if (!s->checkpoint_valid) {
+    payload_set_err(err, errlen,
+                    "speculative decode requires a synchronized checkpoint");
+    return -1;
+  }
+  if (accepted_cap > max_tokens)
+    accepted_cap = max_tokens;
+  if (s->distributed) {
+    if (!accepted)
+      return 0;
+    if (ds4_session_eval(s, first_token, err, errlen) != 0)
+      return -1;
+    accepted[0] = first_token;
+    return 1;
+  }
+  if (ds4_session_is_cpu(s)) {
+    (void)max_tokens;
+    (void)eos_token;
+    if (!accepted || accepted_cap <= 0)
+      return 0;
+    if (ds4_session_eval(s, first_token, err, errlen) != 0)
+      return -1;
+    accepted[0] = first_token;
+    return 1;
+  }
+  if (ds4_session_is_qwen4(s)) {
+    (void)max_tokens;
+    (void)eos_token;
+    if (!accepted || accepted_cap <= 0)
+      return 0;
 #ifdef DS4_HAS_QWEN4_GPU
         if (s->engine->glm_mtp && DS4_N_NEXTN_PREDICT != 0 && s->qwen4_graph_ready) {
             return ds4_session_qwen4_spec_cycle(s, first_token, 0.0f, 0, 0.0f, 0.0f, NULL, false,
@@ -85150,18 +85762,30 @@ int ds4_session_eval_speculative(ds4_session *s, int first_token,
 }
 
 void ds4_session_invalidate(ds4_session *s) {
-    if (!s) return;
-    if (ds4_session_tp_leader(s) &&
-        !ds4_tp_failed(s->engine->tp.ctx)) {
-        (void)ds4_tp_send_invalidate(s->engine->tp.ctx, s->tp_session_id);
-    }
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    ria_engine_invalidate(s->engine->ria);
     s->checkpoint_valid = false;
     s->checkpoint.len = 0;
-    s->mtp_draft_valid = false;
     free(s->checkpoint_images);
     s->checkpoint_images = NULL;
     s->checkpoint_image_count = 0;
-    ds4_session_dspark_capture_invalidate(s);
+    return;
+  }
+#endif
+
+  if (!s)
+    return;
+  if (ds4_session_tp_leader(s) && !ds4_tp_failed(s->engine->tp.ctx)) {
+    (void)ds4_tp_send_invalidate(s->engine->tp.ctx, s->tp_session_id);
+  }
+  s->checkpoint_valid = false;
+  s->checkpoint.len = 0;
+  s->mtp_draft_valid = false;
+  free(s->checkpoint_images);
+  s->checkpoint_images = NULL;
+  s->checkpoint_image_count = 0;
+  ds4_session_dspark_capture_invalidate(s);
 #ifndef DS4_NO_GPU
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (s->ds41_graph_ready) ds41_graph_reset(&s->ds41_graph);
@@ -85171,15 +85795,31 @@ void ds4_session_invalidate(ds4_session *s) {
 }
 
 void ds4_session_rewind(ds4_session *s, int pos) {
-    if (!s) return;
-    if (pos < 0) pos = 0;
-    if (pos >= s->checkpoint.len) return;
-    if (ds4_session_tp_leader(s) &&
-        !ds4_tp_failed(s->engine->tp.ctx)) {
-        if (!ds4_tp_send_rewind(s->engine->tp.ctx, s->tp_session_id, pos))
-            s->checkpoint_valid = false;
+#ifdef DS4_RIA
+  if (s && s->engine && s->engine->ria) {
+    ria_error error = {0};
+    if (pos < 0 || pos > s->checkpoint.len ||
+        !ria_engine_rewind(s->engine->ria, (uint64_t)pos, &error)) {
+      fprintf(stderr, "ds4: invalid RIA rewind: %s\n", error.message);
+      return;
     }
-    bool state_ok = false;
+    s->checkpoint.len = pos;
+    s->checkpoint_valid = false;
+    return;
+  }
+#endif
+
+  if (!s)
+    return;
+  if (pos < 0)
+    pos = 0;
+  if (pos >= s->checkpoint.len)
+    return;
+  if (ds4_session_tp_leader(s) && !ds4_tp_failed(s->engine->tp.ctx)) {
+    if (!ds4_tp_send_rewind(s->engine->tp.ctx, s->tp_session_id, pos))
+      s->checkpoint_valid = false;
+  }
+  bool state_ok = false;
 #ifndef DS4_NO_GPU
 #ifdef DS4_HAS_QWEN4_GPU
     if (s->checkpoint_valid && ds4_session_is_qwen4(s)) {

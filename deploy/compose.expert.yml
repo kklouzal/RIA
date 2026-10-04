@@ -1,0 +1,43 @@
+name: ria-expert
+services:
+  expert:
+    image: ${EXPERT_IMAGE:?reviewed immutable CPU or CUDA image required}
+    platform: linux/amd64
+    entrypoint: [/usr/local/bin/ds4-expert-server]
+    command: [--config, /etc/dwarfstar/service.json]
+    user: '10001:10001'
+    runtime: runc
+    init: true
+    read_only: true
+    restart: 'no'
+    cpuset: ${EXPERT_CPUSET:?explicit CPU set required}
+    mem_limit: ${EXPERT_CGROUP_BYTES:?admitted memory limit required}
+    memswap_limit: ${EXPERT_CGROUP_BYTES:?same memory limit forbids swap}
+    pids_limit: ${EXPERT_PIDS_LIMIT:?bounded process/thread count required}
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:${SECCOMP_PROFILE:?reviewed profile required}
+    ulimits:
+      core: {soft: 0, hard: 0}
+      memlock:
+        soft: ${EXPERT_MEMLOCK_BYTES:?finite admitted locked population required}
+        hard: ${EXPERT_MEMLOCK_BYTES:?finite admitted locked population required}
+    tmpfs:
+      - /run/dwarfstar:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10001,gid=10001
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    volumes:
+      - {type: bind, source: '${EXPERT_MODEL_DIR:?existing prepared model directory required}', target: /model, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: '${EXPERT_CONFIG_DIR:?existing reviewed configuration directory required}', target: /etc/dwarfstar, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: '${EXPERT_SECRET_DIR:?existing credentials directory required}', target: /run/secrets, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: '${EXPERT_REPORT_DIR:?existing report directory required}', target: /artifacts, bind: {create_host_path: false}}
+    ports:
+      - '${EXPERT_BIND_IP:?explicit private interface required}:7443:7443'
+      - '${EXPERT_BIND_IP:?explicit private interface required}:7444:7444'
+    healthcheck:
+      test: [CMD, /usr/local/bin/ds4ctl, health, --socket, /run/dwarfstar/admin.sock, --timeout-ms, '5000']
+      interval: 10s
+      timeout: 6s
+      retries: 3
+      start_period: ${EXPERT_START_PERIOD:?finite startup allowance required}
+    stop_grace_period: ${EXPERT_STOP_GRACE:?finite drain allowance required}

@@ -1101,3 +1101,5 @@ clean:
 
 # The active tokenizer includes generated Unicode classes.
 ds4.o ds4_cpu.o ds4_cpu_test_hooks.o: ds4_qwen4_unicode.inc
+# RIA targets are scoped so normal ds4 builds keep their existing contracts.
+include Makefile.ria

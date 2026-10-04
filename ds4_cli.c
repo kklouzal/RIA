@@ -1,4 +1,7 @@
 #include "ds4.h"
+#ifdef DS4_RIA
+#include "ria/engine.h"
+#endif
 #include "ds4_distributed.h"
 #include "ds4_gpu_args.h"
 #include "ds4_tp.h"
@@ -66,6 +69,7 @@ typedef struct {
     bool raw_prompt;
     int n_predict;
     int ctx_size;
+    bool ctx_size_set;
     float temperature;
     float top_p;
     float min_p;
@@ -175,6 +179,9 @@ static int cli_wait_distributed_route(const cli_config *cfg, ds4_session *sessio
 
 static void usage(FILE *fp, const char *topic) {
     ds4_help_print(fp, DS4_HELP_DS4, topic);
+    if (!topic || !strcmp(topic,"all"))
+      fputs("\nRIA native service: --config PATH (alias --ria-service PATH) selects\n"
+            "the verified CUDA client configuration and its admitted source model.\n",fp);
 }
 
 static int parse_int(const char *s, const char *opt) {
@@ -1946,8 +1953,16 @@ static cli_config parse_options(int argc, char **argv) {
     }
 
     bool directional_steering_scale_set = false;
+    const char *ria_conflicting_option = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
+        if (!strcmp(arg, "-m") || !strcmp(arg, "--model") ||
+            !strcmp(arg, "--backend") || !strcmp(arg, "--cpu") ||
+            !strcmp(arg, "--metal") || !strcmp(arg, "--mtp-margin") ||
+            !strcmp(arg, "--gpu-vram") || !strcmp(arg, "--gpu-devices"))
+            ria_conflicting_option = arg;
+        if(!strcmp(arg,"--config") || !strcmp(arg,"--ria-service")){c.engine.ria_service_path=need_arg(&i,argc,argv,arg);c.engine.model_path=NULL;c.engine.backend=DS4_BACKEND_CUDA;c.engine.mtp_draft_tokens=0;continue;}
+
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             const char *topic = (i + 1 < argc && argv[i + 1][0] != '-') ?
                 argv[i + 1] : NULL;
@@ -2043,6 +2058,7 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.n_predict = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {
             c.gen.ctx_size = parse_int(need_arg(&i, argc, argv, arg), arg);
+            c.gen.ctx_size_set = true;
         } else if (!strcmp(arg, "--temp")) {
             c.gen.temperature = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 100.0f);
             c.gen.temperature_set = true;
@@ -2254,11 +2270,16 @@ static cli_config parse_options(int argc, char **argv) {
         exit(2);
     }
 
+    if (c.engine.ria_service_path && ria_conflicting_option) {
+        fprintf(stderr, "ds4: %s conflicts with the authoritative RIA service configuration\n", ria_conflicting_option);
+        exit(2);
+    }
     return c;
 }
 
 int main(int argc, char **argv) {
     cli_config cfg = parse_options(argc, argv);
+    if(cfg.engine.ria_service_path && cfg.gen.dump_tokens){fprintf(stderr,"ds4: RIA --dump-tokens is unsupported in the serving frontend; use the metadata-only encoding test harness\n");return 2;}
     if (cfg.gen.dump_tokens) {
         if (cfg.gen.prefix.count != 0) {
             fprintf(stderr, "ds4: --dump-tokens does not support --prefix-file\n");
@@ -2339,6 +2360,21 @@ int main(int argc, char **argv) {
         free(cfg.prompt_owned);
         return 1;
     }
+#ifdef DS4_RIA
+    if (ds4_engine_ria(engine)) {
+      uint64_t admitted = ria_engine_context(ds4_engine_ria(engine));
+      if (!cfg.gen.ctx_size_set) cfg.gen.ctx_size = (int)admitted;
+      if ((uint64_t)cfg.gen.ctx_size > admitted) {
+        fprintf(stderr, "ds4: --ctx exceeds admitted RIA context\n");
+        ds4_engine_close(engine);
+        ds4_dist_options_free(cfg.dist);
+        ds4_prompt_prefix_free(&cfg.gen.prefix);
+        free(cfg.prompt_owned);
+        return 2;
+      }
+    }
+#endif
+
     if (ds4_think_mode_level(cfg.gen.think_mode) >= 0 && !ds4_engine_is_deepseek41(engine)) {
         fprintf(stderr, "ds4: --think-level requires a DeepSeek V4.1 model\n");
         ds4_engine_close(engine);
@@ -2403,7 +2439,7 @@ int main(int argc, char **argv) {
         free(cfg.prompt_owned);
         return rc;
     }
-    if (!cfg.inspect) {
+    if (!cfg.inspect && !ds4_engine_ria(engine)) {
         log_context_memory(cfg.engine.backend,
                            cfg.gen.ctx_size,
                            ds4_engine_prefill_chunk(engine),

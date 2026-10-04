@@ -1,0 +1,14 @@
+# Apply after compose.expert.yml; never launch both executor alternatives.
+services:
+  expert:
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${EXPERT_GPU_UUID:?exact physical GPU UUID required}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${EXPERT_GPU_UUID:?exact physical GPU UUID required}']
+              capabilities: [gpu]

@@ -1,3 +1,13 @@
+This fork implements **RIA**, the native remote inference architecture described
+in [the implementation specification](docs/ria-specification.md). Start with the
+[hardware handoff guide](docs/ria-handoff.md), then the
+[artifact and deployment workflow](docs/ria-artifacts-and-deployment.md).
+The RIA path uses prepared safetensors, a CUDA client, and a RAM-resident CPU or
+CUDA expert service. Hardware and model qualification remain required.
+
+The original DwarfStar documentation follows; its GGUF and SSD instructions
+apply to the donor execution paths.
+
 <p align="center">
   <img src="logo.svg" alt="DwarfStar logo" width="220">
 </p>
