@@ -35,7 +35,7 @@ Implementation branch: `codex/ria-implementation`, based on planning commit `e2a
 - [x] Integrate the CUDA graph with bounded client backing, exact state, remote work and features.
 - [x] Implement probes/admin/deployment renderer/templates/containers/runbooks.
 - [x] Add offline verification and free CI/GHCR build/publication, run available checks and fix findings.
-- [ ] Complete integration review, preserve evidence and commit/push the handoff.
+- [x] Complete integration review, preserve evidence and commit/push the handoff.
 
 ## Read coverage and checkpoint
 
@@ -133,3 +133,10 @@ Implementation branch: `codex/ria-implementation`, based on planning commit `e2a
 - Primary-source review distinguishes Compose2's Boolean/omitempty false omission from Compose5's OptOut/omitzero true omission. Only verified released Compose2 versions through2.40.3 can accept a present empty bind object. New/unknown versions require explicit Boolean false; missing/null binds, true/numeric creation flags, unknown options and access/path changes fail. Actual config-only fixtures record the actual CLI version into synthetic host metadata. The sealed source review is `locks/verification/compose-bind.json`.
 - Linux wait4 legitimately accounts the inherited child fork image before exec. The test now derives startup allowance from the actual pytest parent RSS rather than assuming an empty parent; production admission caps remain strict. The supervisor's monotonic deadline now includes process creation, with a delayed-spawn containment/reaping regression fixture.
 - All370 offline Python tests and Ruff pass after these corrections. Both current-source ARM64 build-only image recipes compile. Clang18 ThreadSanitizer admin/server fixtures pass; earlier GCC initialization failures are preserved as historical diagnostic evidence. Actual amd64 CI and publication require the corrected authorized push.
+
+## Completed software handoff — 2026-10-04 UTC
+
+- Implementation commit `c987a34618efe6ccc4aca5fed26e3db0aac863be` is pushed on `codex/ria-implementation`. [Actual hosted run37181861323](https://github.com/kklouzal/RIA/actions/runs/37181861323) completed successfully: offline verification, CPU container and CUDA container jobs all passed. Hosted370 fixtures,34 static checks, all25 zero-finding Clang analyses, ASan/UBSan/leaks, Clang18 ThreadSanitizer and unchanged schema regeneration are independently downloaded and checked. Current software inputs match the tested hosted source snapshot.
+- Both actual Linux amd64 images were published with SBOM and SLSA provenance. CPU index digest: `sha256:7dfd92857d8ba35ade385c0bce08fa9f81254381898ab9cd0365d99c6803374a`; CUDA index digest: `sha256:aa1db3b05d561198d4d62ec76f74fa94c3c3bff3e2396c9472f3a9b4ef93dcf5`. Direct anonymous registry requests verified exact index hashes, amd64 manifests and both attestation predicate descriptors without pulling model data or executing an image.
+- `locks/verification/hosted-publication.json` preserves actual job URLs, implementation commit, immutable image identities, downloaded log hashes and explicit unqualified status. The operational handoff lists exact image references and the tested source branch. Documentation-only publication records do not change the tested runtime inputs or trigger another build.
+- All authorized software implementation, available offline/static/build verification and CI/GHCR publication work is complete. No model weights were downloaded and no live model/GPU/target probe was run here. Actual source/model fidelity, GPU numerical execution, physical NUMA/capacity/performance, all540 cells/G01–G28 and the one-hour soak remain deferred to the friend's hardware, as the user directed. These are unexecuted qualification gates, not passed results.

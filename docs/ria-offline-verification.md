@@ -40,11 +40,16 @@ diagnostic ASLR policy resolved that limitation: both instrumented fixtures pass
 without suppressions or retries. The separate `make ria-thread-sanitize` target
 is also required in CI. These fixtures do not prove all production interleavings.
 
-The workflow builds the actual Linux amd64 images on standard hosted runners and
-publishes immutable commit-tagged CPU/CUDA GHCR images with SBOM and provenance
-on authorized repository pushes. Publication/run results belong to the actual
-[Actions execution](https://github.com/kklouzal/RIA/actions), not this local build
-record. Documentation and verification-record-only pushes skip rebuilding.
+The [actual hosted amd64 run](https://github.com/kklouzal/RIA/actions/runs/37181861323)
+passed all three jobs for implementation commit
+`c987a34618efe6ccc4aca5fed26e3db0aac863be`: the370 fixtures,34 static checks,
+ASan/UBSan/leaks, Clang18 ThreadSanitizer, schema regeneration and both containers.
+The images were published to GHCR with SBOM and SLSA provenance. Direct anonymous
+registry requests verified the exact OCI index hashes, amd64 manifests and
+attestation descriptors. The tracked
+[hosted publication record](../locks/verification/hosted-publication.json)
+contains job URLs, immutable digests and downloaded evidence hashes.
+Documentation and verification-record-only pushes skip rebuilding.
 
 GPU numerical behavior, source/model fidelity, physical capacity and NUMA,
 the 540-cell matrix, G01–G28, candidate performance and the required one-hour soak

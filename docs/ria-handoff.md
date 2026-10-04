@@ -15,6 +15,19 @@ does not establish GPU numerical correctness.
 
 ## Read and provision
 
+Use source branch `codex/ria-implementation`. Its tested implementation commit is
+`c987a34618efe6ccc4aca5fed26e3db0aac863be`; later verification-document commits
+leave those runtime sources unchanged. The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37181861323)
+passed and published these Linux amd64 images:
+
+```text
+ghcr.io/kklouzal/ria-cpu@sha256:7dfd92857d8ba35ade385c0bce08fa9f81254381898ab9cd0365d99c6803374a
+ghcr.io/kklouzal/ria-cuda@sha256:aa1db3b05d561198d4d62ec76f74fa94c3c3bff3e2396c9472f3a9b4ef93dcf5
+```
+
+Their SBOM/provenance descriptors and anonymous manifest access were verified.
+They are build-verified images and remain unqualified for model/physical release.
+
 Read the [unchanged specification](ria-specification.md) and
 [implementation plan](../IMPLEMENTATION_PLAN.md). The user's canonical-base
 correction selects `antirez/ds4`, recorded in [the source lock](../locks/source-lock.json).
