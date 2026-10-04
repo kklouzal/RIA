@@ -38,7 +38,9 @@ jobs:
       - name: Native and independent offline fixtures
         run: |
           set -o pipefail
-          make -j2 ria-offline RIA_PYTHON=python 2>&1 | tee build/ria/evidence/ci-native-offline.log
+          # The administrative controller boundary requires root to verify
+          # actual UID/GID/capability drops instead of skipping those cases.
+          sudo -n env "PATH=$PATH" make -j2 ria-offline "RIA_PYTHON=$(command -v python)" 2>&1 | tee build/ria/evidence/ci-native-offline.log
       - name: Static analysis, source and deployment checks
         run: python deploy/offline_checks.py --output build/ria/evidence/ci-offline.json
       - name: Sanitizers
@@ -51,6 +53,10 @@ jobs:
         run: |
           PYTHONPATH=tools python -m ria.schemas
           git diff --exit-code -- schema
+      - name: Bounded amd64 setup transfer comparison
+        run: |
+          set -o pipefail
+          sudo -n "$(command -v python)" tests/ria/setup_peer_benchmark.py --output build/ria/evidence/setup-peer-benchmark.json 2>&1 | tee build/ria/evidence/ci-setup-peer-benchmark.log
       - name: Retain bounded offline evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -66,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [cpu, cuda]
+        image: [cpu, cuda, setup]
     permissions:
       contents: read
       packages: write
@@ -115,7 +121,9 @@ jobs:
           target: ${{ matrix.image == 'cuda' && 'final' || '' }}
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' && github.repository == 'kklouzal/RIA' }}
-          tags: ghcr.io/kklouzal/ria-${{ matrix.image }}:sha-${{ github.sha }}
+          # Reuse the already-public package for the distinct setup image:
+          # newly created GHCR packages default to private visibility.
+          tags: ghcr.io/kklouzal/ria-${{ matrix.image == 'setup' && 'cpu' || matrix.image }}:${{ matrix.image == 'setup' && 'setup-sha-' || 'sha-' }}${{ github.sha }}
           provenance: mode=max
           sbom: generator=docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
           outputs: ${{ github.event_name == 'pull_request' && 'type=oci,dest=/tmp/ria-image.tar' || '' }}
@@ -133,7 +141,9 @@ jobs:
           python - <<'PY'
           import json, os
           from pathlib import Path
-          value = {"image": "ghcr.io/kklouzal/ria-" + os.environ["IMAGE_KIND"], "digest": os.environ["IMAGE_DIGEST"], "commit": os.environ["GITHUB_SHA"], "hardware_qualified": False}
+          kind = os.environ["IMAGE_KIND"]
+          package = "cpu" if kind == "setup" else kind
+          value = {"image": "ghcr.io/kklouzal/ria-" + package, "digest": os.environ["IMAGE_DIGEST"], "commit": os.environ["GITHUB_SHA"], "hardware_qualified": False}
           Path("build/ria/evidence/container-publication.json").write_text(json.dumps(value, indent=2) + "\n")
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

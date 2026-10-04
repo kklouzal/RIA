@@ -65,7 +65,49 @@ def _host_target():
         raise ArtifactError("host preflight requires cgroup v2")
 
 
-def observe_host(parent, gpu_uuid=None, *, client=False):
+def _gpu_inventory(raw):
+    """Decode bounded NVML utility rows without initializing CUDA."""
+    if not isinstance(raw, bytes) or len(raw) > 1048576:
+        raise ArtifactError("physical GPU inventory exceeds its byte bound")
+    gpus = []
+    seen = set()
+    try:
+        for row in csv.reader(io.StringIO(raw.decode("ascii")), skipinitialspace=True, strict=True):
+            if (len(row) != 5 or not GPU_UUID.fullmatch(row[0]) or not row[1] or
+                    not re.fullmatch(r"[0-9]+\.[0-9]+", row[2]) or not re.fullmatch(r"[0-9]+", row[3]) or
+                    not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", row[4]) or row[0].lower() in seen):
+                raise ArtifactError("physical GPU inventory has an unsupported response")
+            seen.add(row[0].lower())
+            gpus.append(dict(zip(("uuid", "name", "compute_capability", "memory_mib", "driver_version"), row, strict=True)))
+    except (UnicodeError, csv.Error) as error:
+        raise ArtifactError("physical GPU inventory has an unsupported response") from error
+    return gpus
+
+
+def _select_gpu(gpus, gpu_uuid, *, client):
+    if gpu_uuid is not None and not GPU_UUID.fullmatch(gpu_uuid):
+        raise ArtifactError("invalid physical GPU UUID")
+    compatible = [gpu for gpu in gpus if gpu["compute_capability"] == "12.0" and
+                  (not client or gpu["name"] == "NVIDIA GeForce RTX 5090")]
+    if gpu_uuid is not None:
+        selected = [gpu for gpu in compatible if gpu["uuid"].lower() == gpu_uuid.lower()]
+        if len(selected) != 1:
+            raise ArtifactError("physical device does not satisfy the admitted UUID/SM/client contract")
+        return gpu_uuid
+    if len(compatible) != 1:
+        raise ArtifactError("GPU discovery requires exactly one compatible visible device; select an explicit gpu_uuid")
+    return "GPU-" + compatible[0]["uuid"][4:].lower()
+
+
+def observe_host(parent, gpu_uuid=None, *, client=False, discover_gpu=False):
+    """Observe one stable host realization; CUDA discovery is explicit.
+
+    Only discover_gpu=True permits automatic utility-only GPU selection. The
+    existing CPU path performs no NVIDIA query; explicit UUID revalidation
+    retains the same actual inventory and selection contract.
+    """
+    if type(discover_gpu) is not bool:
+        raise ArtifactError("GPU discovery mode must be explicit")
     _host_target()
     info = loads(_command(["docker", "--host", "unix:///var/run/docker.sock", "info", "--format", "{{json .}}"]), project=False)
     if info.get("CgroupVersion") != "2" or info.get("CgroupDriver") not in ("systemd", "cgroupfs") or any("rootless" in value for value in info.get("SecurityOptions", [])):
@@ -90,17 +132,12 @@ def observe_host(parent, gpu_uuid=None, *, client=False):
     if not nodes:
         raise ArtifactError("NUMA topology is unavailable")
     gpus = []
-    if gpu_uuid:
-        if not GPU_UUID.fullmatch(gpu_uuid):
+    if gpu_uuid is not None or discover_gpu:
+        if gpu_uuid is not None and not GPU_UUID.fullmatch(gpu_uuid):
             raise ArtifactError("invalid physical GPU UUID")
         raw = _command(["nvidia-smi", "--query-gpu=uuid,name,compute_cap,memory.total,driver_version", "--format=csv,noheader,nounits"])
-        for row in csv.reader(io.StringIO(raw.decode("ascii")), skipinitialspace=True):
-            if len(row) != 5 or not GPU_UUID.fullmatch(row[0]) or not re.fullmatch(r"[0-9]+\.[0-9]+", row[2]) or not re.fullmatch(r"[0-9]+", row[3]):
-                raise ArtifactError("physical GPU inventory has an unsupported response")
-            gpus.append(dict(zip(("uuid", "name", "compute_capability", "memory_mib", "driver_version"), row, strict=True)))
-        selected = [gpu for gpu in gpus if gpu["uuid"].lower() == gpu_uuid.lower()]
-        if len(selected) != 1 or selected[0]["compute_capability"] != "12.0" or (client and selected[0]["name"] != "NVIDIA GeForce RTX 5090"):
-            raise ArtifactError("physical device does not satisfy the admitted UUID/SM/client contract")
+        gpus = _gpu_inventory(raw)
+        gpu_uuid = _select_gpu(gpus, gpu_uuid, client=client)
     elif client:
         raise ArtifactError("client preflight requires its exact physical GPU UUID")
     return seal({"schema_revision": 1, "kind": "host_preflight", "architecture": "x86_64",

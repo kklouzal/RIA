@@ -15,6 +15,8 @@ from .release_runner import RELEASE_RUN_SCHEMAS
 from .physical_contract import PHYSICAL_CONTRACT_SCHEMAS
 from .fixture_runner import registration_schemas
 from .fixture_environment import OBSERVATION
+from .setup_schema import setup_schemas
+from .setup_qualification import setup_qualification_schema
 
 INT = {"type": "integer", "minimum": 0, "maximum": SAFE_INTEGER}
 POS = {**INT, "minimum": 1}
@@ -231,6 +233,8 @@ SCHEMAS.update(TRANSPORT_FIXTURE_SCHEMAS)
 SCHEMAS.update(RELEASE_RUN_SCHEMAS)
 SCHEMAS.update(PHYSICAL_CONTRACT_SCHEMAS)
 SCHEMAS.update(registration_schemas())
+SCHEMAS.update(setup_schemas())
+SCHEMAS["setup-qualification"] = setup_qualification_schema()
 StrictValidator = validators.extend(Draft202012Validator, type_checker=Draft202012Validator.TYPE_CHECKER.redefine(
     "integer", lambda checker, instance: type(instance) is int))
 

@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "deploy"))
 from check_container_lock import validate_container_lock
-from check_runtime_linkage import BINARIES, parse_linkage, verify_runtime
+from check_runtime_linkage import BINARIES, CPU_BINARIES, parse_linkage, verify_runtime
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,7 +24,7 @@ libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f01ad520000)
 def copy_recipes(tmp_path):
     directory = tmp_path / "deploy"
     directory.mkdir()
-    for name in ("container-lock.json", "Dockerfile.cpu", "Dockerfile.cuda"):
+    for name in ("container-lock.json", "Dockerfile.cpu", "Dockerfile.cuda", "Dockerfile.setup"):
         (directory / name).write_bytes((ROOT / "deploy" / name).read_bytes())
     return json.loads((directory / "container-lock.json").read_text())
 
@@ -95,3 +95,30 @@ def test_native_binary_hashes_and_loader_failure(tmp_path, monkeypatch):
                         subprocess.CompletedProcess(arguments, 0, "libstdc++.so.6 => not found\n", ""))
     with pytest.raises(ValueError, match="unresolved"):
         verify_runtime(tmp_path, build)
+
+
+def test_cpu_controller_linkage_needs_only_exact_cpu_build(tmp_path, monkeypatch):
+    binaries = {}
+    for name in CPU_BINARIES:
+        (tmp_path / name).write_bytes(b"isolated CPU controller fixture")
+        binaries[name] = hashlib.sha256(b"isolated CPU controller fixture").hexdigest()
+    calls = []
+    def loader(arguments, **options):
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, LOADER, "")
+    monkeypatch.setattr(subprocess, "run", loader)
+    build = {"image_kind": "cpu", "hardware_qualified": False, "binaries": binaries, "digest": "b" * 64}
+    assert {row["binary"] for row in verify_runtime(tmp_path, build)["binaries"]} == CPU_BINARIES
+    assert len(calls) == 3
+    for mutation in ("unknown", "cuda", "extra", "qualified"):
+        invalid = copy.deepcopy(build)
+        if mutation == "unknown":
+            invalid["image_kind"] = "setup"
+        elif mutation == "cuda":
+            invalid["image_kind"] = "cuda"
+        elif mutation == "extra":
+            invalid["binaries"]["ds4-server"] = "0" * 64
+        else:
+            invalid["hardware_qualified"] = True
+        with pytest.raises(ValueError, match="exact CPU/CUDA"):
+            verify_runtime(tmp_path, invalid)

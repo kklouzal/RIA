@@ -12,7 +12,7 @@ from .identity import ArtifactError
 
 
 def run_bounded(arguments, *, cwd=None, env=None, timeout=30,
-                max_stdout=1048576, max_stderr=65536, max_rss_bytes=None):
+                max_stdout=1048576, max_stderr=65536, max_rss_bytes=None, cancelled=None):
     if not arguments or any(not isinstance(item, (str, Path)) for item in arguments):
         raise ArtifactError("subprocess requires an explicit native argument list")
     if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0 or
@@ -21,6 +21,12 @@ def run_bounded(arguments, *, cwd=None, env=None, timeout=30,
         raise ArtifactError("invalid subprocess deadline/output bound")
     if max_rss_bytes is not None and (type(max_rss_bytes) is not int or not 0 < max_rss_bytes <= 9007199254740991):
         raise ArtifactError("invalid subprocess RSS bound")
+    if cancelled is not None and not callable(cancelled):
+        raise ArtifactError("subprocess cancellation requires an explicit callback")
+    def check_cancellation():
+        if cancelled is not None and cancelled():
+            raise ArtifactError("owned subprocess cancelled")
+    check_cancellation()
     started = time.monotonic()
     deadline = started + timeout
     process = subprocess.Popen(arguments, cwd=cwd, env=env, stdout=subprocess.PIPE,
@@ -65,6 +71,7 @@ def run_bounded(arguments, *, cwd=None, env=None, timeout=30,
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, (buffer, limit))
             while selector.get_map():
+                check_cancellation()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(arguments, timeout)
@@ -82,6 +89,7 @@ def run_bounded(arguments, *, cwd=None, env=None, timeout=30,
                     if len(buffer) > limit:
                         raise ArtifactError("subprocess output exceeded its admitted bound")
         while process.returncode is None:
+            check_cancellation()
             observe()
             reap()
             remaining = deadline - time.monotonic()

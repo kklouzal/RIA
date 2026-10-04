@@ -10,7 +10,7 @@ machine can have adequate hardware and still lack required test software.
 from .identity import seal
 from .qualification_schema import MATRIX_AXES
 
-SPECIFICATION_SHA256 = "1720ef37b3bf1f561501293823973ef1475f65979d351804f45562fff5ce5767"
+SPECIFICATION_SHA256 = "96966a272739ee708c5b3210327a2d172f6e28be050462cd32c63e42ace4ca8f"
 
 # A gate validator must derive these obligations from specific raw observations
 # and independent oracles. Renaming a metric, adding pass booleans, or authenticating

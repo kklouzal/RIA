@@ -1,0 +1,58 @@
+FROM docker:29.8.2-cli@sha256:b1805116a6a86cc591b5d5f60a910a0715cdcc9d18d866ad68b1457ead25c35c AS docker-cli
+
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS build
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY deploy/ubuntu.sources /etc/apt/ria.sources
+COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
+# All distro packages come from the signed immutable snapshot used by services.
+# hadolint ignore=DL3008
+RUN apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt install -y --no-install-recommends \
+      build-essential libssl-dev libnuma-dev python3 python3-venv ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/RIA
+COPY . .
+RUN python3 -m venv /opt/ria-setup && \
+    /opt/ria-setup/bin/pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r requirements-ria.txt -r requirements-ria-reference.txt && \
+    /opt/ria-setup/bin/python tools/verify_ria.py --source-lock locks/source-lock.json && \
+    make -j2 ria-cpu RIA_CC=cc && \
+    python3 deploy/build_info.py --role cpu --compiler cc --output build/ria/build-info.json
+
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY deploy/ubuntu.sources /etc/apt/ria.sources
+COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
+# hadolint ignore=DL3008
+RUN apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt install -y --no-install-recommends \
+      libssl3t64 libnuma1 libstdc++6 openssl python3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /opt/RIA/bin /usr/share/dwarfstar/licenses
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+COPY --from=build /opt/RIA/bin/ds4ctl /opt/RIA/bin/ds4-expert-server /opt/RIA/bin/ds4-ria-qualify /opt/RIA/bin/
+COPY --from=build /opt/RIA/build/ria/build-info.json /usr/share/dwarfstar/build-info.json
+COPY --from=build /opt/ria-setup/ /opt/ria-setup/
+COPY tools/ /opt/RIA/tools/
+COPY locks/ /opt/RIA/locks/
+COPY deploy/ /opt/RIA/deploy/
+COPY schema/ /opt/RIA/schema/
+COPY LICENSE /usr/share/dwarfstar/licenses/DS4-LICENSE
+COPY third_party/ryu/LICENSE-Apache2 third_party/ryu/LICENSE-Boost /usr/share/dwarfstar/licenses/
+# These checks never contact an Engine, run a model binary main or allocate model
+# state. Versions are checked against the same lock as the pinned CLI stage.
+RUN /opt/ria-setup/bin/python -c 'import json, re, subprocess, sys; lock=json.load(open("/opt/RIA/deploy/container-lock.json")); cli=subprocess.check_output(["docker", "--version"], text=True).strip(); compose=subprocess.check_output(["docker", "compose", "version", "--short"], text=True).strip(); sys.exit(0 if re.fullmatch(r"Docker version " + re.escape(lock["docker_cli_version"]) + r", build [0-9a-f]+", cli) and compose == lock["compose_version"] else "pinned Docker/Compose CLI version mismatch")' && \
+    /opt/ria-setup/bin/python -c 'import importlib.metadata, numpy, sys, tokenizers; sys.exit(0 if numpy.__version__ == importlib.metadata.version("numpy") == "2.5.3" and tokenizers.__version__ == importlib.metadata.version("tokenizers") == "0.23.2" else "pinned native Python dependency version mismatch")' && \
+    /opt/ria-setup/bin/python /opt/RIA/deploy/check_runtime_linkage.py --binary-dir /opt/RIA/bin --build-info /usr/share/dwarfstar/build-info.json --output /usr/share/dwarfstar/runtime-linkage.json && \
+    /opt/ria-setup/bin/python /opt/RIA/tools/verify_ria.py --source-lock /opt/RIA/locks/source-lock.json
+LABEL org.opencontainers.image.source="https://github.com/kklouzal/RIA" \
+      org.opencontainers.image.title="RIA explicit host-authorized setup controller" \
+      org.opencontainers.image.licenses="MIT AND (Apache-2.0 OR BSL-1.0)" \
+      io.ria.role="setup-controller"
+# This administrative controller owns fixed host operations. Its protocol
+# worker drops to UID10001; inference uses the separate non-root role images.
+# hadolint ignore=DL3002
+USER 0:0
+WORKDIR /opt/RIA
+ENTRYPOINT ["/opt/ria-setup/bin/python", "/opt/RIA/tools/setup_ria.py"]
+CMD ["--help"]

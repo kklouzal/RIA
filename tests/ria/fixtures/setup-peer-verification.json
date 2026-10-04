@@ -1,0 +1,870 @@
+{
+  "benchmark_budgets": {
+    "accepted_connection_deadline_seconds": 30,
+    "combined_sampled_rss_bytes": 268435456,
+    "job_byte_quota": 67112960,
+    "payload_bytes": 67108864,
+    "repetitions_per_region": 3,
+    "transfer_deadline_seconds": 60
+  },
+  "benchmark_command": "sudo -n <hash-locked-dev-python> tests/ria/setup_peer_benchmark.py --output build/ria/evidence/setup-peer-benchmark.json",
+  "benchmark_environment": {
+    "cpu_tick_seconds": 0.01,
+    "machine": "aarch64",
+    "openssl": "OpenSSL 3.0.13 30 Jan 2024",
+    "openssl_cli": "OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)",
+    "platform": "Linux-7.0.0-1019-nvidia-aarch64-with-glibc2.39",
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "rfc8785": "0.1.4"
+  },
+  "benchmark_summaries": [
+    {
+      "cache": "cold-advisory",
+      "median_transfer_speedup": 10.37370765605556,
+      "tls_enabled": false,
+      "variants": {
+        "current": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 0.7062908640000001,
+              "max": 0.7062908640000001,
+              "median": 0.705721536,
+              "min": 0.6917416
+            },
+            "combined_peak_rss_bytes": 87244800,
+            "fetch_s": {
+              "empirical_p95": 0.36569670296739787,
+              "max": 0.36569670296739787,
+              "median": 0.3622565699624829,
+              "min": 0.35157046699896455
+            },
+            "register_s": {
+              "empirical_p95": 0.06227286398643628,
+              "max": 0.06227286398643628,
+              "median": 0.062200071988627315,
+              "min": 0.059654586017131805
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.003384504991117865,
+              "max": 0.003384504991117865,
+              "median": 0.003380376030690968,
+              "min": 0.003375639033038169
+            },
+            "startup_s": {
+              "empirical_p95": 0.053176746994722635,
+              "max": 0.053176746994722635,
+              "median": 0.045389517035800964,
+              "min": 0.044386201014276594
+            },
+            "total_s": {
+              "empirical_p95": 0.7978494419949129,
+              "max": 0.7978494419949129,
+              "median": 0.7921752959955484,
+              "min": 0.7702228809939697
+            },
+            "upload_s": {
+              "empirical_p95": 0.37026414001593366,
+              "max": 0.37026414001593366,
+              "median": 0.36995266703888774,
+              "min": 0.3563795500085689
+            }
+          },
+          "sample_count": 3
+        },
+        "original512KiB": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 11.701065887999999,
+              "max": 11.701065887999999,
+              "median": 7.963105248000001,
+              "min": 7.7635497760000005
+            },
+            "combined_peak_rss_bytes": 59961344,
+            "fetch_s": {
+              "empirical_p95": 4.861035383015405,
+              "max": 4.861035383015405,
+              "median": 3.7860262969625182,
+              "min": 3.6858736040303484
+            },
+            "register_s": {
+              "empirical_p95": 0.11036858102306724,
+              "max": 0.11036858102306724,
+              "median": 0.07221191201824695,
+              "min": 0.07201724400511011
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.0011752990540117025,
+              "max": 0.0011752990540117025,
+              "median": 0.0011559869744814932,
+              "min": 0.0011471069883555174
+            },
+            "startup_s": {
+              "empirical_p95": 0.041862114041578025,
+              "max": 0.041862114041578025,
+              "median": 0.039868008985649794,
+              "min": 0.033228685962967575
+            },
+            "total_s": {
+              "empirical_p95": 11.863291972025763,
+              "max": 11.863291972025763,
+              "median": 8.217794933007099,
+              "min": 8.112321172025986
+            },
+            "upload_s": {
+              "empirical_p95": 6.930239345005248,
+              "max": 6.930239345005248,
+              "median": 4.3595567240263335,
+              "min": 4.31607898697257
+            }
+          },
+          "sample_count": 3
+        }
+      }
+    },
+    {
+      "cache": "warm",
+      "median_transfer_speedup": 14.445315985420823,
+      "tls_enabled": false,
+      "variants": {
+        "current": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 0.6924522399999999,
+              "max": 0.6924522399999999,
+              "median": 0.676654256,
+              "min": 0.6414267359999999
+            },
+            "combined_peak_rss_bytes": 91074560,
+            "fetch_s": {
+              "empirical_p95": 0.3519610989606008,
+              "max": 0.3519610989606008,
+              "median": 0.3401386319892481,
+              "min": 0.3391835250076838
+            },
+            "register_s": {
+              "empirical_p95": 0.033694359997753054,
+              "max": 0.033694359997753054,
+              "median": 0.03357847000006586,
+              "min": 0.03282727597979829
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.0033725050161592662,
+              "max": 0.0033725050161592662,
+              "median": 0.0033631270052865148,
+              "min": 0.0033453850192017853
+            },
+            "startup_s": {
+              "empirical_p95": 0.04555424296995625,
+              "max": 0.04555424296995625,
+              "median": 0.04540059599094093,
+              "min": 0.04323962505441159
+            },
+            "total_s": {
+              "empirical_p95": 0.7554492809576914,
+              "max": 0.7554492809576914,
+              "median": 0.7501142819528468,
+              "min": 0.721762963978108
+            },
+            "upload_s": {
+              "empirical_p95": 0.3826872859499417,
+              "max": 0.3826872859499417,
+              "median": 0.36445882299449295,
+              "min": 0.34879705600906163
+            }
+          },
+          "sample_count": 3
+        },
+        "original512KiB": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 13.051709840000001,
+              "max": 13.051709840000001,
+              "median": 10.750360688,
+              "min": 7.983500944
+            },
+            "combined_peak_rss_bytes": 58261504,
+            "fetch_s": {
+              "empirical_p95": 6.083645141974557,
+              "max": 6.083645141974557,
+              "median": 4.174427833000664,
+              "min": 3.794554977968801
+            },
+            "register_s": {
+              "empirical_p95": 0.031270820007193834,
+              "max": 0.031270820007193834,
+              "median": 0.031144262989982963,
+              "min": 0.03005082596791908
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.003220071957912296,
+              "max": 0.003220071957912296,
+              "median": 0.003220041049644351,
+              "min": 0.001319635019171983
+            },
+            "startup_s": {
+              "empirical_p95": 0.04181183502078056,
+              "max": 0.04181183502078056,
+              "median": 0.04107605398166925,
+              "min": 0.04052067396696657
+            },
+            "total_s": {
+              "empirical_p95": 12.992693025968038,
+              "max": 12.992693025968038,
+              "median": 10.83563782798592,
+              "min": 8.191858041973319
+            },
+            "upload_s": {
+              "empirical_p95": 6.877903621003497,
+              "max": 6.877903621003497,
+              "median": 6.631159169017337,
+              "min": 4.366032243997324
+            }
+          },
+          "sample_count": 3
+        }
+      }
+    },
+    {
+      "cache": "cold-advisory",
+      "median_transfer_speedup": 12.460008062963452,
+      "tls_enabled": true,
+      "variants": {
+        "current": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 0.77884672,
+              "max": 0.77884672,
+              "median": 0.765349984,
+              "min": 0.723690672
+            },
+            "combined_peak_rss_bytes": 91045888,
+            "fetch_s": {
+              "empirical_p95": 0.38084538595285267,
+              "max": 0.38084538595285267,
+              "median": 0.3725401679985225,
+              "min": 0.3686970340204425
+            },
+            "register_s": {
+              "empirical_p95": 0.08000994101166725,
+              "max": 0.08000994101166725,
+              "median": 0.06310684303753078,
+              "min": 0.05842703999951482
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.003527095017489046,
+              "max": 0.003527095017489046,
+              "median": 0.00337314500939101,
+              "min": 0.003353112027980387
+            },
+            "startup_s": {
+              "empirical_p95": 0.08409656403819099,
+              "max": 0.08409656403819099,
+              "median": 0.08234925800934434,
+              "min": 0.06989236403023824
+            },
+            "total_s": {
+              "empirical_p95": 0.8259297540062107,
+              "max": 0.8259297540062107,
+              "median": 0.8209715590346605,
+              "min": 0.820067998021841
+            },
+            "upload_s": {
+              "empirical_p95": 0.3949625460081734,
+              "max": 0.3949625460081734,
+              "median": 0.377019330044277,
+              "min": 0.3713610229897313
+            }
+          },
+          "sample_count": 3
+        },
+        "original512KiB": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 11.106824352,
+              "max": 11.106824352,
+              "median": 10.206027888,
+              "min": 9.61336712
+            },
+            "combined_peak_rss_bytes": 60850176,
+            "fetch_s": {
+              "empirical_p95": 5.00888743402902,
+              "max": 5.00888743402902,
+              "median": 5.002645037020557,
+              "min": 4.6140967209939845
+            },
+            "register_s": {
+              "empirical_p95": 0.11050896602682769,
+              "max": 0.11050896602682769,
+              "median": 0.07142875500721857,
+              "min": 0.05798098602099344
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.0011517299572005868,
+              "max": 0.0011517299572005868,
+              "median": 0.0011435230262577534,
+              "min": 0.0011413629981689155
+            },
+            "startup_s": {
+              "empirical_p95": 0.08012081094784662,
+              "max": 0.08012081094784662,
+              "median": 0.0772936639841646,
+              "min": 0.07020325597841293
+            },
+            "total_s": {
+              "empirical_p95": 11.239220710995141,
+              "max": 11.239220710995141,
+              "median": 10.229312245035544,
+              "min": 9.738490714051295
+            },
+            "upload_s": {
+              "empirical_p95": 6.514615023974329,
+              "max": 6.514615023974329,
+              "median": 5.155238453007769,
+              "min": 4.671622294001281
+            }
+          },
+          "sample_count": 3
+        }
+      }
+    },
+    {
+      "cache": "warm",
+      "median_transfer_speedup": 11.245682240779864,
+      "tls_enabled": true,
+      "variants": {
+        "current": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 0.818042752,
+              "max": 0.818042752,
+              "median": 0.755990976,
+              "min": 0.712671792
+            },
+            "combined_peak_rss_bytes": 96604160,
+            "fetch_s": {
+              "empirical_p95": 0.3869312829920091,
+              "max": 0.3869312829920091,
+              "median": 0.37462322000646964,
+              "min": 0.37356865499168634
+            },
+            "register_s": {
+              "empirical_p95": 0.034017455007415265,
+              "max": 0.034017455007415265,
+              "median": 0.03269616101169959,
+              "min": 0.03265669202664867
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.003358792047947645,
+              "max": 0.003358792047947645,
+              "median": 0.003234872012399137,
+              "min": 0.0012222270015627146
+            },
+            "startup_s": {
+              "empirical_p95": 0.08448915503686294,
+              "max": 0.08448915503686294,
+              "median": 0.08181132999015972,
+              "min": 0.08049777295673266
+            },
+            "total_s": {
+              "empirical_p95": 0.7909329939866439,
+              "max": 0.7909329939866439,
+              "median": 0.7797606540261768,
+              "min": 0.7559044729568996
+            },
+            "upload_s": {
+              "empirical_p95": 0.3713450189679861,
+              "max": 0.3713450189679861,
+              "median": 0.3711199790122919,
+              "min": 0.3496396569535136
+            }
+          },
+          "sample_count": 3
+        },
+        "original512KiB": {
+          "metrics": {
+            "combined_cpu_s": {
+              "empirical_p95": 9.727903055999999,
+              "max": 9.727903055999999,
+              "median": 8.582465504,
+              "min": 8.559265168
+            },
+            "combined_peak_rss_bytes": 61325312,
+            "fetch_s": {
+              "empirical_p95": 4.6069507919601165,
+              "max": 4.6069507919601165,
+              "median": 4.086013146035839,
+              "min": 4.072287816030439
+            },
+            "register_s": {
+              "empirical_p95": 0.036100252997130156,
+              "max": 0.036100252997130156,
+              "median": 0.030648995947558433,
+              "min": 0.02989525400334969
+            },
+            "shutdown_s": {
+              "empirical_p95": 0.0013270589988678694,
+              "max": 0.0013270589988678694,
+              "median": 0.0013162120012566447,
+              "min": 0.001152580021880567
+            },
+            "startup_s": {
+              "empirical_p95": 0.077841569960583,
+              "max": 0.077841569960583,
+              "median": 0.07135149597888812,
+              "min": 0.06487278500571847
+            },
+            "total_s": {
+              "empirical_p95": 9.788030628988054,
+              "max": 9.788030628988054,
+              "median": 8.768940539041068,
+              "min": 8.757251001952682
+            },
+            "upload_s": {
+              "empirical_p95": 5.144979584030807,
+              "max": 5.144979584030807,
+              "median": 4.66675746900728,
+              "min": 4.640588859969284
+            }
+          },
+          "sample_count": 3
+        }
+      }
+    }
+  ],
+  "candidate_outcomes": [
+    {
+      "candidate": "4MiB chunks",
+      "outcome": "retained; bounded 4MiB frame reduces dispatch at 8MiB control ceiling; integrated positive comparison retained"
+    },
+    {
+      "candidate": "verified worker nonce and SSLContext cache",
+      "outcome": "retained; no nonce refresh/retry/fallback; fresh sockets recheck pinned leaf"
+    },
+    {
+      "candidate": "fsync only completed files and atomic publication",
+      "outcome": "retained; chunk ACK lifetime is current controller; crash partial fails closed, no claim of crash-durable chunk acknowledgement"
+    },
+    {
+      "candidate": "four-response transfer connection burst",
+      "outcome": "retained with original accepted connection deadline; fresh-only local TLS median 0.869s/CPU 0.829s versus burst 0.802s/CPU 0.757s; plain wall time overlaps uncertainty"
+    },
+    {
+      "candidate": "MAC-bound raw binary tails",
+      "outcome": "retained; bounded scalar metadata remains JCS; full tailSHA/size checked atHTTP+broker boundaries; removed dominating base64/full-byte JSON scan"
+    },
+    {
+      "candidate": "server TCP_NODELAY",
+      "outcome": "retained; raw burst local medians 1.255s plain/1.536s TLS to 0.771/0.802s; budgets/correctness retained"
+    },
+    {
+      "candidate": "remove second unchanged tailSHA inside clientcall",
+      "outcome": "retained; verified immutable bytes attach under operation lock after HTTP validation; warm wall time improved 3 of 3 pairs in both modes; cold/CPU differences overlap noise; boundary SHA checks retained"
+    }
+  ],
+  "evidence": {
+    "build/ria/evidence/setup-peer-benchmark-before-final-review.json": {
+      "bytes": 59690,
+      "sha256": "92600f5a50cde42cd61f84ec81473afd94ba7cb4937c63bdad14a12ae782a2e1"
+    },
+    "build/ria/evidence/setup-peer-benchmark-before-ownership.json": {
+      "bytes": 59568,
+      "sha256": "d11e8690f4e606c6206d31108d6f8f933a93ec172c35e04347b37d2a453c276b"
+    },
+    "build/ria/evidence/setup-peer-benchmark.json": {
+      "bytes": 59632,
+      "sha256": "6fe903b512af7641d3cb9223426132d2202433ea54ac5c99d904266f2f504631"
+    },
+    "build/ria/evidence/setup-peer-benchmark.log": {
+      "bytes": 36456,
+      "sha256": "e0c3b87e24aef00cf7d1c69fe6876fda6abc9ba50baca1db6a5efa6a381e8fac"
+    },
+    "build/ria/evidence/setup-peer-benchmark.stdout.log": {
+      "bytes": 45,
+      "sha256": "9acb1701037f53deb1602c8f5bc36f26ac39012c1db8ef3a7dfde0cdf5b72d6f"
+    },
+    "build/ria/evidence/setup-peer-final-establishment-health.log": {
+      "bytes": 2525,
+      "sha256": "7b0a47ae82accc7d878f7c3bb26a100900d35388d553369a6caa516b8ec4c6bb"
+    },
+    "build/ria/evidence/setup-peer-final-focused.log": {
+      "bytes": 180,
+      "sha256": "09f2ea3889ca254a95dc69328d0ff53fd293df04d004cbadf0de9ab7ca353507"
+    },
+    "build/ria/evidence/setup-peer-final-ownership.log": {
+      "bytes": 180,
+      "sha256": "df32aca9d851e868175937f93741b9e52e27f93938beeb9c98394e6e67ec9d9c"
+    },
+    "build/ria/evidence/setup-peer-final-unprivileged.log": {
+      "bytes": 191,
+      "sha256": "a0d140d5da07a1c099725dae83ea33645d41e0554d35a9d7371d50e6a2cee19b"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline.json": {
+      "bytes": 4697,
+      "sha256": "9800254d41e01dad3ec707b880c760e88ee4be19a5159c74ba23f242e550ab8f"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline.log": {
+      "bytes": 3813,
+      "sha256": "b3dbda64687d24ac90f8dabeb1873f5408f6e7f6267c3c005de9ddbc2dc8b573"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline/tools/ria/setup_limits.py": {
+      "bytes": 416,
+      "sha256": "76a7ccedc363d387014253d10a04e5632620c6e8e3dc67112946b0c1a29cd17a"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline/tools/ria/setup_peer.py": {
+      "bytes": 54230,
+      "sha256": "6997837cade224bb6fda79f1a9e5d6f756f4d287a5c0ba11a2d270dc116f594f"
+    },
+    "build/ria/evidence/setup-peer-performance/baseline/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/benchmark-verified-source.py": {
+      "bytes": 20759,
+      "sha256": "4f84eb5b9e5e786e262e995b83fdd334a64af733d834dd6fca9ec86eccddd09f"
+    },
+    "build/ria/evidence/setup-peer-performance/burst.json": {
+      "bytes": 6301,
+      "sha256": "7f8a36efcd631ca1a25408bd6a5fc7d6d234cf9d2350ac2291d8f24b9ba4724b"
+    },
+    "build/ria/evidence/setup-peer-performance/burst.log": {
+      "bytes": 5336,
+      "sha256": "6219f774507865e370990192931cc84d0e0c6edb418829dcd408beea327054b3"
+    },
+    "build/ria/evidence/setup-peer-performance/burst/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/burst/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/burst/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/burst/tools/ria/setup_limits.py": {
+      "bytes": 414,
+      "sha256": "a7a0e87e3a06e502ff5296fd06cd2a6cd36e84ce11fc2f076c314b6118d58c15"
+    },
+    "build/ria/evidence/setup-peer-performance/burst/tools/ria/setup_peer.py": {
+      "bytes": 58027,
+      "sha256": "4a8533e2c86bc6abfeb3b48a647ced2302c16026279295d5b27d025a74c32339"
+    },
+    "build/ria/evidence/setup-peer-performance/burst/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/cached.json": {
+      "bytes": 6248,
+      "sha256": "fce6dc17b641491ad62bc88e274bfc4e5ea15200cfbe86f700da6ef3f425fa09"
+    },
+    "build/ria/evidence/setup-peer-performance/cached.log": {
+      "bytes": 5282,
+      "sha256": "9ceac8a1d77e013836ecd712195f9ec40359a0ee1e8b9c3f1c1e1122ddc614cc"
+    },
+    "build/ria/evidence/setup-peer-performance/cached/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/cached/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/cached/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/cached/tools/ria/setup_limits.py": {
+      "bytes": 414,
+      "sha256": "a7a0e87e3a06e502ff5296fd06cd2a6cd36e84ce11fc2f076c314b6118d58c15"
+    },
+    "build/ria/evidence/setup-peer-performance/cached/tools/ria/setup_peer.py": {
+      "bytes": 54216,
+      "sha256": "461e994eb9ade431628ddbbc2f604a94e26ef3f681901efb895c6b21ba3fad1a"
+    },
+    "build/ria/evidence/setup-peer-performance/cached/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m.json": {
+      "bytes": 6292,
+      "sha256": "e876f44debd4814ade3a296769e7e969e5068bcf50c606fe50eebb40e10b7f04"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m.log": {
+      "bytes": 5325,
+      "sha256": "7d5c86868a6dac133cf7281391056a56342ed022a112f23c35d3a3f4956a2d99"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m/tools/ria/setup_limits.py": {
+      "bytes": 414,
+      "sha256": "a7a0e87e3a06e502ff5296fd06cd2a6cd36e84ce11fc2f076c314b6118d58c15"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m/tools/ria/setup_peer.py": {
+      "bytes": 54230,
+      "sha256": "6997837cade224bb6fda79f1a9e5d6f756f4d287a5c0ba11a2d270dc116f594f"
+    },
+    "build/ria/evidence/setup-peer-performance/chunk4m/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/compare_verified.py": {
+      "bytes": 1026,
+      "sha256": "037d4c7a94b161cc4ac22ba769d600be182872c0ea7da6b76aab035e2aab0e88"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync.json": {
+      "bytes": 6324,
+      "sha256": "019342a1862de7d28140dd0aaf123a626b27d2049f20608b1a2e818876d73592"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync.log": {
+      "bytes": 5355,
+      "sha256": "c140a30f7660057151bd68c74e8ce5a5e1915bedd773704f538030672a1310e6"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync/tools/ria/setup_limits.py": {
+      "bytes": 414,
+      "sha256": "a7a0e87e3a06e502ff5296fd06cd2a6cd36e84ce11fc2f076c314b6118d58c15"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync/tools/ria/setup_peer.py": {
+      "bytes": 54174,
+      "sha256": "7d2a37ca0d212d1ec14d5b9bb16882f2398c2c81d6a28b9cbd47e301a6fcf312"
+    },
+    "build/ria/evidence/setup-peer-performance/file-sync/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/measure-original.py": {
+      "bytes": 5345,
+      "sha256": "6123d5773a70f58e338815cd2ef77acc4c0c6dd0fd3a235b5e631523fd492a71"
+    },
+    "build/ria/evidence/setup-peer-performance/measure.py": {
+      "bytes": 6148,
+      "sha256": "d0a3cac5bcae45533afa2053aa3e755ae195a758642d89c3293fbc04c4d217b2"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst.json": {
+      "bytes": 6392,
+      "sha256": "593d713d3c11588fd991c8821c4c6fa8f10979c9d5463ddbc5e6e5751eb44cda"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst.log": {
+      "bytes": 5423,
+      "sha256": "ffb8010ce5e4e25b589e30df3cae03dcc7d8f0d7724baf50bc2cc724330a1fe2"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst/tools/ria/setup_limits.py": {
+      "bytes": 444,
+      "sha256": "c941e12cb930b52acaadfcd6b170bf6f99e33622bba45e0e1e724d668caf2d3b"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst/tools/ria/setup_peer.py": {
+      "bytes": 70431,
+      "sha256": "3f4815a88a895e53152501354bf2a7537b334929b70d3662d1e481b0b006a473"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-burst/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh.json": {
+      "bytes": 6370,
+      "sha256": "4c5a87324bee87968aa2267078971c7c754271820f9ddbf619d29901f2d7ceab"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh.log": {
+      "bytes": 5401,
+      "sha256": "d00ecda78148015dee4481f8371cbad97368afa4a4bcf34aa73a892fda782d8e"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh/tools/ria/setup_limits.py": {
+      "bytes": 444,
+      "sha256": "c941e12cb930b52acaadfcd6b170bf6f99e33622bba45e0e1e724d668caf2d3b"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh/tools/ria/setup_peer.py": {
+      "bytes": 70471,
+      "sha256": "1ea97d359c85225c0fd7c08904889349df8252de7f5a34c6023573074d0ebfe9"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-fresh/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay.json": {
+      "bytes": 6312,
+      "sha256": "0e493475f07eb2232ae4dcf9ed46958574c72e412103a4bda905eecf88d3017f"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay.log": {
+      "bytes": 5341,
+      "sha256": "ca5e4d65c01c78797396c7a008dcbbf08fe6ab14e53e4c471db6807dc067d7e3"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay/tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay/tools/ria/setup_limits.py": {
+      "bytes": 444,
+      "sha256": "c941e12cb930b52acaadfcd6b170bf6f99e33622bba45e0e1e724d668caf2d3b"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay/tools/ria/setup_peer.py": {
+      "bytes": 70470,
+      "sha256": "8fd89e9fff9f11b665e9042713fa243361968e7dff1238e6e46d8cf9c52141b1"
+    },
+    "build/ria/evidence/setup-peer-performance/raw-nodelay/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/verified-before/tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "build/ria/evidence/setup-peer-performance/verified-before/tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "build/ria/evidence/setup-peer-performance/verified-before/tools/ria/setup_journal.py": {
+      "bytes": 6714,
+      "sha256": "eb661a0d76b28480a962624a283cad6896fc51d47728fb757f211baa8ed1feeb"
+    },
+    "build/ria/evidence/setup-peer-performance/verified-before/tools/ria/setup_limits.py": {
+      "bytes": 444,
+      "sha256": "c941e12cb930b52acaadfcd6b170bf6f99e33622bba45e0e1e724d668caf2d3b"
+    },
+    "build/ria/evidence/setup-peer-performance/verified-before/tools/ria/setup_peer.py": {
+      "bytes": 76388,
+      "sha256": "147813e65a9418ea9d4ff070b2f146359ac99df79c4649a8ea64e9cc5359fea0"
+    },
+    "build/ria/evidence/setup-peer-performance/verified-before/tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    },
+    "build/ria/evidence/setup-peer-performance/verified.json": {
+      "bytes": 37180,
+      "sha256": "945d249b861bd915d193e9896ced4781b6b6c0b6fa4080e33739779e90b253c9"
+    },
+    "build/ria/evidence/setup-peer-performance/verified.log": {
+      "bytes": 36968,
+      "sha256": "365654e5e499465c81bd6b43b79bc0f59f4a1882ed88742872f45682041cd5ed"
+    }
+  },
+  "functional_checks": {
+    "privileged": "107 passed; real UID/GID10001 worker, empty groups, no capabilities/no_new_privs; plaintext and actual TLS sockets; -Werror",
+    "static": "scoped Ruff format/check and py_compile passed",
+    "unprivileged": "61 passed,46 expected privileged-worker skips"
+  },
+  "limits": [
+    "Local aarch64 mechanism/e2e softwarefixture evidence only; hosted amd64 run remains required and unclaimed.",
+    "localhost software only; warm/cold-advisory cache;5ms sampled RSS can miss shorter peaks; CPU includes recorded sampler overhead and quantized worker ticks; balanced before/after order; small samples cannot establish true p95/p99 or physical remote-model/link performance",
+    "Filesystem/foreign-operation cleanup retains existing containment; no full physical shutdown deadline claim.",
+    "Source-only original512KiB archive is a hash-locked test oracle; no production fallback.",
+    "Ignored historical failed deadline guard log is retained as failure evidence; superseded by final 107-case pass."
+  ],
+  "purpose": "Source/evidence checkpoint for bounded authenticated setup transport; never physical model/network/GPU qualification.",
+  "schema_revision": 1,
+  "source": {
+    "requirements-ria-dev.txt": {
+      "bytes": 1155,
+      "sha256": "1a826cfd3a055b920e4e1734202944aa73a7fff65f60c10effb9f2ca17cddaf2"
+    },
+    "requirements-ria.txt": {
+      "bytes": 1591,
+      "sha256": "d83e95a7bedc803bfa8a3d388933087c19ee1887878a104d028dd294df5d951c"
+    },
+    "tests/ria/fixtures/setup-peer-baseline.json": {
+      "bytes": 1247,
+      "sha256": "15260f1580ae304219d6bbc63a6bfec8398644050c663419ad8a25465a17b05f"
+    },
+    "tests/ria/fixtures/setup-peer-baseline.tar.gz": {
+      "bytes": 20519,
+      "sha256": "eab44cad69644976806cefcfd1db544d6cc34e2016637ab335a10a5c418828e2"
+    },
+    "tests/ria/setup_peer_benchmark.py": {
+      "bytes": 22086,
+      "sha256": "631c375602de9d3bbaaebb9526a258541ab7f3f745c60d26c3f695dcbddc6813"
+    },
+    "tests/ria/test_setup_peer.py": {
+      "bytes": 55638,
+      "sha256": "06277a77cb7f9037fac231abe6c464379f472c8fe458c5a6f988f90a5cb1f185"
+    },
+    "tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "tools/ria/setup_journal.py": {
+      "bytes": 6714,
+      "sha256": "eb661a0d76b28480a962624a283cad6896fc51d47728fb757f211baa8ed1feeb"
+    },
+    "tools/ria/setup_limits.py": {
+      "bytes": 444,
+      "sha256": "c941e12cb930b52acaadfcd6b170bf6f99e33622bba45e0e1e724d668caf2d3b"
+    },
+    "tools/ria/setup_peer.py": {
+      "bytes": 79356,
+      "sha256": "cc7cc5bc2da4541ea9a70030492d89412084b4892724c39ec243c8c525c4e634"
+    },
+    "tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    }
+  }
+}

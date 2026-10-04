@@ -36,8 +36,17 @@ def validate_container_lock(root):
                 raise ValueError("missing immutable amd64 registry identity")
     if metadata["inherited_configuration"]["environment"]["CUDA_VERSION"] != version:
         raise ValueError("base configuration has another CUDA SDK version")
+    cli, separator, cli_sha = lock["docker_cli"].partition("@")
+    cli_metadata = lock["docker_cli_registry_verification"]
+    if not separator or cli != "docker:" + lock["docker_cli_version"] + "-cli" or not SHA.fullmatch(cli_sha) or (
+            cli_metadata["index_digest"] != cli_sha or cli_metadata["config"]["architecture"] != "amd64"):
+        raise ValueError("setup Docker CLI differs from its verified immutable amd64 input")
+    cli_env = dict(entry.split("=", 1) for entry in cli_metadata["config"]["config"]["Env"])
+    if (cli_env["DOCKER_VERSION"], cli_env["DOCKER_COMPOSE_VERSION"]) != (lock["docker_cli_version"], lock["compose_version"]):
+        raise ValueError("setup Docker/Compose version differs from verified input")
     for kind, expected in (("cpu", [lock["cpu_base"], lock["cpu_base"]]),
-                           ("cuda", [lock["cuda_devel"], lock["cuda_runtime"]])):
+                           ("cuda", [lock["cuda_devel"], lock["cuda_runtime"]]),
+                           ("setup", [lock["docker_cli"], lock["cpu_base"], lock["cpu_base"]])):
         recipe = (root / f"deploy/Dockerfile.{kind}").read_text()
         stages = re.findall(r"^FROM\s+(\S+)(?:\s+AS\s+\S+)?\s*$", recipe, re.M)
         external = [stage for stage in stages if ":" in stage or "/" in stage]
@@ -47,11 +56,14 @@ def validate_container_lock(root):
             raise ValueError("CPU image must retain its CUDA-free Ubuntu base")
         if "NVIDIA_DISABLE_REQUIRE" in recipe:
             raise ValueError("container recipe must not bypass NVIDIA driver constraints")
-        if not re.search(r"^ENTRYPOINT \[\"/usr/local/bin/ds4-(?:server|expert-server)\"\]$", recipe, re.M):
+        if kind == "setup":
+            if not re.search(r'^ENTRYPOINT \["/opt/ria-setup/bin/python", "/opt/RIA/tools/setup_ria.py"\]$', recipe, re.M):
+                raise ValueError("setup image must own its explicit administrative entrypoint")
+        elif not re.search(r"^ENTRYPOINT \[\"/usr/local/bin/ds4-(?:server|expert-server)\"\]$", recipe, re.M):
             raise ValueError("RIA must own its native entrypoint")
     return lock
 
 
 if __name__ == "__main__":
     validate_container_lock(Path(__file__).resolve().parents[1])
-    print("Immutable CPU/NGC CUDA recipes, SDK versions and registry identities agree")
+    print("Immutable CPU/NGC CUDA/setup recipes, SDK/CLI versions and registry identities agree")

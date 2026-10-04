@@ -24,6 +24,7 @@ __pycache__
 **/*.d
 **/*.gguf
 **/*.safetensors
+!locks/derived/engram-metadata.safetensors
 **/*.ckpt
 **/*.pt
 **/*.pth

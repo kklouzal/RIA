@@ -6,6 +6,7 @@ This fork of [antirez/ds4](https://github.com/antirez/ds4) implements the native
 
 This is the deployment runbook for **RIA safetensors containers**. The [original DwarfStar documentation](#original-dwarfstar-documentation) below describes separate donor GGUF/SSD paths.
 
+- [Automated container setup](#automated-container-setup)
 - [Machines, images and prerequisites](#machines-images-and-prerequisites)
 - [Host tools and directory layout](#host-tools-and-directory-layout)
 - [Prepare and transfer the model](#prepare-and-transfer-the-model)
@@ -18,6 +19,14 @@ This is the deployment runbook for **RIA safetensors containers**. The [original
 - [Operate, drain and reconfigure](#operate-drain-and-reconfigure)
 - [Troubleshooting](#troubleshooting)
 - [Qualification limits](#qualification-limits)
+
+## Automated container setup
+
+The recommended workflow uses **one `ria-setup` administrative container per host**. Fill generated role settings and accepted qualification limits, start the expert, transfer its private invitation once, then start the client. The containers coordinate preparation or opt-in pinned acquisition, compact client transfer, automatic TLS credentials (or explicit certificate-free trusted-network mode), API token, host/image discovery, placement/grants, preregistration, supervised probes/four fixtures, complete evidence exchange, initial admission and ordered service startup. The native services keep running after both setup controllers exit.
+
+Follow the [complete automated setup guide](docs/ria-container-setup.md) for templates, every configuration group, canonical mounts, CPU/CUDA launches, flags, status, shutdown and recovery. Host driver/Engine installation and reviewed resource/numerical/workload policies remain explicit. The setup image contains its Python/preparation/native inventory/Docker/Compose dependencies; the host build/tools and manual file transfer steps below belong to the **advanced manual workflow**.
+
+The new setup image and matching role images are awaiting the final automated-build publication for this source change. The existing immutable CPU/CUDA pins below remain valid for the preceding manual workflow and do not contain this automation. This paragraph will be replaced with actual verified matching three-image pins after CI completes. No setup or image build establishes final release qualification; the existing software/hardware limits below remain.
 
 ## Machines, images and prerequisites
 
@@ -38,7 +47,7 @@ CUDA_IMAGE='ghcr.io/kklouzal/ria-cuda@sha256:dceb8971fa01fcdf474624cbafe87e3eec6
 
 Both are publicly pullable. [The successful build/check run](https://github.com/kklouzal/RIA/actions/runs/37227441606), [publication identities](locks/verification/ngc-cuda-publication.json) and [handoff](docs/ria-handoff.md) record the verification scope. GHCR images include build metadata and published SBOM/provenance descriptors; descriptor presence does not establish verified attestation contents or signatures. Tags such as `latest` are not accepted deployment identities. Future images need their own build identities and fresh admission evidence.
 
-Install a **rootful Docker Engine**, its **Compose v2 plugin**, and a host with **cgroup v2** using the [official Docker installation instructions](https://docs.docker.com/engine/install/). This orchestration uses the local `/var/run/docker.sock`; rootless, remote Docker contexts and Swarm are outside this path. Record actual Engine/Compose/kernel versions, rather than supplying example version strings.
+Install a **rootful Docker Engine**, its **Compose plugin**, and a host with **cgroup v2** using the [official Docker installation instructions](https://docs.docker.com/engine/install/). This orchestration uses the local `/var/run/docker.sock`; rootless, remote Docker contexts and Swarm are outside this path. Record actual Engine/Compose/kernel versions, rather than supplying example version strings. The automated setup image supplies its own pinned Docker/Compose client tools.
 
 On each CUDA host, install an NVIDIA driver that supports the selected image's CUDA runtime, then NVIDIA Container Toolkit using its [official installation instructions](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Configure the rootful Docker runtime before recording the host baseline:
 

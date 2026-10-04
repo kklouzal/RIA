@@ -74,10 +74,10 @@ def controlled_environment():
     return {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
 
 
-def _run(arguments, deadline_ms, *, cwd=None):
+def _run(arguments, deadline_ms, *, cwd=None, cancelled=None):
     from .process import run_bounded
     try:
-        result = run_bounded(arguments, timeout=deadline_ms / 1000, cwd=cwd,
+        result = run_bounded(arguments, timeout=deadline_ms / 1000, cwd=cwd, cancelled=cancelled,
                              env=controlled_environment(), max_stdout=16 << 20)
     except subprocess.TimeoutExpired as exc:
         raise ArtifactError("command deadline exceeded") from exc
@@ -720,8 +720,8 @@ def launch(request, directory, *, runner=_run):
         return _launch(request, directory, runner=runner)
 
 
-def _launch(request, directory, *, runner=_run):
-    """Recompute the reviewed Compose model in a controlled environment, then start."""
+def verify_deployment_files(request, directory):
+    """Verify the complete frozen admission package without starting a process."""
     validate("deployment-request", request)
     directory = Path(directory).resolve(strict=True)
     lock = read_json(directory / "deployment-lock.json")
@@ -750,6 +750,14 @@ def _launch(request, directory, *, runner=_run):
     env_file = directory / (role + ".env")
     if env_file.read_bytes() != environment_bytes(request, directory):
         raise ArtifactError("resolved environment file changed")
+    return lock, env_file
+
+
+def _launch(request, directory, *, runner=_run):
+    """Recompute the reviewed Compose model in a controlled environment, then start."""
+    directory = Path(directory).resolve(strict=True)
+    lock, env_file = verify_deployment_files(request, directory)
+    role = request["planning_request"]["role"]
     from .host import revalidate_host_report
     revalidate_host_report(read_json(directory / "host-report.json"))
     from .identity import loads

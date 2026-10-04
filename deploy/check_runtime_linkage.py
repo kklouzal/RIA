@@ -10,6 +10,7 @@ import subprocess
 
 
 BINARIES = {"ds4ctl", "ds4-expert-server", "ds4-ria-qualify", "ds4", "ds4-server", "ds4-eval"}
+CPU_BINARIES = {"ds4ctl", "ds4-expert-server", "ds4-ria-qualify"}
 
 
 def parse_linkage(output):
@@ -39,9 +40,10 @@ def parse_linkage(output):
 
 
 def verify_runtime(binary_dir, build_info):
-    if (build_info["image_kind"] != "cuda" or build_info["hardware_qualified"] is not False or
-            set(build_info["binaries"]) != BINARIES):
-        raise ValueError("runtime linkage requires exact CUDA build provenance")
+    expected_binaries = {"cuda": BINARIES, "cpu": CPU_BINARIES}.get(build_info["image_kind"])
+    if (expected_binaries is None or build_info["hardware_qualified"] is not False or
+            set(build_info["binaries"]) != expected_binaries):
+        raise ValueError("runtime linkage requires exact CPU/CUDA build provenance")
     checks = []
     for name, expected in sorted(build_info["binaries"].items()):
         path = binary_dir / name
@@ -77,9 +79,10 @@ def main():
     data = args.build_info.read_bytes()
     if len(data) > 1 << 20:
         raise ValueError("build metadata exceeds its bound")
-    result = verify_runtime(args.binary_dir, json.loads(data))
+    build_info = json.loads(data)
+    result = verify_runtime(args.binary_dir, build_info)
     args.output.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
-    print("All six native CUDA executables resolve runtime image libraries without GPU execution")
+    print(f"All {len(result['binaries'])} native {build_info['image_kind']} executables resolve runtime image libraries without GPU execution")
 
 
 if __name__ == "__main__":

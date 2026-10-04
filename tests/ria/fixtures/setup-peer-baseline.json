@@ -1,0 +1,32 @@
+{
+  "archive_bytes": 20519,
+  "archive_sha256": "eab44cad69644976806cefcfd1db544d6cc34e2016637ab335a10a5c418828e2",
+  "members": {
+    "tools/ria/__init__.py": {
+      "bytes": 150,
+      "sha256": "1006f80027167f410456bc582a4cdf7efee7d2e295f15616dec55dc80cc729a7"
+    },
+    "tools/ria/identity.py": {
+      "bytes": 13538,
+      "sha256": "748994daf3e4a92dc9b7242ddf16c2186de884efba471c0bc2834738f47cfb21"
+    },
+    "tools/ria/setup_journal.py": {
+      "bytes": 6303,
+      "sha256": "be8514444a0e3cc0700228b26598a602c5cb40bd33b12be0a5dd54e25c1d139a"
+    },
+    "tools/ria/setup_limits.py": {
+      "bytes": 416,
+      "sha256": "76a7ccedc363d387014253d10a04e5632620c6e8e3dc67112946b0c1a29cd17a"
+    },
+    "tools/ria/setup_peer.py": {
+      "bytes": 54230,
+      "sha256": "6997837cade224bb6fda79f1a9e5d6f756f4d287a5c0ba11a2d270dc116f594f"
+    },
+    "tools/ria/setup_security.py": {
+      "bytes": 13858,
+      "sha256": "761c8c067f6b3e29b8bb26ddf1fd44c26f3a372a17a6aedc1dafbe9cdaf576bf"
+    }
+  },
+  "purpose": "Test-only original512KiB/base64/fresh-connection/per-chunk-fsync implementation. Actual isolated UID10001 HTTP/TLS worker. Never a production fallback or model/physical evidence. Contains source only.",
+  "schema_revision": 1
+}
