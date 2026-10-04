@@ -7,10 +7,18 @@ from pathlib import Path
 import re
 
 from offline_checks import execute
+from cuda_toolkit import inspect_toolkit
 
 INSTRUCTIONS = {"bf16": (16, r"\bHMMA\.16816\.F32\.BF16\b"),
                 "fp8": (8, r"\bQMMA\.SF\.16832\.F32\.E4M3\.E4M3\.E8\b"),
                 "nvfp4": (4, r"\bOMMA\.SF\.16864\.F32\.E2M1\.E2M1\.UE4M3\.4X\b")}
+
+
+def runtime_dependencies(report):
+    needed = re.findall(r"\(NEEDED\).*?\[([^\]]+)\]", report)
+    if not needed or any(re.search(r"(?:cudart|cublas|cudnn|cusparse|cusolver|curand|cufft|nvrtc|nvjitlink|torch|tensorflow)", item, re.IGNORECASE) for item in needed):
+        raise ValueError("CUDA executable has unsupported shared CUDA/framework linkage")
+    return needed
 
 
 def validate_production_instructions(assembly):
@@ -28,16 +36,26 @@ def validate_production_instructions(assembly):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--cuobjdump", default="/usr/local/cuda/bin/cuobjdump")
+    parser.add_argument("--cuda-home", default="/usr/local/cuda")
+    parser.add_argument("--nvcc")
+    parser.add_argument("--cuobjdump")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    toolkit = inspect_toolkit(args.cuda_home, args.nvcc, args.cuobjdump)
+    args.cuobjdump = toolkit["cuobjdump_executable"]
     checks = []
     binaries = ("ds4ctl", "ds4-expert-server", "ds4-server", "ds4", "ds4-eval", "ds4-ria-qualify")
     for name in binaries:
         path = root / "bin/cuda" / name
         observed = {"file": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        linkage = args.output.parent / ("cuda-" + name + "-linkage.log")
+        if execute(["readelf", "--dynamic", str(path)], root, linkage, 30):
+            raise ValueError("CUDA runtime linkage inspection failed")
+        needed = runtime_dependencies(linkage.read_text(encoding="utf-8", errors="strict"))
+        observed["needed_libraries"] = needed
+        observed["linkage_report_sha256"] = hashlib.sha256(linkage.read_bytes()).hexdigest()
         for kind, option in (("elf", "--list-elf"), ("ptx", "--list-ptx")):
             log = args.output.parent / ("cuda-" + name + "-" + kind + ".log")
             if execute([args.cuobjdump, option, str(path)], root, log, 60):
@@ -68,6 +86,7 @@ def main():
     result = {"schema_revision": 1, "classification": "offline CUDA binary inspection",
               "kernel_execution": False, "hardware_qualified": False, "passed": True,
               "code_targets": ["sm_120a"], "ptx_present": False, "binaries": checks,
+              "cuda_toolkit": toolkit,
               "expert_object_sha256": hashlib.sha256(expert.read_bytes()).hexdigest(),
               "expert_sass_sha256": hashlib.sha256(sass.read_bytes()).hexdigest(),
               "matrix_instruction_patterns": {key: value[1] for key, value in INSTRUCTIONS.items()},

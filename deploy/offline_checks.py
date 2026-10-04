@@ -89,6 +89,7 @@ def main():
         ("source-lock", [sys.executable, "tools/verify_ria.py", "--source-lock", "locks/source-lock.json"]),
         ("workflow-lint", ["build/ria/check-tools/actionlint", ".github/workflows/ria.yml"]),
         ("container-lint", ["build/ria/check-tools/hadolint", "deploy/Dockerfile.cpu", "deploy/Dockerfile.cuda"]),
+        ("container-base-lock", [sys.executable, "deploy/check_container_lock.py"]),
         ("native-static", ["make", "ria-static"]),
         ("compiler-versions", ["clang", "--version"]),
         ("cppcheck-version", ["build/ria/check-tools/cppcheck", "--version"]),

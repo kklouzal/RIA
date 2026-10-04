@@ -85,12 +85,34 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Export inspected CUDA toolchain and runtime linkage without GPU execution
+        if: matrix.image == 'cuda'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.cuda
+          platforms: linux/amd64
+          target: toolchain-evidence
+          outputs: type=local,dest=build/ria/evidence/cuda-toolchain
+          provenance: false
+          sbom: false
+          build-args: |
+            BUILDKIT_SBOM_SCAN_STAGE=true
+      - name: Retain actual CUDA toolchain and native library evidence
+        if: matrix.image == 'cuda'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ria-cuda-toolchain-${{ github.sha }}
+          path: build/ria/evidence/cuda-toolchain/
+          retention-days: 7
+          if-no-files-found: error
       - name: Build native image without GPU or checkpoint
         id: image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/Dockerfile.${{ matrix.image }}
+          target: ${{ matrix.image == 'cuda' && 'final' || '' }}
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' && github.repository == 'kklouzal/RIA' }}
           tags: ghcr.io/kklouzal/ria-${{ matrix.image }}:sha-${{ github.sha }}

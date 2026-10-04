@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 
+from cuda_toolkit import inspect_toolkit
+
 
 def run(arguments):
     result = subprocess.run(arguments, check=True, capture_output=True, timeout=30,
@@ -20,6 +22,9 @@ def main():
     parser.add_argument("--role", required=True, choices=["cpu", "cuda"])
     parser.add_argument("--compiler", required=True, help="exact compiler executable used by the native build")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--cuda-home", default="/usr/local/cuda")
+    parser.add_argument("--nvcc")
+    parser.add_argument("--cuobjdump")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     files = set()
@@ -47,7 +52,9 @@ def main():
     result["binaries"] = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
                           for name in binary_names}
     if args.role == "cuda":
-        result["nvcc"] = run(["/usr/local/cuda/bin/nvcc", "--version"])
+        toolkit = inspect_toolkit(args.cuda_home, args.nvcc, args.cuobjdump)
+        result["cuda_toolkit"] = toolkit
+        result["nvcc"] = toolkit["nvcc"]
         result["cuda_host_compiler_executable"] = "g++"
         result["cuda_host_compiler"] = run(["g++", "--version"])
         result["code_targets"] = ["sm_120a"]
@@ -57,6 +64,8 @@ def main():
         report = json.loads(artifact.read_bytes())
         if not report["passed"] or report["kernel_execution"] or report["ptx_present"]:
             raise ValueError("CUDA build lacks successful offline AOT inspection")
+        if report.get("cuda_toolkit") != toolkit:
+            raise ValueError("CUDA AOT report belongs to another selected toolkit")
         for binary in report["binaries"]:
             if result["binaries"].get(Path(binary["file"]).name) != binary["sha256"]:
                 raise ValueError("CUDA AOT report belongs to another executable")

@@ -1,4 +1,4 @@
-FROM nvidia/cuda:13.1.1-devel-ubuntu24.04@sha256:9cf8694a27722418a1f175d90f85d5afb5a728fd4a9907d7f0565efecfa14d32 AS build
+FROM nvcr.io/nvidia/cuda:13.4.2-devel-ubuntu24.04@sha256:7005688f5eaa5a9aaa9e555f546107c4454446a543347fd48b0bdb63ea027ad2 AS build
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
 COPY deploy/ubuntu.sources /etc/apt/ria.sources
 COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
@@ -14,9 +14,12 @@ RUN python3 -m venv /opt/ria-qualification && \
     /opt/ria-qualification/bin/pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r requirements-ria.txt
 # No GPU is exposed to the build. Only accelerated SM120a machine code is
 # emitted; startup cannot JIT a missing implementation or download a kernel.
-RUN make -j2 ria-cuda RIA_CC=cc && python3 deploy/build_info.py --role cuda --compiler cc --output build/ria/build-info.json
+RUN make -j2 ria-cuda RIA_CC=cc && \
+    python3 deploy/build_info.py --role cuda --compiler cc \
+      --cuda-home /usr/local/cuda --nvcc /usr/local/cuda/bin/nvcc \
+      --cuobjdump /usr/local/cuda/bin/cuobjdump --output build/ria/build-info.json
 
-FROM nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34
+FROM nvcr.io/nvidia/cuda:13.4.2-base-ubuntu24.04@sha256:b395ba681833b0a9837674516abe258b2934d6ec5511f78745d71ea177da14a4 AS runtime
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
 COPY deploy/ubuntu.sources /etc/apt/ria.sources
 COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
@@ -24,7 +27,7 @@ COPY deploy/ubuntu-snapshot-ca.crt /etc/apt/ria-snapshot-ca.crt
 # hadolint ignore=DL3008
 RUN apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt update && \
     DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Etc::sourcelist=/etc/apt/ria.sources -o Dir::Etc::sourceparts=- -o Acquire::https::CaInfo=/etc/apt/ria-snapshot-ca.crt install -y --no-install-recommends \
-      libssl3t64 libnuma1 libonig5 libpng16-16t64 libjpeg-turbo8 python3 ca-certificates && \
+      libssl3t64 libnuma1 libonig5 libpng16-16t64 libjpeg-turbo8 libstdc++6 python3 ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir -p /model /etc/dwarfstar /run/secrets /run/dwarfstar /artifacts /usr/share/dwarfstar/licenses && \
     chown 10001:10001 /run/dwarfstar /artifacts
@@ -36,6 +39,9 @@ COPY tools/ /opt/ria-tools/
 COPY LICENSE /usr/share/dwarfstar/licenses/DS4-LICENSE
 COPY third_party/ryu/LICENSE-Apache2 third_party/ryu/LICENSE-Boost /usr/share/dwarfstar/licenses/
 COPY third_party/iris/LICENSE /usr/share/dwarfstar/licenses/iris-LICENSE
+RUN --mount=type=bind,from=build,source=/src/deploy/check_runtime_linkage.py,target=/tmp/ria-check-runtime-linkage.py,ro \
+    python3 /tmp/ria-check-runtime-linkage.py --binary-dir /usr/local/bin \
+      --build-info /usr/share/dwarfstar/build-info.json --output /usr/share/dwarfstar/runtime-linkage.json
 LABEL org.opencontainers.image.source="https://github.com/kklouzal/RIA" \
       org.opencontainers.image.title="RIA native SM120a client and expert service" \
       org.opencontainers.image.licenses="MIT AND (Apache-2.0 OR BSL-1.0)" \
@@ -46,3 +52,11 @@ WORKDIR /artifacts
 ENTRYPOINT ["/usr/local/bin/ds4-server"]
 CMD ["--config", "/etc/dwarfstar/service.json"]
 HEALTHCHECK --interval=10s --timeout=6s --start-period=300s --retries=3 CMD ["/usr/local/bin/ds4ctl", "health", "--socket", "/run/dwarfstar/admin.sock", "--timeout-ms", "5000"]
+
+FROM scratch AS toolchain-evidence
+COPY --from=build /src/build/ria/build-info.json /build-info.json
+COPY --from=build /src/build/ria/evidence/cuda-artifacts.json /cuda-artifacts.json
+COPY --from=build /src/build/ria/evidence/cuda-*.log /cuda-inspection/
+COPY --from=runtime /usr/share/dwarfstar/runtime-linkage.json /runtime-linkage.json
+
+FROM runtime AS final

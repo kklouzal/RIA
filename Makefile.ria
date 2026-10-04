@@ -1,9 +1,11 @@
 # RIA numerical code has an explicit floating-point contract; never inherit
 # the donor's fast-math or build-host-specific ISA flags for portable images.
+RIA_BUILD_RECIPE := $(abspath $(lastword $(MAKEFILE_LIST)))
 RIA_CC ?= $(CC)
 RIA_THREAD_CC ?= clang-18
-RIA_NVCC ?= /usr/local/cuda/bin/nvcc
 RIA_CUDA_HOME ?= /usr/local/cuda
+RIA_NVCC ?= $(RIA_CUDA_HOME)/bin/nvcc
+RIA_CUOBJDUMP ?= $(RIA_CUDA_HOME)/bin/cuobjdump
 RIA_PYTHON ?= python3
 RIA_CFLAGS ?= -O2 -g -std=c99 -Wall -Wextra -Werror -Wformat=2 -Wstrict-prototypes -fno-fast-math -ffp-contract=off
 ifneq ($(origin RIA_CFLAGS),file)
@@ -18,7 +20,7 @@ RIA_GRAPH_HOST_SRC = ria/graph.c ria/vision.c ria/engine.c ria/tokenizer.c ria/p
 RIA_GRAPH_HOST_OBJ = $(patsubst %.c,build/ria/%.o,$(RIA_GRAPH_HOST_SRC))
 RIA_CUDA_SRC = ria/expert_cuda.cu ria/graph_cuda.cu ria/vision_cuda.cu ria/probe_cuda.cu
 RIA_CUDA_OBJ = $(patsubst %.cu,build/ria/%.cu.o,$(RIA_CUDA_SRC))
-RIA_NVCCFLAGS = -O2 -g -lineinfo -std=c++17 --compiler-bindir=g++ --generate-code=arch=compute_120a,code=sm_120a --fmad=false --ftz=false --prec-div=true --prec-sqrt=true --Werror=cross-execution-space-call,reorder,deprecated-declarations,default-stream-launch,ext-lambda-captures-this -Xcompiler=-Wall,-Wextra,-Werror,-fno-fast-math,-ffp-contract=off,-pthread
+RIA_NVCCFLAGS = -O2 -g -lineinfo -std=c++17 --compiler-bindir=g++ --cudart=static --generate-code=arch=compute_120a,code=sm_120a --fmad=false --ftz=false --prec-div=true --prec-sqrt=true --Werror=cross-execution-space-call,reorder,deprecated-declarations,default-stream-launch,ext-lambda-captures-this -Xcompiler=-Wall,-Wextra,-Werror,-fno-fast-math,-ffp-contract=off,-pthread
 ifneq ($(strip $(NVCC_PREPEND_FLAGS)$(NVCC_APPEND_FLAGS)),)
 $(error RIA CUDA compiler environment may not inject unreviewed flags)
 endif
@@ -39,24 +41,27 @@ $(error RIA adapter flags are fixed by the reviewed numerical build contract)
 endif
 RIA_DEPS = $(RIA_CORE_OBJ:.o=.d) $(RIA_GRAPH_HOST_OBJ:.o=.d) $(RIA_DONOR_OBJ:.o=.d) $(wildcard build/ria/ria/*.d build/ria/donor/*.d build/ria/cuda/*.d)
 
-.PHONY: ria-cpu ria-cuda ria-offline ria-static ria-clean
+.PHONY: ria-cpu ria-cuda ria-offline ria-static ria-clean ria-cuda-toolkit-force
 ria-cpu: bin/ds4ctl bin/ds4-expert-server bin/ds4-ria-qualify
 ria-cuda: bin/cuda/ds4ctl bin/cuda/ds4-expert-server bin/cuda/ds4-server bin/cuda/ds4 bin/cuda/ds4-eval bin/cuda/ds4-ria-qualify
-	$(RIA_PYTHON) deploy/check_cuda_artifacts.py --output build/ria/evidence/cuda-artifacts.json
+	$(RIA_PYTHON) deploy/check_cuda_artifacts.py --cuda-home "$(RIA_CUDA_HOME)" --nvcc "$(RIA_NVCC)" --cuobjdump "$(RIA_CUOBJDUMP)" --output build/ria/evidence/cuda-artifacts.json
 
-build/ria/%.o: %.c
+build/ria/cuda-toolkit.json: ria-cuda-toolkit-force deploy/cuda_toolkit.py deploy/container-lock.json
+	$(RIA_PYTHON) deploy/cuda_toolkit.py --cuda-home "$(RIA_CUDA_HOME)" --nvcc "$(RIA_NVCC)" --cuobjdump "$(RIA_CUOBJDUMP)" --output $@
+
+build/ria/%.o: %.c $(RIA_BUILD_RECIPE)
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -MMD -MP -c $< -o $@
 
-build/ria/%.cu.o: %.cu
+build/ria/%.cu.o: %.cu build/ria/cuda-toolkit.json $(RIA_BUILD_RECIPE)
 	@mkdir -p $(@D)
-	$(RIA_NVCC) $(RIA_CPPFLAGS) -I$(RIA_CUDA_HOME)/include/cccl $(RIA_NVCCFLAGS) -DRIA_WITH_CUDA -MMD -MP -c $< -o $@
+	"$(RIA_NVCC)" $(RIA_CPPFLAGS) -I"$(RIA_CUDA_HOME)/include/cccl" $(RIA_NVCCFLAGS) -DRIA_WITH_CUDA -MMD -MP -c $< -o $@
 
-build/ria/cuda/%.o: ria/%.c
+build/ria/cuda/%.o: ria/%.c build/ria/cuda-toolkit.json $(RIA_BUILD_RECIPE)
 	@mkdir -p $(@D)
-	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -DRIA_WITH_CUDA -isystem $(RIA_CUDA_HOME)/include -MMD -MP -c $< -o $@
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -DRIA_WITH_CUDA -isystem "$(RIA_CUDA_HOME)/include" -MMD -MP -c $< -o $@
 
-build/ria/ria/qualify.o: ria/qualify.c
+build/ria/ria/qualify.o: ria/qualify.c $(RIA_BUILD_RECIPE)
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -DRIA_QUALIFY_CPU_ONLY -MMD -MP -c $< -o $@
 
@@ -66,9 +71,9 @@ bin/ds4-ria-qualify: build/ria/ria/qualify.o build/ria/ria/expert.o $(patsubst %
 
 bin/cuda/ds4-ria-qualify: build/ria/cuda/qualify.o build/ria/ria/graph.o build/ria/ria/vision.o build/ria/ria/expert_cuda.cu.o build/ria/ria/graph_cuda.cu.o build/ria/ria/vision_cuda.cu.o $(RIA_CORE_OBJ)
 	@mkdir -p $(@D)
-	$(RIA_NVCC) $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) -lpng -ljpeg -o $@
+	"$(RIA_NVCC)" $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) -lpng -ljpeg -o $@
 
-build/ria/donor/%.o: %.c
+build/ria/donor/%.o: %.c $(RIA_BUILD_RECIPE)
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_DONOR_FLAGS) -MMD -MP -c $< -o $@
 
@@ -82,24 +87,24 @@ bin/ds4-expert-server: build/ria/ria/expert_main.o build/ria/ria/server.o build/
 
 bin/cuda/ds4ctl: build/ria/ria/ctl.o build/ria/ria/inventory.o build/ria/ria/numa.o build/ria/cuda/probe.o build/ria/ria/qualify_transport.o build/ria/ria/probe_cuda.cu.o build/ria/ria/expert_cuda.cu.o $(RIA_CORE_OBJ)
 	@mkdir -p $(@D)
-	$(RIA_NVCC) $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) -o $@
+	"$(RIA_NVCC)" $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) -o $@
 
 bin/cuda/ds4-expert-server: build/ria/cuda/expert_main.o build/ria/cuda/server.o build/ria/ria/numa.o build/ria/ria/remote.o build/ria/ria/expert_cuda.cu.o $(RIA_CORE_OBJ)
 	@mkdir -p $(@D)
-	$(RIA_NVCC) $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) -o $@
+	"$(RIA_NVCC)" $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) -o $@
 
 RIA_FRONTEND_OBJ = $(RIA_GRAPH_HOST_OBJ) $(filter-out build/ria/ria/probe_cuda.cu.o,$(RIA_CUDA_OBJ)) $(RIA_CORE_OBJ) $(RIA_DONOR_OBJ)
 bin/cuda/ds4-server: build/ria/donor/ds4_server.o build/ria/donor/ds4_kvstore.o build/ria/donor/rax.o $(RIA_FRONTEND_OBJ)
 	@mkdir -p $(@D)
-	$(RIA_NVCC) $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) $(RIA_FRONTEND_LIBS) -o $@
+	"$(RIA_NVCC)" $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) $(RIA_FRONTEND_LIBS) -o $@
 
 bin/cuda/ds4: build/ria/donor/ds4_cli.o build/ria/donor/ds4_prompt_prefix.o build/ria/donor/linenoise.o $(RIA_FRONTEND_OBJ)
 	@mkdir -p $(@D)
-	$(RIA_NVCC) $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) $(RIA_FRONTEND_LIBS) -o $@
+	"$(RIA_NVCC)" $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) $(RIA_FRONTEND_LIBS) -o $@
 
 bin/cuda/ds4-eval: build/ria/donor/ds4_eval.o build/ria/donor/ds4_eval_cases.o $(RIA_FRONTEND_OBJ)
 	@mkdir -p $(@D)
-	$(RIA_NVCC) $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) $(RIA_FRONTEND_LIBS) -o $@
+	"$(RIA_NVCC)" $(RIA_NVCCFLAGS) $^ $(RIA_LDLIBS) $(RIA_FRONTEND_LIBS) -o $@
 
 build/ria/tests/test_contracts: tests/ria/test_contracts.c $(RIA_BASE_SRC)
 	@mkdir -p $(@D)

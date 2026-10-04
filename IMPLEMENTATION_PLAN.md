@@ -121,6 +121,8 @@ Provide strict `ds4ctl probe` with its own bounded configuration and no final-pl
 
 Use digest-pinned multi-stage CPU/CUDA Dockerfiles, locked offline dependency inputs, non-root UID/GID, build-info/schema/notices installation, SBOM and provenance. Extract the handoff's embedded deployment templates mechanically and retain source offsets/hashes; adapt only through reviewed generators or owned template inputs. Scan contexts/layers for weights, credentials, private data and accidental build-only dependencies.
 
+Select matching NVIDIA NGC CUDA builder/final bases from the current official registry, recording exact release and immutable identities in `deploy/container-lock.json`; keep the CPU image CUDA-free. Compile and statically link cudart from that selected toolkit, validate compiler/header/archive/SDK provenance and final ELF dependency closure, and export actual build evidence without GPU execution. An image/toolkit update invalidates previous physical numerical/resource/performance admission; a moving `latest` tag or newer host toolkit never upgrades an immutable deployed image.
+
 **Exit:** independently buildable CPU artifacts; supported native kernel probes on target hosts; probe evidence explicitly precedes final admission. Full runtime image qualification occurs after later packages, not at scaffold completion.
 
 ### W03 — Implement one expert operation with CPU and CUDA executors

@@ -29,7 +29,7 @@ This is the deployment runbook for **RIA safetensors containers**. The [original
 
 The client always uses CUDA, including when the expert uses CPU. CUDA binaries contain `sm_120a` AOT code, with no PTX fallback. Do not substitute ARM64, another GPU architecture, MIG identities or an arbitrary device ordinal. The selected physical UUID becomes the sole visible device, addressed as container device index `0`. Use the `GPU-` prefix and lowercase hexadecimal UUID consistently in preflight, requests and registration; the native fixture schema requires that spelling.
 
-Use these immutable, published `linux/amd64` images with optional certificates. Their runtime source is `37756b57c885b46f16d431d3cf112518b4c4cf59`:
+The following published `linux/amd64` images include optional certificates and precede the CUDA 13.4.2 migration. Their runtime source is `37756b57c885b46f16d431d3cf112518b4c4cf59`; the CUDA image below contains 13.1.1 until new publication is verified:
 
 ```bash
 CPU_IMAGE='ghcr.io/kklouzal/ria-cpu@sha256:7756430e78ab4e0a21525d81e73cad87ba530b7d14b74a32f2ca98b8d595b4d8'
@@ -40,9 +40,11 @@ Both are publicly pullable. [The successful build/check run](https://github.com/
 
 Install a **rootful Docker Engine**, its **Compose v2 plugin**, and a host with **cgroup v2** using the [official Docker installation instructions](https://docs.docker.com/engine/install/). This orchestration uses the local `/var/run/docker.sock`; rootless, remote Docker contexts and Swarm are outside this path. Record actual Engine/Compose/kernel versions, rather than supplying example version strings.
 
-On each CUDA host, install an NVIDIA driver that supports the image's **CUDA 13.1** runtime, then NVIDIA Container Toolkit using its [official installation instructions](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Configure the rootful Docker runtime before recording the host baseline:
+On each CUDA host, install an NVIDIA driver that supports the selected image's CUDA runtime, then NVIDIA Container Toolkit using its [official installation instructions](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Configure the rootful Docker runtime before recording the host baseline:
 
-The image uses CUDA **13.1.1**; NVIDIA lists **590.48.01** as its corresponding Linux toolkit driver. [CUDA minor-version compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html) permits CUDA 13.x on drivers from branch 580 with feature limitations; this project has not physically qualified those combinations. Choose a supported driver for the exact GPU/runtime and validate it through the physical probe. See the [13.1.1 release notes](https://docs.nvidia.com/cuda/archive/13.1.1/cuda-toolkit-release-notes/index.html).
+The current build recipes use **NVIDIA NGC CUDA 13.4.2**, the latest matching Ubuntu 24.04 release verified against the [NGC catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda/tags) on 2026-10-04. The builder uses NGC `devel`; the final image uses the matching smaller NGC `base` plus its required host libraries. Both are digest-pinned in [container-lock.json](deploy/container-lock.json). Compilation and static CUDA runtime linking use that builder's toolkit, with compiler/header/archive hashes, exact SDK version checks and final-image dependency checks. Installing a newer host toolkit does not upgrade an existing image; no host CUDA SDK is needed to run the published container. The CPU image retains its CUDA-free Ubuntu base.
+
+For CUDA 13.4, NVIDIA lists the **R615** corresponding driver branch in its [release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/#cuda-driver). [CUDA minor-version compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html) permits CUDA 13.x on R580 or newer with feature limitations; those combinations are not a qualified project floor. Choose a supported driver for the exact GPU/image and validate it through the physical probe. Keep the inherited NVIDIA driver constraints enabled. Toolkit or image changes require fresh numerical, resource and performance admission evidence, including vision GELU: NVIDIA changed `erff` behavior in CUDA 13.2. See [toolchain and image verification](docs/ria-cuda-toolchain.md).
 
 ```bash
 sudo nvidia-ctk runtime configure --runtime=docker
