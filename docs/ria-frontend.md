@@ -18,11 +18,15 @@ For the existing C API, zero-initialize `ds4_engine_options`, set `backend=DS4_B
 
 RIA engine startup intentionally ignores SIGPIPE for the process lifetime so disconnected TLS sockets return operation errors. Engine close does not restore the old disposition. Callers serialize signal-policy changes with startup and retain this policy while the engine is in use. The expert service blocks SIGPIPE in its transport owners. The donor path with no RIA service option retains its existing process policy.
 
+The RIA constructor accepts an optional startup cancellation callback and context through `ds4_engine_options`. The HTTP frontend connects its existing SIGTERM/SIGINT stop flag to this callback. Construction checks it between authenticated TensorStore copy/hash blocks, between construction phases, and immediately before publishing the engine; the frontend also checks before readiness. The callback must return promptly, must not reenter or destroy the engine, and its context must remain valid until open returns. A successful constructor clears the borrowed callback/context. Cancellation keeps its typed cause through cleanup and publishes no engine. These checks do not add a deadline or preempt an individual filesystem, TLS, tokenizer, or CUDA call; the existing operation and teardown contracts still govern those calls.
+
 A session's authoritative state contains incorporated token IDs and image identities. Sync reuses only a complete identical incorporated prefix, including the image positions, source identities and embedding lengths. A changed or shortened prefix creates a fresh remote binding and replays the prompt. Identical complete prefixes return the retained final logits without a new graph step. Sampled EOS is terminal control and is not incorporated. Text stops, cancellation, executor failures and failed writes invalidate the affected binding; abandoned work quiesces before the active request slot is released.
 
 ## Authenticated HTTP and SSE
 
 The initial API exposes authenticated `GET /v1/models` and `POST /v1/chat/completions`. Every request requires the file-provisioned Bearer token, including loopback clients. The model ID is exactly `DeepSeek-V4.1-Flash`. Other model IDs, unknown fields and unqualified endpoints receive explicit errors. One generation is active and none are queued; a competing generation receives HTTP 429. Header/body/JSON/message/tool/image/connection limits and read/write deadlines come from the service document.
+
+API bind addresses and credential paths reject embedded NUL bytes. Bearer credentials are read from a bounded regular file through one nonblocking descriptor, with no final symlink, FIFO, directory, or device accepted. Tokens contain 1 through 4096 printable ASCII bytes and may end in one LF or CRLF. File growth or metadata changes during the read fail closed; errors contain no credential bytes.
 
 A minimal request body is:
 
@@ -34,7 +38,7 @@ Accepted top-level fields are `model`, `messages`, `n`, `stream`, `stream_option
 
 Image inputs are uploaded JPEG/PNG data URLs in supported message content blocks. Source preprocessing, image delimiters and image embedding identities participate in exact continuation. Remote URL retrieval, filesystem paths supplied through HTTP, model-emitted tool execution, autonomous agents, durable response IDs, `/v1/responses`, legacy completions and Anthropic messages are outside the initial API. No Python model runtime is used.
 
-Unix administration uses the configured socket, ordinarily `/run/dwarfstar/admin.sock`, mode 0600 and an authorized UID of 10001. `ds4ctl health --socket PATH` reports actual readiness. `ds4ctl drain --socket PATH` acknowledges only after admission stops and generation, graph and remote users quiesce within the configured deadline.
+Unix administration uses the configured socket, ordinarily `/run/dwarfstar/admin.sock`, mode 0600 and an authorized UID of 10001. `ds4ctl health --socket PATH` reports actual readiness and becomes unready on the first SIGTERM/SIGINT cancellation, including during startup. Signal cancellation is shared with worker/admin threads through compile-time verified lock-free atomics; RIA listener close remains owned by the main thread. `ds4ctl drain --socket PATH` acknowledges only after admission stops and generation, graph and remote users quiesce within the configured deadline.
 
 ## Opt-in measurements
 

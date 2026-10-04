@@ -2,6 +2,8 @@
 #include "engine.h"
 #include "graph_cuda.h"
 #include "runtime.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <openssl/crypto.h>
 #include <pthread.h>
@@ -10,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 struct ria_engine {
   ria_service service;
@@ -20,6 +23,10 @@ struct ria_engine {
   ria_graph_options graph_options;
   ria_remote_options remote_options;
   pthread_mutex_t ownership;
+  /* Construction owns this borrowed cancellation context until open returns;
+   * successful construction clears it before publishing the engine. */
+  ds4_startup_cancel_fn startup_cancel;
+  void *startup_cancel_context;
   bool mutex_ready, runtime_ready, claimed, valid, fatal, retired;
   uint64_t epoch, generation, context, frontend, frontend_fixed, outer_owner;
   float *last_logits;
@@ -420,18 +427,28 @@ static bool config(ria_engine *r, ria_error *e) {
     return false;
   return ria_graph_options_validate(&r->graph_options, e);
 }
-bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
-                     ria_error *e) {
+static bool startup_progress(void *context, ria_error *e) {
+  ria_engine *r = context;
+  return !r->startup_cancel || !r->startup_cancel(r->startup_cancel_context) ||
+         ria_fail(e, RIA_CANCELLED, "RIA startup cancelled before publication");
+}
+bool ria_engine_open(const char *path, uint64_t outer_owner,
+                     ds4_startup_cancel_fn cancel, void *cancel_context,
+                     ria_engine **out, ria_error *e) {
   if (!path || !out)
     return ria_fail(e, RIA_INVALID_REQUEST, "invalid RIA engine configuration");
   *out = NULL;
+  if (cancel && cancel(cancel_context))
+    return ria_fail(e, RIA_CANCELLED, "RIA startup cancelled before allocation");
   if (!ria_engine_process_policy(e))
     return false;
   ria_engine *r = calloc(1, sizeof *r);
   if (!r)
     return ria_fail(e, RIA_RESOURCE_LIMIT, "RIA engine allocation failed");
   r->outer_owner = outer_owner;
-  bool ok = ria_service_read(&r->service, path, e);
+  r->startup_cancel = cancel;
+  r->startup_cancel_context = cancel_context;
+  bool ok = ria_service_read(&r->service, path, e) && startup_progress(r, e);
   if (ok && (strcmp(r->service.role, "client") ||
              strcmp(r->service.executor, "cuda")))
     ok = ria_fail(e, RIA_UNSUPPORTED,
@@ -444,7 +461,7 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
   ria_runtime_observation actual;
   if (ok)
     ok = ria_runtime_require(r->service.host_cap, 0, r->service.pinned_cap,
-                             &actual, e);
+                             &actual, e) && startup_progress(r, e);
   if (ok) {
     if (pthread_mutex_init(&r->ownership, NULL) != 0)
       ok = ria_fail(e, RIA_RESOURCE_LIMIT, "engine ownership mutex failed");
@@ -493,8 +510,11 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
                                   .numa_node = -1,
                                   .max_metadata_bytes = store_cap};
   if (ok)
-    ok = ria_tensor_store_open_placed(&r->store, r->service.manifest_path,
-                                      &load, client_preflight, r, e) &&
+    ok = startup_progress(r, e) &&
+         ria_tensor_store_open_controlled(&r->store, r->service.manifest_path,
+                                          &load, client_preflight, r,
+                                          startup_progress, r, e) &&
+         startup_progress(r, e) &&
          ((!memcmp(r->store.logical_model_digest,
                    r->service.logical_model_digest, 32) &&
            !memcmp(r->store.operator_contract_digest,
@@ -502,9 +522,11 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
            !strcmp(r->store.profile, r->service.profile)) ||
           ria_fail(e, RIA_IDENTITY_MISMATCH,
                    "client manifest differs from admitted service identity")) &&
-         config(r, e) && ria_remote_open(&r->remote, &r->remote_options, e) &&
+         config(r, e) && startup_progress(r, e) &&
+         ria_remote_open(&r->remote, &r->remote_options, e) && startup_progress(r, e) &&
          ria_graph_create(&r->store, &r->graph_options,
-                          ria_remote_callbacks(r->remote), &r->graph, e);
+                          ria_remote_callbacks(r->remote), &r->graph, e) &&
+         startup_progress(r, e);
   if (!ok) {
     ria_error cleanup = {0};
     if (!ria_engine_close(r, &cleanup)) {
@@ -514,6 +536,8 @@ bool ria_engine_open(const char *path, uint64_t outer_owner, ria_engine **out,
     }
     return false;
   }
+  r->startup_cancel = NULL;
+  r->startup_cancel_context = NULL;
   *out = r;
   return true;
 }
@@ -826,6 +850,64 @@ bool ria_engine_image(ria_engine *r, const uint8_t *encoded, size_t length,
 
 uint64_t ria_engine_frontend_budget(const ria_engine *r) {
   return r ? r->frontend - r->frontend_fixed : 0;
+}
+bool ria_api_bearer_read(const char *path, char *bearer, size_t capacity,
+                         size_t *length, ria_error *e) {
+  if (length)
+    *length = 0;
+  if (bearer && capacity)
+    memset(bearer, 0, capacity);
+  if (!path || path[0] != '/' || !bearer || capacity < 4097 || !length)
+    return ria_fail(e, RIA_INVALID_REQUEST, "invalid API credential destination");
+  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+  if (fd < 0)
+    return ria_fail(e, RIA_UNAUTHORIZED, "cannot open provisioned API bearer token");
+  struct stat before, after;
+  bool ok = fstat(fd, &before) == 0 && S_ISREG(before.st_mode) &&
+            before.st_size > 0 && before.st_size <= 4098;
+  char bytes[4098];
+  size_t n = 0;
+  while (ok && n < (size_t)before.st_size) {
+    ssize_t count = read(fd, bytes + n, (size_t)before.st_size - n);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      ok = false;
+      break;
+    }
+    n += (size_t)count;
+  }
+  char extra;
+  ssize_t count = -1;
+  if (ok) {
+    do count = read(fd, &extra, 1); while (count < 0 && errno == EINTR);
+    ok = count == 0 && fstat(fd, &after) == 0 &&
+         before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+         before.st_size == after.st_size &&
+         before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+         before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+         before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+  }
+  if (close(fd))
+    ok = false;
+  if (ok && n && bytes[n - 1] == '\n') {
+    --n;
+    if (n && bytes[n - 1] == '\r')
+      --n;
+  }
+  if (!n || n > 4096)
+    ok = false;
+  for (size_t i = 0; ok && i < n; i++)
+    if ((unsigned char)bytes[i] <= 32 || (unsigned char)bytes[i] >= 127)
+      ok = false;
+  if (ok) {
+    memcpy(bearer, bytes, n);
+    *length = n;
+  }
+  OPENSSL_cleanse(bytes, sizeof bytes);
+  return ok || ria_fail(e, RIA_UNAUTHORIZED,
+                        "invalid bounded regular API bearer token file");
 }
 bool ria_api_header(const char *bytes, size_t length, const char *bearer,
                     size_t bearer_length, uint64_t max_body,

@@ -1,6 +1,20 @@
 #define _GNU_SOURCE
-/* Exercise the production network owner without weights or executor startup. */
+/* Exercise the production network owner without weights or executor startup.
+ * The poll observer is enabled only for deterministic expired-snapshot cases;
+ * all socket/TLS lifecycle cases call the real operating-system poll. */
+#define poll fixture_poll
 #include "ria/server.c"
+#undef poll
+extern int poll(struct pollfd *,nfds_t,int);
+static struct { bool enabled; unsigned calls,closed; } poll_observer;
+int fixture_poll(struct pollfd *fds,nfds_t count,int timeout) {
+  if (!poll_observer.enabled) return poll(fds,count,timeout);
+  poll_observer.calls++;
+  for (nfds_t i=0;i<count;i++) if (fds[i].fd>=0 &&
+      fcntl(fds[i].fd,F_GETFD)==-1 && errno==EBADF) poll_observer.closed++;
+  /* End the actual loop after observing the first submitted snapshot. */
+  errno=EIO;return -1;
+}
 #include <arpa/inet.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
@@ -604,9 +618,28 @@ static void test_ssl_error_queue(credentials *c) {
   }
   ria_transport t=connect_client(c,&a); close(listening); CHECK(reap(false,1000)==0); ria_transport_close(&t);
 }
+static void test_expired_poll_snapshot(credentials *c,unsigned mode) {
+  struct sockaddr_in a[2];server *s=fixture(c,a);
+  int fd=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0);CHECK(fd>=0);
+  channel *ch=&s->channels[mode%2];ch->transport.fd=fd;ch->transport.owns_fd=true;
+  ch->read_event=POLLIN;
+  if (!mode) { ch->received=1;ch->frame_deadline=ria_monotonic_ms()-1; }
+  else {
+    ch->output_count=1;ch->output[0].payload=calloc(1,16);CHECK(ch->output[0].payload);
+    ch->output[0].deadline=mode==1 ? ria_monotonic_ms()-1 : end_after(1000);
+    ch->output[0].write_started=mode==2;ch->output[0].write_deadline=ria_monotonic_ms()-1;
+  }
+  memset(&poll_observer,0,sizeof poll_observer);poll_observer.enabled=true;
+  ria_error e={0};CHECK(!event_loop(s,&e) && e.code==RIA_INTERNAL_ERROR);
+  poll_observer.enabled=false;
+  CHECK(poll_observer.calls==1 && !poll_observer.closed && ch->transport.fd==-1 &&
+    !ch->received && !ch->output_count && s->quiescent);
+  fixture_free(s);
+}
 int main(void) {
   CHECK(signal(SIGPIPE,SIG_IGN)!=SIG_ERR); alarm(20);
   credentials c={0}; credentials_create(&c);
+  for (unsigned mode=0;mode<3;mode++) test_expired_poll_snapshot(&c,mode);
   test_initial_silence(&c,false); test_initial_silence(&c,true); test_bound_idle(&c);
   test_late_completion(&c); test_retained_accept(&c); test_disconnected_live_executor(&c); test_ssl_error_queue(&c);
   test_admitted_connection_loss(&c,0); test_admitted_connection_loss(&c,1); test_started_header_deadline(&c);
@@ -623,6 +656,6 @@ int main(void) {
   test_callback_batch_groups(&c,64,131072,true,false);
   test_callback_batch_groups(&c,64,65536,false,true);
   credentials_free(&c); alarm(0);
-  puts("RIA production server lifecycle: setup/frame deadlines, idle/rebind ownership, channel loss/drain, TLS retry/fatal rules, typed refusals, response caps, negotiated slot/row groups and atomic publication, operation/error/chunk Bind minima passed");
+  puts("RIA production server lifecycle: setup/frame/reply deadlines and poll snapshot lifetime, idle/rebind ownership, channel loss/drain, TLS retry/fatal rules, typed refusals, response caps, negotiated slot/row groups and atomic publication, operation/error/chunk Bind minima passed");
   return 0;
 }

@@ -28,19 +28,33 @@ struct fixture {
     bool hold,entered,released,fail;
     worker_argument arguments[2];
 };
-/* One explicit fixture per thread: NUMA shims never consult process globals. */
-static _Thread_local fixture *current;
+static void wait_locked(fixture *,bool *);
+/* Borrow one explicit argument until its worker returns; shims never inspect
+ * another worker's unpublished initialization state or process globals. */
+static _Thread_local worker_argument *current;
 static bool fixture_affinity(const ria_expert_node *node,unsigned index,ria_error *e) {
-    (void)node;(void)e;CHECK(current && index<2);return true;
+    (void)node;(void)e;CHECK(current && current->worker && current->worker->index==index && index<2);
+    fixture *f=current->context;
+    if (f->owner.worker_count==2 && index==0) {
+        /* Force worker1 to evaluate before worker0 initializes its capacity.
+         * The old recorder's workers[0] predicate fails on this schedule. */
+        CHECK(!pthread_mutex_lock(&f->owner.mutex));wait_locked(f,&f->entered);
+        CHECK(!pthread_mutex_unlock(&f->owner.mutex));
+    }
+    return true;
 }
 static const ria_expert *fixture_expert(const ria_numa *local,unsigned node,uint64_t handle,uint16_t expert) {
-    (void)local;CHECK(current && !node && handle>=11 && handle<=12 && expert>=1 && expert<=2);
-    return &current->experts[expert-1];
+    (void)local;CHECK(current && current->context && !node && handle>=11 && handle<=12 && expert>=1 && expert<=2);
+    return &current->context->experts[expert-1];
 }
 static bool recorded_evaluate(ria_expert_cpu *context,const ria_expert *expert,const float *input,uint64_t rows,
                                uint64_t input_stride,const float *coefficients,float *output,uint64_t output_stride,ria_error *e) {
-    fixture *f=current;CHECK(f && rows && rows<=f->owner.workers[0].batch_rows);
-    CHECK(!pthread_mutex_lock(&f->owner.mutex));++f->batches;f->evaluated_rows+=rows;
+    CHECK(current && current->context && current->worker);
+    fixture *f=current->context;worker *w=current->worker;
+    CHECK(w->owner==&f->owner && context==w->cpu && rows && rows<=w->batch_rows);
+    CHECK(!pthread_mutex_lock(&f->owner.mutex));
+    if (!f->entered && f->owner.worker_count==2) CHECK(w->index==1);
+    ++f->batches;f->evaluated_rows+=rows;
     if (rows>f->largest) f->largest=(unsigned)rows;
     f->entered=true;CHECK(!pthread_cond_broadcast(&f->owner.condition));
     while (f->hold && !f->released) CHECK(!pthread_cond_wait(&f->owner.condition,&f->owner.mutex));
@@ -48,7 +62,9 @@ static bool recorded_evaluate(ria_expert_cpu *context,const ria_expert *expert,c
     return fail ? ria_fail(e,RIA_EXECUTOR_ERROR,"injected grouped CPU executor failure") :
         ria_expert_cpu_evaluate(context,expert,input,rows,input_stride,coefficients,output,output_stride,e);
 }
-static void *run(void *pointer) { worker_argument *a=pointer;current=a->context;return worker_main(a->worker); }
+static void *run(void *pointer) {
+    worker_argument *a=pointer;current=a;void *result=worker_main(a->worker);current=NULL;return result;
+}
 static float independent_bf16(float value) {
     uint32_t raw;memcpy(&raw,&value,4);uint32_t a=raw&UINT32_C(0xffff0000),b=a+UINT32_C(0x10000);
     float lo,hi;memcpy(&lo,&a,4);memcpy(&hi,&b,4);
@@ -129,7 +145,8 @@ static void discard(fixture *f) {
 }
 static void parity(unsigned workers) {
     fixture *f=create(false,false,workers);finish(f);CHECK(f->evaluated_rows==256 && f->largest>1 && f->batches<256);
-    CHECK(f->largest<=f->owner.workers[0].batch_rows && f->owner.workers[0].batch_rows<64);
+    for (unsigned i=0;i<workers;++i)
+        CHECK(f->largest<=f->owner.workers[i].batch_rows && f->owner.workers[i].batch_rows<64);
     for (unsigned owner=0;owner<2;++owner) {
         const work *r=&f->owner.requests[owner];CHECK(!r->error.code && !r->cancelled);
         for (unsigned row=0;row<64;++row) for (unsigned slot=0;slot<2;++slot) {

@@ -1,5 +1,7 @@
 # Offline implementation verification
 
+The latest [full implementation once-over](ria-once-over.md) corrected additional boundary/startup/lifecycle defects and passed492 Python tests,36 static checks, ASan/UBSan/leaks, five TSan fixtures and CPU/SM120a build gates. Complete semantic qualification software remains incomplete. Earlier checkpoints below retain their historical scopes.
+
 Verified 2026-10-04 UTC on the development ARM64 Linux host. The declared release
 target remains Linux x86-64 with the specified physical client/server hardware.
 No checkpoint weights were downloaded, no CUDA kernel was launched, and no

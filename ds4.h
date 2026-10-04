@@ -128,10 +128,17 @@ typedef struct {
     int debug_hash;             /* cross-check hidden state every N tokens */
 } ds4_tp_options;
 
+/* Startup cancellation is observed at bounded RIA construction boundaries.
+ * The callback/context remain valid until open returns, are nonblocking, and
+ * must not reenter/destroy the constructing engine. Donor paths ignore it. */
+typedef bool (*ds4_startup_cancel_fn)(void *context);
+
 typedef struct {
     const char *model_path;
     /* Explicit admitted RIA CUDA service; NULL preserves the donor engine. */
     const char *ria_service_path;
+    ds4_startup_cancel_fn ria_startup_cancel;
+    void *ria_startup_cancel_context;
     const char *mtp_path;
     const char *vision_path;
     ds4_backend backend;

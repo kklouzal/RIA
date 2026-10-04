@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import stat
 import struct
 import sys
 from pathlib import Path
@@ -10,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 
-from ria.identity import (ArtifactError, canonical, checked_product, digest, loads,
+from ria.identity import (ArtifactError, atomic_bytes, atomic_output, canonical, checked_product, digest, loads,
                           seal, u64, verify_identity, within)
 from ria.numeric import (bf16_decode, bf16_encode, decode_matrix_rows, e2m1_decode,
                          e4m3_decode, e4m3_encode, encode_fp8_block32)
@@ -145,6 +147,157 @@ def test_preparation_atomic_resume_unknown_and_pages(tmp_path):
     with pytest.raises(ArtifactError):
         prepare(tmp_path, bad, tmp_path / "bad")
     assert not (tmp_path / "bad" / "manifest.json").exists()
+
+
+def test_preparation_rejects_operator_source_revision_mismatch_before_output(tmp_path):
+    recipe = seal({**fixture_recipe(tmp_path), "source_revision": "b" * 40})
+    output = tmp_path / "prepared"
+    with pytest.raises(ArtifactError, match="native source revision mismatch"):
+        prepare(tmp_path, recipe, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("directory", ["tensors", ".prepare-resume", "index", "provenance", "metadata"])
+def test_preparation_rejects_output_directory_links_before_mutation(tmp_path, directory):
+    recipe = fixture_recipe(tmp_path)
+    output, outside = tmp_path / "prepared", tmp_path / "outside"
+    output.mkdir()
+    outside.mkdir()
+    (output / directory).symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ArtifactError, match="output directory"):
+        prepare(tmp_path, recipe, output)
+    assert list(outside.iterdir()) == []
+    assert {path.name for path in output.iterdir()} == {directory}
+
+
+@pytest.mark.parametrize("directory", ["tensors", "index", "metadata"])
+def test_client_rejects_output_directory_links_before_mutation(tmp_path, directory):
+    from ria.client import client_package
+    recipe = fixture_recipe(tmp_path)
+    server = tmp_path / "server"
+    manifest = prepare(tmp_path, recipe, server)
+    output, outside = tmp_path / "client", tmp_path / "outside"
+    output.mkdir()
+    outside.mkdir()
+    (output / directory).symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ArtifactError, match="output directory"):
+        client_package(server, manifest["digest"], output, chunk_size=64)
+    assert list(outside.iterdir()) == []
+    assert {path.name for path in output.iterdir()} == {directory}
+
+
+def test_output_ancestor_link_rejected_before_creating_directories(tmp_path):
+    recipe = fixture_recipe(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ArtifactError, match="output directory"):
+        prepare(tmp_path, recipe, tmp_path / "link" / "nested" / "prepared")
+    with pytest.raises(ArtifactError, match="output directory"):
+        atomic_bytes(tmp_path / "link" / "nested" / "data", b"private")
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("immutable", [False, True])
+def test_atomic_publication_uses_original_directory_inode_during_link_swap(tmp_path, monkeypatch, immutable):
+    from ria import identity
+    parent, original, outside = tmp_path / "parent", tmp_path / "original", tmp_path / "outside"
+    parent.mkdir()
+    outside.mkdir()
+    real_entropy = identity.secrets.token_hex
+    def swap_parent(count):
+        parent.rename(original)
+        parent.symlink_to(outside, target_is_directory=True)
+        return real_entropy(count)
+    monkeypatch.setattr(identity.secrets, "token_hex", swap_parent)
+    with atomic_output(parent / "data", mode=0o600, immutable=immutable) as stream:
+        stream.write(b"owned bytes")
+    assert list(outside.iterdir()) == []
+    assert (original / "data").read_bytes() == b"owned bytes"
+    assert stat.S_IMODE((original / "data").stat().st_mode) == 0o600
+    assert {path.name for path in original.iterdir()} == {"data"}
+
+
+def test_atomic_output_failure_cleanup_and_immutable_commit(tmp_path):
+    path = tmp_path / "nested" / "data"
+    atomic_bytes(path, b"old", mode=0o600)
+    with pytest.raises(RuntimeError, match="injected"):
+        with atomic_output(path) as stream:
+            stream.write(b"incomplete")
+            raise RuntimeError("injected")
+    assert path.read_bytes() == b"old"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    with atomic_output(path, immutable=True) as stream:
+        stream.write(b"old")
+    with pytest.raises(ArtifactError, match="immutable output differs"):
+        with atomic_output(path, immutable=True) as stream:
+            stream.write(b"replacement")
+    assert path.read_bytes() == b"old"
+    assert {child.name for child in path.parent.iterdir()} == {"data"}
+
+
+def test_atomic_output_synchronizes_data_then_parent(tmp_path, monkeypatch):
+    real_fsync, calls = os.fsync, []
+    def observe_sync(fd):
+        calls.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        real_fsync(fd)
+    monkeypatch.setattr(os, "fsync", observe_sync)
+    atomic_bytes(tmp_path / "nested" / "data", b"complete")
+    assert calls == ["directory", "file", "directory"]
+
+
+def test_atomic_output_collision_preserves_unowned_temporary_file(tmp_path, monkeypatch):
+    from ria import identity
+    collision = tmp_path / ".ria-fixed"
+    collision.write_bytes(b"unowned")
+    monkeypatch.setattr(identity.secrets, "token_hex", lambda _: "fixed")
+    with pytest.raises(FileExistsError):
+        atomic_bytes(tmp_path / "data", b"replacement")
+    assert collision.read_bytes() == b"unowned"
+    assert {child.name for child in tmp_path.iterdir()} == {collision.name}
+
+
+def test_atomic_output_cleanup_keeps_primary_failure(tmp_path, monkeypatch):
+    real_unlink = os.unlink
+    def deny_cleanup(path, *args, **kwargs):
+        if str(path).startswith(".ria-"):
+            raise PermissionError("injected cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", deny_cleanup)
+    with pytest.raises(RuntimeError, match="primary failure") as failure:
+        with atomic_output(tmp_path / "data") as stream:
+            stream.write(b"partial")
+            raise RuntimeError("primary failure")
+    assert any("cleanup failed" in note for note in failure.value.__notes__)
+    assert not (tmp_path / "data").exists()
+    for child in tmp_path.iterdir():
+        real_unlink(child)
+
+
+@pytest.mark.parametrize("mutation", ["replace", "mutate_restore"])
+def test_immutable_output_comparison_rejects_changed_existing_inode(tmp_path, monkeypatch, mutation):
+    path = tmp_path / "data"
+    original = b"stable bytes"
+    path.write_bytes(original)
+    real_stat, changed = os.stat, False
+    def change_during_comparison(name, *args, **kwargs):
+        nonlocal changed
+        if kwargs.get("dir_fd") is not None and str(name).startswith(".ria-") and not changed:
+            changed = True
+            if mutation == "replace":
+                replacement = tmp_path / "replacement"
+                replacement.write_bytes(original)
+                replacement.replace(path)
+            else:
+                path.write_bytes(b"changed data")
+                path.write_bytes(original)
+        return real_stat(name, *args, **kwargs)
+    monkeypatch.setattr(os, "stat", change_during_comparison)
+    with pytest.raises(ArtifactError, match="immutable output changed"):
+        with atomic_output(path, immutable=True) as stream:
+            stream.write(original)
+    assert changed and path.read_bytes() == original
+    assert {child.name for child in tmp_path.iterdir()} == {"data"}
 
 
 def test_failed_shard_publication_never_commits(tmp_path, monkeypatch):

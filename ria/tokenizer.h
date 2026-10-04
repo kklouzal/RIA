@@ -20,6 +20,10 @@ bool ria_utf8_decode(ria_utf8_decoder *, const uint8_t *, size_t, bool final,
  * runtime. */
 bool ria_tokenizer_runtime_begin(ria_error *error);
 void ria_tokenizer_runtime_end(void);
+/* The provisioned source is a nonempty regular file of at most 16MiB, opened
+ * without following a final symlink or blocking on a FIFO/device. Its size and
+ * modification identity must remain stable while reading, and the consumed
+ * bytes must match source_sha256. Failure leaves a valid output pointer NULL. */
 bool ria_tokenizer_open(const char *path, const uint8_t source_sha256[32],
                         uint64_t memory_budget, ria_tokenizer **tokenizer,
                         ria_error *error);

@@ -1,11 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tokenizer.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <oniguruma.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define TOKEN_VOCAB 129280u
 #define VOCAB_TABLE 524288u
@@ -490,22 +494,53 @@ static bool metadata(ria_tokenizer *t, ria_error *e) {
 }
 bool ria_tokenizer_open(const char *path, const uint8_t expected[32],
                         uint64_t budget, ria_tokenizer **out, ria_error *e) {
+  if (out)
+    *out = NULL;
   if (!path || !expected || !out || budget < UINT64_C(134217728))
     return ria_fail(e, RIA_INVALID_REQUEST, "invalid tokenizer load contract");
-  *out = NULL;
-  FILE *f = fopen(path, "rb");
-  if (!f)
+  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0)
     return ria_fail(e, RIA_INTEGRITY_ERROR,
                     "cannot read provisioned tokenizer");
-  size_t cap = 16777216;
-  char *bytes = malloc(cap + 1);
+  const size_t cap = 16777216;
+  struct stat before, after;
+  if (fstat(fd, &before) || !S_ISREG(before.st_mode) || before.st_size <= 0 ||
+      (uint64_t)before.st_size > cap) {
+    close(fd);
+    return ria_fail(e, RIA_INTEGRITY_ERROR,
+                    "tokenizer must be a nonempty regular file of at most 16MiB");
+  }
+  size_t n = (size_t)before.st_size;
+  char *bytes = malloc(n + 1);
   if (!bytes) {
-    fclose(f);
+    close(fd);
     return ria_fail(e, RIA_RESOURCE_LIMIT, "tokenizer read allocation failed");
   }
-  size_t n = fread(bytes, 1, cap + 1, f);
-  bool ok = !ferror(f) && n <= cap;
-  if (fclose(f) != 0)
+  bool ok = true;
+  size_t got = 0;
+  while (got < n) {
+    ssize_t count = read(fd, bytes + got, n - got);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      ok = false;
+      break;
+    }
+    got += (size_t)count;
+  }
+  char extra;
+  ssize_t count = -1;
+  if (ok) {
+    do count = read(fd, &extra, 1); while (count < 0 && errno == EINTR);
+    ok = count == 0 && fstat(fd, &after) == 0 &&
+         before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+         before.st_size == after.st_size &&
+         before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+         before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+         before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+  }
+  if (close(fd))
     ok = false;
   uint8_t actual[32];
   if (ok)
@@ -693,22 +728,22 @@ static bool bpe(encoding *e, const char *s, size_t n) {
   for (uint32_t i = 0; i < n; i++)
     candidate(e, nodes, heap, &edges, i);
   while (edges) {
-    edge edge = heap_pop(heap, &edges);
-    symbol *left = &nodes[edge.left], *right = &nodes[edge.right];
-    if (!left->live || !right->live || left->next != edge.right ||
-        left->version != edge.left_version ||
-        right->version != edge.right_version)
+    edge selected = heap_pop(heap, &edges);
+    symbol *left = &nodes[selected.left], *right = &nodes[selected.right];
+    if (!left->live || !right->live || left->next != selected.right ||
+        left->version != selected.left_version ||
+        right->version != selected.right_version)
       continue;
-    left->id = edge.output;
+    left->id = selected.output;
     left->version++;
     left->next = right->next;
     right->live = false;
     right->version++;
     if (right->next != UINT32_MAX)
-      nodes[right->next].previous = edge.left;
+      nodes[right->next].previous = selected.left;
     if (left->previous != UINT32_MAX)
       candidate(e, nodes, heap, &edges, left->previous);
-    candidate(e, nodes, heap, &edges, edge.left);
+    candidate(e, nodes, heap, &edges, selected.left);
   }
   bool ok = true;
   for (uint32_t i = 0; i != UINT32_MAX; i = nodes[i].next)

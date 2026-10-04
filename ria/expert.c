@@ -36,6 +36,10 @@ static bool span(uint64_t rows,uint64_t stride,uint64_t width,uint64_t bytes) {
     return rows && stride>=width && mul(rows-1,stride,&base) &&
         base<=UINT64_MAX-width && base+width<=bytes && bytes<=SIZE_MAX;
 }
+bool ria_expert_float_span_bytes(uint64_t rows,uint64_t stride,uint64_t width,uint64_t *bytes) {
+    if (!bytes || !width || !span(rows,stride,width,SIZE_MAX/sizeof(float))) return false;
+    *bytes=((rows-1)*stride+width)*sizeof(float);return true;
+}
 static uint64_t groups(uint64_t count,uint64_t group) { return count/group+(count%group!=0); }
 bool ria_expert_cuda_pinned_required_bytes(uint64_t input,uint64_t intermediate,uint64_t output,
                                          uint64_t rows,uint64_t tile_rows,uint64_t *bytes,ria_error *e) {
@@ -372,12 +376,11 @@ bool ria_expert_cpu_evaluate(ria_expert_cpu *c,const ria_expert *e,const float *
                             uint64_t input_stride,const float *coefficients,float *output,uint64_t output_stride,ria_error *error) {
     if (!c || !input || !output || !rows || !expert_shape(e,error)) return fail(error,RIA_INVALID_REQUEST,"invalid expert evaluation");
     if (!math_mode(error)) return false;
+    uint64_t input_bytes,output_bytes;
     if (e->gate.in_features>c->max_input || e->gate.out_features>c->max_intermediate || e->down.out_features>c->max_output ||
-        !span(rows,input_stride,e->gate.in_features,SIZE_MAX/sizeof(float)) ||
-        !span(rows,output_stride,e->down.out_features,SIZE_MAX/sizeof(float)))
+        !ria_expert_float_span_bytes(rows,input_stride,e->gate.in_features,&input_bytes) ||
+        !ria_expert_float_span_bytes(rows,output_stride,e->down.out_features,&output_bytes))
         return fail(error,RIA_RESOURCE_LIMIT,"expert evaluation exceeds admitted dimensions/strides");
-    uint64_t input_bytes=((rows-1)*input_stride+e->gate.in_features)*sizeof(float);
-    uint64_t output_bytes=((rows-1)*output_stride+e->down.out_features)*sizeof(float);
     if (!ria_expert_ranges_disjoint(input,input_bytes,output,output_bytes) ||
         (coefficients && (!ria_expert_ranges_disjoint(coefficients,rows*sizeof(float),input,input_bytes) ||
                           !ria_expert_ranges_disjoint(coefficients,rows*sizeof(float),output,output_bytes))))
@@ -408,13 +411,12 @@ bool ria_expert_cpu_projection(ria_expert_cpu *c,const ria_expert_matrix *m,cons
                               bool round_bf16,ria_error *error) {
     if (!c || !input || !output || !rows || !matrix_shape(m,error)) return fail(error,RIA_INVALID_REQUEST,"invalid projection");
     if (!math_mode(error)) return false;
-    uint64_t max_output=c->max_output>c->max_intermediate ? c->max_output : c->max_intermediate;
+    uint64_t max_output=c->max_output>c->max_intermediate ? c->max_output : c->max_intermediate,input_bytes,output_bytes;
     if (m->in_features>c->width || m->out_features>max_output ||
-        !span(rows,input_stride,m->in_features,SIZE_MAX/sizeof(float)) ||
-        !span(rows,output_stride,m->out_features,SIZE_MAX/sizeof(float)))
+        !ria_expert_float_span_bytes(rows,input_stride,m->in_features,&input_bytes) ||
+        !ria_expert_float_span_bytes(rows,output_stride,m->out_features,&output_bytes))
         return fail(error,RIA_RESOURCE_LIMIT,"projection exceeds admitted dimensions/strides");
-    if (!ria_expert_ranges_disjoint(input,((rows-1)*input_stride+m->in_features)*sizeof(float),
-                  output,((rows-1)*output_stride+m->out_features)*sizeof(float)))
+    if (!ria_expert_ranges_disjoint(input,input_bytes,output,output_bytes))
         return fail(error,RIA_INVALID_REQUEST,"projection input/output ranges overlap");
     for (uint64_t row=0;row<rows;++row) {
         for (uint64_t k=0;k<m->in_features;++k) {

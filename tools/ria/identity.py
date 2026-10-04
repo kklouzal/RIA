@@ -1,12 +1,14 @@
 """Bounded duplicate-aware JSON, RFC 8785 identities and durable publication."""
 
 import hashlib
+import contextlib
 import json
 import math
 import os
 import re
+import secrets
 import stat
-import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import rfc8785
@@ -209,21 +211,152 @@ def sync_directory(path):
         os.close(fd)
 
 
-def atomic_bytes(path, data, *, mode=0o644):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".ria-", dir=path.parent)
+def _open_directory(path, *, create=False, missing_ok=False):
+    """Hold each ancestor while opening the next; never follow directory links."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        with os.fdopen(fd, "wb") as stream:
+        for component in Path(os.path.abspath(path)).parts[1:]:
+            try:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    if missing_ok:
+                        os.close(fd)
+                        return None
+                    raise
+                try:
+                    os.mkdir(component, dir_fd=fd)
+                    os.fsync(fd)  # Persist the new directory's parent entry.
+                except FileExistsError:
+                    pass  # A concurrent creator still has to pass O_NOFOLLOW below.
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except OSError as exc:
+        os.close(fd)
+        raise ArtifactError("output directory contains a symlink or is inaccessible") from exc
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def prepare_output_directory(root, children=()):
+    """Reject existing unsafe output paths before creating any owned directory.
+
+    Publication must independently use its held directory descriptor: this
+    preflight avoids partial work but is not a substitute for race-safe writes.
+    """
+    paths = [Path(root), *(Path(root) / child for child in children)]
+    for path in paths:
+        fd = _open_directory(path, missing_ok=True)
+        if fd is not None:
+            os.close(fd)
+    for path in paths:
+        fd = _open_directory(path, create=True)
+        os.close(fd)
+
+
+@contextmanager
+def atomic_output(path, *, mode=0o644, immutable=False):
+    """Durably publish a file through a held, link-free parent directory.
+
+    Immutable outputs are linked without replacement; an existing output must
+    contain identical stable bytes. The held parent inode determines this
+    operation, so a concurrent rename cannot redirect it through a new link.
+    The caller owns only the yielded temporary stream.
+    """
+    path = Path(path)
+    parent = _open_directory(path.parent, create=True)
+    temporary, primary, created = None, None, False
+    try:
+        temporary = ".ria-" + secrets.token_hex(16)
+        fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     mode, dir_fd=parent)
+        created = True
+        try:
+            stream = os.fdopen(fd, "w+b")
+        except BaseException:
+            os.close(fd)
+            raise
+        with stream:
             os.fchmod(stream.fileno(), mode)
-            stream.write(data)
+            yield stream
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        sync_directory(path.parent)
+        if immutable:
+            try:
+                os.link(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent,
+                        follow_symlinks=False)
+            except FileExistsError:
+                _same_immutable_output(parent, path.name, temporary)
+            os.unlink(temporary, dir_fd=parent)
+        else:
+            os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+        created = False
+        os.fsync(parent)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        failures = []
+        try:
+            if created:
+                os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            failures.append(exc)
+        try:
+            os.close(parent)
+        except OSError as exc:
+            failures.append(exc)
+        if failures:
+            message = "; ".join(str(exc) for exc in failures)
+            if primary is not None:
+                primary.add_note("owned publication cleanup failed: " + message)
+            else:
+                raise ArtifactError("owned publication cleanup failed: " + message) from failures[0]
+
+
+def _same_immutable_output(parent, destination, temporary):
+    """Compare a bounded stable descriptor pair; paths must still name them."""
+    def snapshot(value):
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    with contextlib.ExitStack() as stack:
+        streams, identities = [], []
+        for name in (temporary, destination):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                stream = os.fdopen(fd, "rb")
+            except BaseException:
+                os.close(fd)
+                raise
+            stack.enter_context(stream)
+            observed = os.fstat(fd)
+            if not stat.S_ISREG(observed.st_mode):
+                raise ArtifactError("immutable output is not a regular file")
+            streams.append(stream)
+            identities.append(snapshot(observed))
+        if identities[0][2] != identities[1][2]:
+            raise ArtifactError("existing immutable output differs")
+        remaining = identities[0][2]
+        while remaining:
+            count = min(remaining, 1 << 20)
+            left, right = (stream.read(count) for stream in streams)
+            if len(left) != count or left != right:
+                raise ArtifactError("existing immutable output differs")
+            remaining -= count
+        for name, stream, expected in zip((temporary, destination), streams, identities, strict=True):
+            if stream.read(1) or snapshot(os.fstat(stream.fileno())) != expected or snapshot(os.stat(name, dir_fd=parent, follow_symlinks=False)) != expected:
+                raise ArtifactError("immutable output changed during publication")
+
+
+def atomic_bytes(path, data, *, mode=0o644):
+    with atomic_output(path, mode=mode) as stream:
+        stream.write(data)
 
 
 def atomic_json(path, value):

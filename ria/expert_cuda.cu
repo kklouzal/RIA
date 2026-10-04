@@ -457,6 +457,7 @@ bool ria_expert_cuda_evaluate_resident(ria_expert_cuda *c,const ria_expert *sour
                                       const float *input,uint64_t rows,uint64_t input_stride,const float *coefficients,
                                       float *output,uint64_t output_stride,ria_error *e) {
     const ria_expert *expert=resident ? &resident->expert : source;
+    uint64_t input_bytes,output_bytes;
     if (!c || !expert || (resident && resident->owner!=c) || !input || !output || !rows || rows>c->rows ||
         !expert->gate.in_features || !expert->gate.out_features || !expert->down.out_features || input_stride<expert->gate.in_features ||
         output_stride<expert->down.out_features || expert->gate.in_features>c->input || expert->gate.out_features>c->intermediate ||
@@ -464,11 +465,9 @@ bool ria_expert_cuda_evaluate_resident(ria_expert_cuda *c,const ria_expert *sour
         expert->up.profile!=expert->gate.profile || expert->down.profile!=expert->gate.profile ||
         expert->gate.out_features!=expert->up.out_features || expert->gate.in_features!=expert->up.in_features ||
         expert->gate.out_features!=expert->down.in_features || !isfinite(expert->clamp) || expert->clamp<0 ||
-        input_stride>SIZE_MAX/sizeof(float) || output_stride>SIZE_MAX/sizeof(float) ||
-        rows>SIZE_MAX/sizeof(float)/input_stride || rows>SIZE_MAX/sizeof(float)/output_stride)
+        !ria_expert_float_span_bytes(rows,input_stride,expert->gate.in_features,&input_bytes) ||
+        !ria_expert_float_span_bytes(rows,output_stride,expert->down.out_features,&output_bytes))
         return failure(e,RIA_INVALID_REQUEST,"invalid CUDA selected-expert evaluation");
-    uint64_t input_bytes=((rows-1)*input_stride+expert->gate.in_features)*sizeof(float);
-    uint64_t output_bytes=((rows-1)*output_stride+expert->down.out_features)*sizeof(float);
     if (!ria_expert_ranges_disjoint(input,input_bytes,output,output_bytes) ||
         (coefficients && (!ria_expert_ranges_disjoint(coefficients,rows*sizeof(float),input,input_bytes) ||
                           !ria_expert_ranges_disjoint(coefficients,rows*sizeof(float),output,output_bytes))))
@@ -477,7 +476,11 @@ bool ria_expert_cuda_evaluate_resident(ria_expert_cuda *c,const ria_expert *sour
         return failure(e,RIA_INVALID_REQUEST,"invalid grouped CUDA expert coefficient");
     if (!cuda_failure(cudaSetDevice(c->device),e,"select expert device") ||
         !cuda_failure(cudaMemsetAsync(c->device_error,0,sizeof(int),c->stream),e,"clear expert status")) return false;
-    bool ok=copy_rows(c,c->input_values,expert->gate.in_features*sizeof(float),input,input_stride*sizeof(float),
+    /* With one row the stride is unused. Normalize before byte conversion so
+     * an otherwise valid large sentinel stride never overflows that conversion. */
+    uint64_t input_pitch=(rows==1 ? expert->gate.in_features : input_stride)*sizeof(float);
+    uint64_t output_pitch=(rows==1 ? expert->down.out_features : output_stride)*sizeof(float);
+    bool ok=copy_rows(c,c->input_values,expert->gate.in_features*sizeof(float),input,input_pitch,
                       expert->gate.in_features*sizeof(float),rows,cudaMemcpyHostToDevice,e,"upload expert input");
     if (ok && coefficients) ok=ria_expert_cuda_upload_bytes(c,c->coefficients,coefficients,rows*sizeof(float),e);
     if (ok) ok=projection(c,&expert->gate,c->input_values,rows,c->gate,true,e,resident!=NULL) &&
@@ -487,7 +490,7 @@ bool ria_expert_cuda_evaluate_resident(ria_expert_cuda *c,const ria_expert *sour
             c->gate,c->up,coefficients ? c->coefficients : NULL,c->input_values,expert->gate.out_features,rows,expert->clamp,c->device_error);
         ok=launch_ok(e,"execute clamped expert activation") && projection(c,&expert->down,c->input_values,rows,c->output_values,true,e,resident!=NULL);
     }
-    if (ok) ok=copy_rows(c,output,output_stride*sizeof(float),c->output_values,expert->down.out_features*sizeof(float),
+    if (ok) ok=copy_rows(c,output,output_pitch,c->output_values,expert->down.out_features*sizeof(float),
                         expert->down.out_features*sizeof(float),rows,cudaMemcpyDeviceToHost,e,"download expert contributions");
     if (!ok) { ria_error drain; (void)finish(c,&drain); return false; }
     return finish(c,e);

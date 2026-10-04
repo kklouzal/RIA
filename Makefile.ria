@@ -145,6 +145,27 @@ build/ria/tests/test_engine_prefill: tests/ria/test_engine_prefill.c ria/engine.
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -ffunction-sections -fdata-sections $(filter-out ria/engine.c,$^) -Wl,--gc-sections -lcrypto -lpthread -lm -o $@
 
+RIA_ENGINE_STARTUP_FIXTURE_SRC = tests/ria/test_engine_startup.c ria/common.c ria/json.c third_party/ryu/ryu/d2s.c
+build/ria/tests/test_engine_startup: $(RIA_ENGINE_STARTUP_FIXTURE_SRC) ria/engine.c ria/engine.h ds4.h
+	@mkdir -p $(@D)
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -ffunction-sections -fdata-sections $(RIA_ENGINE_STARTUP_FIXTURE_SRC) -Wl,--gc-sections -lcrypto -lpthread -lm -o $@
+
+RIA_API_POLICY_FIXTURE_SRC = tests/ria/test_api_policy.c ria/engine.c ria/service.c ria/json.c ria/common.c third_party/ryu/ryu/d2s.c
+build/ria/tests/test_api_policy: $(RIA_API_POLICY_FIXTURE_SRC) ds4_server.c ria/engine.h ds4.h
+	@mkdir -p $(@D)
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -Wno-unused-function -ffunction-sections -fdata-sections $(RIA_API_POLICY_FIXTURE_SRC) -Wl,--gc-sections -lcrypto -lpthread -lm -o $@
+
+RIA_TENSOR_METADATA_FIXTURE_SRC = tests/ria/test_tensor_metadata.c ria/json.c ria/common.c third_party/ryu/ryu/d2s.c
+build/ria/tests/test_tensor_metadata: $(RIA_TENSOR_METADATA_FIXTURE_SRC) ria/tensor.c ria/tensor.h
+	@mkdir -p $(@D)
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -ffunction-sections -fdata-sections $(RIA_TENSOR_METADATA_FIXTURE_SRC) -Wl,--gc-sections -lcrypto -lnuma -lm -o $@
+
+RIA_TOKENIZER_BOUNDARY_FIXTURE_SRC = tests/ria/test_tokenizer_boundary.c ria/tokenizer.c ria/json.c ria/common.c third_party/ryu/ryu/d2s.c
+RIA_TOKENIZER_BOUNDARY_LDFLAGS = -Wl,--gc-sections -Wl,--wrap=read -Wl,--wrap=__read_chk -lonig -lcrypto -lpthread -lm
+build/ria/tests/test_tokenizer_boundary: $(RIA_TOKENIZER_BOUNDARY_FIXTURE_SRC) ria/tokenizer.h
+	@mkdir -p $(@D)
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -ffunction-sections -fdata-sections $(RIA_TOKENIZER_BOUNDARY_FIXTURE_SRC) $(RIA_TOKENIZER_BOUNDARY_LDFLAGS) -o $@
+
 build/ria/tests/test_server_prefill: tests/ria/test_server_prefill.c ria/server.c ria/expert.c ria/common.c
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -ffunction-sections $(filter-out ria/server.c,$^) -Wl,--gc-sections -lcrypto -lpthread -lm -o $@
@@ -158,7 +179,7 @@ build/ria/tests/test_measurements: tests/ria/test_measurements.c ds4_server.c ri
 	@mkdir -p $(@D)
 	$(RIA_CC) $(RIA_CPPFLAGS) -O2 -g -std=c99 -Wall -Wextra -Werror -Wno-unused-function -fno-fast-math -ffp-contract=off -ffunction-sections -fdata-sections tests/ria/test_measurements.c ria/common.c -Wl,--gc-sections -lm -lpthread -lcrypto -o $@
 
-ria-offline: build/ria/tests/test_engine_prefill build/ria/tests/test_server_prefill build/ria/tests/test_graph_prefill build/ria/tests/test_measurements bin/ds4ctl bin/ds4-ria-qualify build/ria/tests/test_contracts build/ria/tests/test_expert build/ria/tests/test_state build/ria/tests/test_tensor build/ria/tests/test_graph_contracts build/ria/tests/test_probe_config build/ria/tests/test_admin build/ria/tests/test_frontend_contracts build/ria/tests/test_server_contracts build/ria/tests/test_server_lifecycle
+ria-offline: build/ria/tests/test_tokenizer_boundary build/ria/tests/test_api_policy build/ria/tests/test_tensor_metadata build/ria/tests/test_engine_startup build/ria/tests/test_engine_prefill build/ria/tests/test_server_prefill build/ria/tests/test_graph_prefill build/ria/tests/test_measurements bin/ds4ctl bin/ds4-ria-qualify build/ria/tests/test_contracts build/ria/tests/test_expert build/ria/tests/test_state build/ria/tests/test_tensor build/ria/tests/test_graph_contracts build/ria/tests/test_probe_config build/ria/tests/test_admin build/ria/tests/test_frontend_contracts build/ria/tests/test_server_contracts build/ria/tests/test_server_lifecycle
 	build/ria/tests/test_contracts
 	build/ria/tests/test_measurements
 	build/ria/tests/test_expert
@@ -166,12 +187,15 @@ ria-offline: build/ria/tests/test_engine_prefill build/ria/tests/test_server_pre
 	build/ria/tests/test_graph_contracts
 	build/ria/tests/test_graph_prefill
 	build/ria/tests/test_engine_prefill
+	build/ria/tests/test_engine_startup
+	build/ria/tests/test_api_policy
+	build/ria/tests/test_tensor_metadata
 	build/ria/tests/test_server_prefill
 	build/ria/tests/test_probe_config
 	build/ria/tests/test_admin
 	build/ria/tests/test_server_contracts
 	build/ria/tests/test_server_lifecycle
-	$(RIA_PYTHON) -m pytest -q tests/ria
+	RIA_TOKENIZER_BOUNDARY_FIXTURE=build/ria/tests/test_tokenizer_boundary $(RIA_PYTHON) -m pytest -q tests/ria
 	ruff check tools tests/ria deploy
 
 RIA_NATIVE_SRC = $(filter-out ria/qualify.c,$(sort $(wildcard ria/*.c)))
@@ -190,6 +214,10 @@ ria-sanitize:
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/ria/test_state.c ria/state.c ria/common.c $(RIA_LDLIBS) -o build/ria/sanitize/state
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections tests/ria/test_graph_contracts.c ria/graph.c ria/vision.c ria/prefill.c ria/expert.c ria/common.c -Wl,--gc-sections $(RIA_LDLIBS) -lpng -ljpeg -o build/ria/sanitize/graph
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections -fdata-sections tests/ria/test_engine_prefill.c ria/common.c -Wl,--gc-sections -lcrypto -lpthread -lm -o build/ria/sanitize/engine_prefill
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections -fdata-sections $(RIA_ENGINE_STARTUP_FIXTURE_SRC) -Wl,--gc-sections -lcrypto -lpthread -lm -o build/ria/sanitize/engine_startup
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-unused-function -ffunction-sections -fdata-sections $(RIA_API_POLICY_FIXTURE_SRC) -Wl,--gc-sections -lcrypto -lpthread -lm -o build/ria/sanitize/api_policy
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections -fdata-sections $(RIA_TENSOR_METADATA_FIXTURE_SRC) -Wl,--gc-sections -lcrypto -lnuma -lm -o build/ria/sanitize/tensor_metadata
+	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections -fdata-sections $(RIA_TOKENIZER_BOUNDARY_FIXTURE_SRC) $(RIA_TOKENIZER_BOUNDARY_LDFLAGS) -o build/ria/sanitize/tokenizer_boundary
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections tests/ria/test_server_prefill.c ria/expert.c ria/common.c -Wl,--gc-sections -lcrypto -lpthread -lm -o build/ria/sanitize/server_prefill
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections tests/ria/test_graph_prefill.c ria/prefill.c ria/expert.c ria/common.c -Wl,--gc-sections -lcrypto -lm -o build/ria/sanitize/graph_prefill
 	$(RIA_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections tests/ria/test_graph_step.c ria/common.c -Wl,--gc-sections -lcrypto -lm -o build/ria/sanitize/graph_step
@@ -209,6 +237,10 @@ ria-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/state > build/ria/evidence/sanitize-state.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/graph > build/ria/evidence/sanitize-graph.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/engine_prefill > build/ria/evidence/sanitize-engine_prefill.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/engine_startup > build/ria/evidence/sanitize-engine_startup.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/api_policy > build/ria/evidence/sanitize-api_policy.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/tensor_metadata > build/ria/evidence/sanitize-tensor_metadata.log 2>&1
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 RIA_TOKENIZER_BOUNDARY_FIXTURE=build/ria/sanitize/tokenizer_boundary $(RIA_PYTHON) -m pytest -q tests/ria/test_tokenizer_boundary.py > build/ria/evidence/sanitize-tokenizer_boundary.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/server_prefill > build/ria/evidence/sanitize-server_prefill.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/graph_prefill > build/ria/evidence/sanitize-graph_prefill.log 2>&1
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/ria/sanitize/graph_step > build/ria/evidence/sanitize-graph_step.log 2>&1
@@ -241,8 +273,12 @@ build/ria/thread-sanitize/server_prefill: tests/ria/test_server_prefill.c ria/se
 	@mkdir -p $(@D)
 	$(RIA_THREAD_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=thread -fPIE -pie -fno-omit-frame-pointer -pthread -ffunction-sections $(filter-out ria/server.c,$^) -Wl,--gc-sections -lcrypto -lpthread -lm -o $@
 
+build/ria/thread-sanitize/api_policy: $(RIA_API_POLICY_FIXTURE_SRC) ds4_server.c ria/engine.h ds4.h
+	@mkdir -p $(@D)
+	$(RIA_THREAD_CC) $(RIA_CPPFLAGS) $(RIA_CFLAGS) -O1 -fsanitize=thread -fPIE -pie -fno-omit-frame-pointer -pthread -Wno-unused-function -ffunction-sections -fdata-sections $(RIA_API_POLICY_FIXTURE_SRC) -Wl,--gc-sections -lcrypto -lpthread -lm -o $@
+
 .PHONY: ria-thread-sanitize
-ria-thread-sanitize: build/ria/thread-sanitize/server_prefill build/ria/thread-sanitize/admin build/ria/thread-sanitize/server build/ria/thread-sanitize/server_lifecycle
+ria-thread-sanitize: build/ria/thread-sanitize/api_policy build/ria/thread-sanitize/server_prefill build/ria/thread-sanitize/admin build/ria/thread-sanitize/server build/ria/thread-sanitize/server_lifecycle
 	@mkdir -p build/ria/evidence
 	$(RIA_THREAD_CC) --version > build/ria/evidence/thread-sanitize-environment.log
 	setarch --version >> build/ria/evidence/thread-sanitize-environment.log
@@ -251,6 +287,7 @@ ria-thread-sanitize: build/ria/thread-sanitize/server_prefill build/ria/thread-s
 	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/server > build/ria/evidence/thread-sanitize-server.log 2>&1
 	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/server_lifecycle > build/ria/evidence/thread-sanitize-server_lifecycle.log 2>&1
 	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/server_prefill > build/ria/evidence/thread-sanitize-server_prefill.log 2>&1
+	TSAN_OPTIONS=halt_on_error=1:exitcode=66 timeout --signal=TERM --kill-after=5s 60s setarch -R build/ria/thread-sanitize/api_policy > build/ria/evidence/thread-sanitize-api_policy.log 2>&1
 
 ria-clean:
 	rm -rf build/ria

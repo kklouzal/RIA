@@ -95,6 +95,14 @@ int main(void) {
     accepted(&c,&expert,NULL,input,2,5,output+8,output,5);
     assert(ria_expert_cpu_evaluate(cpu,&expert,input,2,5,output+8,output,5,&error));
     accepted(&c,&expert,NULL,input,2,5,NULL,output,5);
+    /* A one-row stride is never used in an address or byte pitch. CPU/CUDA
+     * accept the same exact three-float spans even with huge sentinel strides. */
+    accepted(&c,&expert,NULL,input,1,UINT64_MAX,coefficients,output,UINT64_MAX);
+    assert(ria_expert_cpu_evaluate(cpu,&expert,input,1,UINT64_MAX,coefficients,output,UINT64_MAX,&error));
+    accepted(&c,&expert,NULL,input,1,UINT64_MAX,NULL,output,3);
+    assert(ria_expert_cpu_evaluate(cpu,&expert,input,1,UINT64_MAX,NULL,output,3,&error));
+    accepted(&c,&expert,NULL,input,1,3,NULL,output,UINT64_MAX);
+    assert(ria_expert_cpu_evaluate(cpu,&expert,input,1,3,NULL,output,UINT64_MAX,&error));
     rejected(&c,&expert,NULL,input,2,UINT64_MAX,coefficients,output,5);
     rejected(&c,&expert,NULL,input,2,5,coefficients,output,UINT64_MAX);
     rejected(&c,&expert,NULL,input,UINT64_MAX,5,coefficients,output,5);
@@ -107,6 +115,16 @@ int main(void) {
     assert(!ria_expert_ranges_disjoint((void *)(uintptr_t)(UINTPTR_MAX-3),8,input,sizeof(input)));
     assert(ria_expert_ranges_disjoint(input,8*sizeof(float),input+8,8*sizeof(float)));
     assert(!ria_expert_ranges_disjoint(input,8*sizeof(float),input+7,sizeof(float)));
+    uint64_t extent=0,limit=SIZE_MAX/sizeof(float);
+    assert(ria_expert_float_span_bytes(1,UINT64_MAX,3,&extent) && extent==3*sizeof(float));
+    assert(ria_expert_float_span_bytes(2,5,3,&extent) && extent==8*sizeof(float));
+    assert(ria_expert_float_span_bytes(2,limit-3,3,&extent) && extent==limit*sizeof(float));
+    assert(!ria_expert_float_span_bytes(2,limit-2,3,&extent));
+    assert(!ria_expert_float_span_bytes(2,UINT64_MAX,3,&extent));
+    assert(!ria_expert_float_span_bytes(0,3,3,&extent));
+    assert(!ria_expert_float_span_bytes(1,3,0,&extent));
+    assert(!ria_expert_float_span_bytes(1,2,3,&extent));
+    assert(!ria_expert_float_span_bytes(1,3,3,NULL));
     ria_expert_cpu_destroy(cpu);
     printf("CUDA host boundary: %u actual-prefix cases plus CPU/range comparisons passed (no CUDA)\n",checks);
     return 0;
@@ -121,7 +139,7 @@ int main(void) {
                 str(ROOT / "ria/expert.c"), str(ROOT / "ria/common.c"), "-lcrypto", "-lm", "-o", str(executable),
             ], check=True)
             completed = subprocess.run([str(executable)], capture_output=True, text=True, check=True)
-            self.assertIn("17 actual-prefix cases", completed.stdout)
+            self.assertIn("20 actual-prefix cases", completed.stdout)
 
 
 if __name__ == "__main__":

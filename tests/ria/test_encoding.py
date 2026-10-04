@@ -345,6 +345,69 @@ def test_native_process_sigpipe_policy():
     assert native(["process-policy"], "").strip() == "protected"
 
 
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        (b"fixture-token", 13),
+        (b"fixture-token\n", 13),
+        (b"fixture-token\r\n", 13),
+        (b"x" * 4096, 4096),
+        (b"x" * 4096 + b"\n", 4096),
+        (b"x" * 4096 + b"\r\n", 4096),
+    ],
+)
+def test_native_bearer_regular_file(tmp_path, token, expected):
+    path = tmp_path / "api.token"
+    path.write_bytes(token)
+    assert native(["bearer", str(path)], "").strip() == str(expected)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        b"",
+        b"\n",
+        b"\r\n",
+        b"fixture token",
+        b"fixture\ttoken",
+        b"token\r",
+        b"token\n\n",
+        b"token\x00suffix",
+        b"token\x7f",
+        b"token\xff",
+        b"x" * 4097,
+        b"x" * 4097 + b"\r\n",
+    ],
+)
+def test_native_bearer_invalid_file_clears_output(tmp_path, token):
+    path = tmp_path / "api.token"
+    path.write_bytes(token)
+    native(["bearer", str(path)], "", success=False)
+
+
+def test_native_bearer_rejects_nonregular_without_blocking(tmp_path):
+    path = tmp_path / "token.fifo"
+    os.mkfifo(path, 0o600)
+    # An unconnected FIFO previously blocked startup inside fopen. Reject it
+    # on the opened descriptor; do not wait for a writer or consume its bytes.
+    result = subprocess.run(
+        [str(EXE), "bearer", str(path)],
+        input=b"",
+        capture_output=True,
+        timeout=1,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr.decode()
+    assert not result.stdout
+    for rejected in (tmp_path, tmp_path / "missing.token", Path("/dev/null")):
+        native(["bearer", str(rejected)], "", success=False)
+    regular = tmp_path / "api.token"
+    regular.write_bytes(b"fixture-token")
+    link = tmp_path / "token.link"
+    link.symlink_to(regular)
+    native(["bearer", str(link)], "", success=False)
+
+
 def test_native_nll_large_common_offsets():
     import math
     import struct

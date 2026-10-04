@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from .identity import (ArtifactError, atomic_bytes, atomic_json, canonical, digest,
-                       open_regular, read_json, seal, u64, verify_identity, within)
+                       open_regular, read_json, seal, u64, verify_identity, within, prepare_output_directory)
 from .preparation import (_write_bundle, publish_tensor_pages, stable_id,
                           verify_metadata_graph, verify_package)
 from .safetensors import authenticated_range, inspect
@@ -81,16 +81,13 @@ def client_package(server_root, trusted_digest, output, *, selected_names=(), ch
     selection_digest = digest({"names": sorted(selected)})
     if type(chunk_size) is not int or not 1 <= chunk_size <= 4 << 20 or type(max_shard_bytes) is not int or max_shard_bytes < 2 * chunk_size:
         raise ArtifactError("invalid compact bundle bounds")
-    output.mkdir(parents=True, exist_ok=True)
-    if output.is_symlink():
-        raise ArtifactError("client output must not be a symlink")
+    prepare_output_directory(output, ("tensors", "index", "metadata"))
     if (output / "manifest.json").exists():
         existing = verify_package(output)
         provenance = read_json(output / "client-source.json")
         if (provenance.get("server_manifest_digest"), provenance.get("selection_digest")) != (trusted_digest, selection_digest):
             raise ArtifactError("existing client package has another source or selection")
         return existing
-    (output / "tensors").mkdir(exist_ok=True)
     grants = {key: [(0, u64(item["data_start"]))] for key, item in shards.items()}
     for item in tensors.values():
         if item["shard"] not in shards:

@@ -70754,6 +70754,7 @@ static int ds4_engine_open_internal(ds4_engine **out,
       if (!ria_engine_open(opt->ria_service_path,
                            sizeof *e + sizeof(ds4_session) +
                                2 * 129280 * sizeof(float),
+                           opt->ria_startup_cancel, opt->ria_startup_cancel_context,
                            &e->ria, &error)) {
         fprintf(stderr, "ds4: RIA %d: %s\n", error.code, error.message);
         free(e);

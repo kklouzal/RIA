@@ -1,7 +1,9 @@
 """Offline malformed-artifact and independent shifted-label comparison fixtures."""
 
 import hashlib
+from contextlib import contextmanager
 import math
+import os
 from pathlib import Path
 import struct
 import sys
@@ -11,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from ria.identity import ArtifactError, atomic_json, canonical, seal
+from ria import qualification
 from ria.qualification import compare_logits, freeze_policy, policy_validate, release_matrix, validate_calibration_evidence
 from fixture_measurements import registration, write_component_fixture
 
@@ -50,8 +53,80 @@ def test_exact_parity_and_independent_shifted_loss(tmp_path):
     assert result["reference_nll"] == pytest.approx(expected_loss, abs=1e-12)
     assert result["metrics"] == {"max_abs_error": 0, "max_relative_error": 0,
         "max_rms_error": 0, "max_loss_delta": 0}
+    assert result["reference_sha256"] == hashlib.sha256(left.read_bytes()).hexdigest()
+    assert result["candidate_sha256"] == hashlib.sha256(right.read_bytes()).hexdigest()
     logits(right, document, changed=True)
     assert not compare_logits(left, right, document, p, "same_realization")["passed"]
+
+
+@pytest.mark.parametrize("document", [None, 0, "", [], [{}]])
+def test_nonobject_teacher_input_is_a_boundary_error(tmp_path, document):
+    with pytest.raises(ArtifactError, match="teacher-forced input field"):
+        compare_logits(tmp_path / "absent", tmp_path / "absent", document, policy(tmp_path), "same_realization")
+
+
+@pytest.mark.parametrize("document", [None, 0, "", [], [{}]])
+def test_nonobject_policy_cannot_publish(tmp_path, document):
+    output = tmp_path / "policy.json"
+    with pytest.raises(ArtifactError, match="qualification policy"):
+        freeze_policy(document, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mutation", ["restore_on_close", "inplace_restore", "identical_replacement"])
+def test_logits_identity_and_metrics_use_the_same_immutable_bytes(tmp_path, monkeypatch, mutation):
+    p = policy(tmp_path)
+    document = {"schema_revision": 1, "tokens": [1, 2]}
+    left, right = tmp_path / "left", tmp_path / "right"
+    logits(left, document)
+    logits(right, document, changed=mutation == "restore_on_close")
+    original = right.read_bytes()
+    original_stat = right.stat()
+    open_regular = qualification.open_regular
+
+    class MutatingReader:
+        def __init__(self, stream):
+            self.stream = stream
+            self.changed = False
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, count):
+            raw = self.stream.read(count)
+            if not self.changed:
+                self.changed = True
+                if mutation == "inplace_restore":
+                    with right.open("r+b") as writer:
+                        writer.seek(128)
+                        writer.write(struct.pack("<f", 7))
+                        writer.seek(128)
+                        writer.write(original[128:132])
+                    os.utime(right, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                elif mutation == "identical_replacement":
+                    replacement = tmp_path / "replacement"
+                    replacement.write_bytes(original)
+                    os.replace(replacement, right)
+            return raw
+
+    @contextmanager
+    def concurrent_open(path):
+        if path != right:
+            with open_regular(path) as stream:
+                yield stream
+            return
+        if mutation == "restore_on_close":
+            # The old path-hash passes saw changed logits, while the held reader
+            # consumed exact logits and the original pathname was then restored.
+            right.write_bytes(left.read_bytes())
+        with open_regular(path) as stream:
+            yield stream if mutation == "restore_on_close" else MutatingReader(stream)
+        if mutation == "restore_on_close":
+            right.write_bytes(original)
+
+    monkeypatch.setattr(qualification, "open_regular", concurrent_open)
+    with pytest.raises(ArtifactError, match="changed during comparison"):
+        compare_logits(left, right, document, p, "same_realization")
 
 
 @pytest.mark.parametrize("offset", [0, 1e20, -1e20, float(np.finfo(np.float32).max), -float(np.finfo(np.float32).max)])

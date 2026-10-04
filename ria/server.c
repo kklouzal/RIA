@@ -814,13 +814,17 @@ static bool event_loop(server *s,ria_error *e) {
     struct pollfd fds[6]={{s->wake,POLLIN,0},{s->signals,POLLIN,0},
       {s->listeners[0],draining?0:POLLIN,0},{s->listeners[1],draining?0:POLLIN,0},
       {s->channels[0].transport.fd,POLLIN,0},{s->channels[1].transport.fd,POLLIN,0}};
+    bool restart_poll=false;
     for (unsigned i=0;i<2;i++) {
       channel *c=&s->channels[i]; fds[4+i].events=s->binding_retiring || c->write_retry ? 0 : c->read_event;
       if (c->output_count) fds[4+i].events|=c->write_event;
-      if (c->received && ria_monotonic_ms()>=c->frame_deadline) { invalidate(s); break; }
+      if (c->received && ria_monotonic_ms()>=c->frame_deadline) { invalidate(s); restart_poll=true; break; }
       if (c->output_count && (ria_monotonic_ms()>=c->output[0].deadline ||
-          (c->output[0].write_started && ria_monotonic_ms()>=c->output[0].write_deadline))) { invalidate(s); break; }
+          (c->output[0].write_started && ria_monotonic_ms()>=c->output[0].write_deadline))) { invalidate(s); restart_poll=true; break; }
     }
+    /* Invalidation closes every captured channel fd. Rebuild before polling
+     * or accepting, because a new connection can reuse a retired descriptor. */
+    if (restart_poll) continue;
     int n=poll(fds,6,10);
     if (n<0 && errno==EINTR) continue;
     if (n<0) return ria_fail(e,RIA_INTERNAL_ERROR,"expert event poll failed");

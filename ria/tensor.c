@@ -183,7 +183,7 @@ static int open_below(int root, const char *path, ria_error *e) {
     }
     int next =
         openat(dir, part,
-               O_RDONLY | O_CLOEXEC | O_NOFOLLOW | (slash ? O_DIRECTORY : 0));
+               O_RDONLY | O_CLOEXEC | O_NOFOLLOW | (slash ? O_DIRECTORY : O_NONBLOCK));
     if (next < 0) {
       ria_error_set(e, RIA_INTEGRITY_ERROR,
                     "cannot open artifact component: %s", strerror(errno));
@@ -203,12 +203,26 @@ static int open_below(int root, const char *path, ria_error *e) {
   free(copy);
   return result;
 }
-static bool metadata_peak(uint64_t retained,uint64_t input,ria_json_limits limits,uint64_t budget,ria_error *e) {
-  uint64_t nodes=input/2+1,bytes;
-  if (nodes>limits.max_nodes) nodes=limits.max_nodes;
-  if (!ria_u64_mul(nodes,sizeof(ria_json_node),&bytes) || !ria_u64_add(bytes,input+1,&bytes) ||
-      !ria_u64_add(bytes,input,&bytes) || !ria_u64_add(bytes,retained,&bytes) || bytes>budget)
-    return ria_fail(e,RIA_RESOURCE_LIMIT,"metadata read/DOM peak exceeds explicit startup reservation");
+static bool metadata_peak(uint64_t retained,size_t input,ria_json_limits limits,bool copied_input,
+                          uint64_t budget,ria_error *e) {
+  uint32_t nodes;uint64_t bytes,keys;
+  if (!ria_json_parse_required_bytes(input,limits,&nodes,&bytes,e) ||
+      !ria_json_keys_required_bytes(nodes,&keys,e) || !ria_u64_add(bytes,keys,&bytes) ||
+      (copied_input && !ria_u64_add(bytes,input,&bytes)) ||
+      !ria_u64_add(bytes,retained,&bytes) || bytes>budget)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"metadata input/DOM/duplicate-key peak exceeds explicit startup reservation");
+  return true;
+}
+static bool metadata_canonical_peak(const ria_json_doc *d,uint64_t retained,ria_json_limits limits,
+                                    uint64_t budget,ria_error *e) {
+  uint64_t bytes,keys,slots;
+  /* Input storage is freed before hashing. Nested canonical key arrays remain
+   * live during descent; an empty object still allocates one pointer slot. */
+  if (!ria_json_canonical_required_bytes(d->string_bytes,d->count,&bytes,e) ||
+      !ria_u64_add(d->count,limits.max_depth,&slots) ||
+      !ria_json_keys_required_bytes(slots,&keys,e) || !ria_u64_add(bytes,keys,&bytes) ||
+      !ria_u64_add(bytes,d->allocated_bytes,&bytes) || !ria_u64_add(bytes,retained,&bytes) || bytes>budget)
+    return ria_fail(e,RIA_RESOURCE_LIMIT,"metadata DOM/canonical/key peak exceeds explicit startup reservation");
   return true;
 }
 static bool read_document(int fd,ria_json_doc *d,ria_json_limits limits,uint64_t retained,uint64_t budget,ria_error *e) {
@@ -220,7 +234,7 @@ static bool read_document(int fd,ria_json_doc *d,ria_json_limits limits,uint64_t
                     "invalid tensor index page file/size");
   }
   size_t length = (size_t)st.st_size, got = 0;
-  if (!metadata_peak(retained,length,limits,budget,e)) { close(fd); return false; }
+  if (!metadata_peak(retained,length,limits,true,budget,e)) { close(fd); return false; }
   uint8_t *bytes = malloc(length);
   if (!bytes) {
     close(fd);
@@ -246,6 +260,10 @@ static bool read_document(int fd,ria_json_doc *d,ria_json_limits limits,uint64_t
   if (ok)
     ok = ria_json_parse(bytes, length,limits,d,e);
   free(bytes);
+  if (ok && !metadata_canonical_peak(d,retained,limits,budget,e)) {
+    ria_json_free(d);
+    ok=false;
+  }
   return ok;
 }
 static bool read_page(int root,const char *path,ria_json_doc *d,uint64_t retained,uint64_t budget,ria_error *e) {
@@ -680,7 +698,7 @@ static bool safetensors(const ria_tensor_store *s, const ria_shard *a,uint64_t m
       return ria_fail(e,RIA_RESOURCE_LIMIT,"header metadata accounting overflow");
   }
   if (owned<arenas || !ria_u64_add(owned-arenas,s->tensor_count*16,&retained) ||
-      !metadata_peak(retained,header,(ria_json_limits){16u<<20,1000000,16},metadata_budget,e)) return false;
+      !metadata_peak(retained,(size_t)header,(ria_json_limits){16u<<20,1000000,16},false,metadata_budget,e)) return false;
   if (!ria_json_parse(a->data + 8, (size_t)header,
                       (ria_json_limits){16u << 20, 1000000, 16}, &d, e))
     return false;
@@ -950,7 +968,7 @@ static bool store_read(ria_tensor_store *s,const char *path,const ria_tensor_loa
   if (!o || !o->expected_digest || !o->role || !o->max_resident_bytes)
     return ria_fail(e, RIA_INVALID_REQUEST, "missing trusted tensor admission");
   uint64_t metadata_budget=o->max_metadata_bytes ? o->max_metadata_bytes : o->max_resident_bytes;
-  int manifest_fd=open(path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+  int manifest_fd=open(path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
   if (manifest_fd<0) return ria_fail(e,RIA_INTEGRITY_ERROR,"bounded manifest open failed");
   if (!read_document(manifest_fd,&s->manifest,manifest_limits,0,metadata_budget,e) ||
       !identity(&s->manifest, o->expected_digest, s->digest, e))

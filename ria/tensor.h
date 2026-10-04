@@ -49,7 +49,8 @@ typedef struct {
   int numa_node; /* -1: caller-selected default policy; otherwise explicit bind
                   */
   uint64_t max_metadata_bytes; /* 0 derives max_resident_bytes; includes peak
-                               * retained DOM/index and transient parse bytes. */
+                               * retained DOM/index, input, duplicate-key and
+                               * canonical/hash scratch peaks. */
 } ria_tensor_load_options;
 
 /* Validate the complete descriptor before allocation. Payloads are copied to

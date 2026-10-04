@@ -45,11 +45,24 @@
 #include <time.h>
 #include <unistd.h>
 
-static volatile sig_atomic_t g_stop_requested = 0;
-static volatile sig_atomic_t g_listen_fd = -1;
+/* These process-owned words are shared by signal, main, worker, and admin
+ * threads. GCC/Clang lock-free atomics are required under the C99 build: the
+ * handler must never call a library lock. Relaxed ordering communicates only
+ * cancellation and listener-close ownership, without publishing other state. */
+_Static_assert(__atomic_always_lock_free(sizeof(sig_atomic_t), 0),
+               "server signal words require lock-free atomics");
+static sig_atomic_t g_stop_requested = 0;
+static sig_atomic_t g_listen_fd = -1;
+static bool server_stop_requested(void) {
+    return __atomic_load_n(&g_stop_requested, __ATOMIC_RELAXED) != 0;
+}
 #ifdef DS4_RIA
-/* Process-owned signal policy, selected before publishing the listener. */
-static volatile sig_atomic_t g_ria_signal_mode = 0;
+/* Selected before engine/worker construction, then immutable at runtime. */
+static sig_atomic_t g_ria_signal_mode = 0;
+static bool ria_startup_cancelled(void *context) {
+    (void)context;
+    return server_stop_requested();
+}
 #endif
 
 #define DS4_SERVER_IO_TIMEOUT_SEC 10
@@ -59,22 +72,21 @@ static volatile sig_atomic_t g_ria_signal_mode = 0;
 
 #if defined(__GNUC__) || defined(__clang__)
 #define DS4_SERVER_MAYBE_UNUSED __attribute__((unused))
+#define DS4_SERVER_PRINTF(format_index, argument_index) \
+    __attribute__((format(printf, format_index, argument_index)))
 #else
 #define DS4_SERVER_MAYBE_UNUSED
+#define DS4_SERVER_PRINTF(format_index, argument_index)
 #endif
 
 static void stop_signal_handler(int sig) {
     (void)sig;
-    if (g_stop_requested) _exit(130);
-    g_stop_requested = 1;
+    if (__atomic_exchange_n(&g_stop_requested, 1, __ATOMIC_RELAXED)) _exit(130);
 #ifdef DS4_RIA
-    if (g_ria_signal_mode) return;
+    if (__atomic_load_n(&g_ria_signal_mode, __ATOMIC_RELAXED)) return;
 #endif
-    if (g_listen_fd >= 0) {
-        int fd = (int)g_listen_fd;
-        g_listen_fd = -1;
-        close(fd);
-    }
+    int fd = (int)__atomic_exchange_n(&g_listen_fd, -1, __ATOMIC_RELAXED);
+    if (fd >= 0) close(fd);
 }
 
 typedef struct {
@@ -163,6 +175,7 @@ static void buf_puts(buf *b, const char *s) {
     buf_append(b, s, strlen(s));
 }
 
+static void buf_printf(buf *b, const char *fmt, ...) DS4_SERVER_PRINTF(2, 3);
 static void buf_printf(buf *b, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -5852,7 +5865,7 @@ static bool send_all(int fd, const void *p, size_t n) {
 #endif
     long long deadline = wall_ms() + stall_ms;
     while (n) {
-        if (g_stop_requested) return false;
+        if (server_stop_requested()) return false;
         ssize_t w = send(fd, s, n, 0);
         if (w < 0 && errno == EINTR) continue;
         if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -10033,6 +10046,7 @@ static double now_sec(void) {
 
 static pthread_mutex_t server_log_mu = PTHREAD_MUTEX_INITIALIZER;
 
+static void server_log(ds4_log_type type, const char *fmt, ...) DS4_SERVER_PRINTF(2, 3);
 static void server_log(ds4_log_type type, const char *fmt, ...) {
     time_t now = time(NULL);
     struct tm tm;
@@ -12264,6 +12278,7 @@ static void trace_piece(server *s, uint64_t id, const char *piece, size_t len) {
     pthread_mutex_unlock(&s->trace_mu);
 }
 
+static void trace_event(server *s, uint64_t id, const char *fmt, ...) DS4_SERVER_PRINTF(3, 4);
 static void trace_event(server *s, uint64_t id, const char *fmt, ...) {
     if (!s->trace || !id) return;
     pthread_mutex_lock(&s->trace_mu);
@@ -12614,12 +12629,12 @@ static bool server_prefill_enter(server *s, server_slot *slot) {
     pthread_mutex_lock(&s->model_mu);
     slot->prefill_waiting = true;
     pthread_cond_broadcast(&s->model_cv);
-    while (!g_stop_requested && !slot_job_cancelled(slot) &&
+    while (!server_stop_requested() && !slot_job_cancelled(slot) &&
            (s->model_busy || s->decode_pending > 0 ||
             server_next_prefill_slot_locked(s) != slot->id)) {
         pthread_cond_wait(&s->model_cv, &s->model_mu);
     }
-    if (g_stop_requested || slot_job_cancelled(slot)) {
+    if (server_stop_requested() || slot_job_cancelled(slot)) {
         slot->prefill_waiting = false;
         pthread_cond_broadcast(&s->model_cv);
         pthread_mutex_unlock(&s->model_mu);
@@ -12682,7 +12697,7 @@ static int server_session_sync(server *s, server_slot *slot,
     int done = common == live && prompt->len >= live ? live : 0;
     bool called = false;
 
-    while (!g_stop_requested && !slot_job_cancelled(slot) &&
+    while (!server_stop_requested() && !slot_job_cancelled(slot) &&
            (!called || done < prompt->len)) {
         int quantum = server_prefill_quantum(s);
         int target = done + quantum;
@@ -12703,7 +12718,7 @@ static int server_session_sync(server *s, server_slot *slot,
             return 1;
         }
     }
-    return (g_stop_requested || slot_job_cancelled(slot)) ?
+    return (server_stop_requested() || slot_job_cancelled(slot)) ?
            DS4_SESSION_SYNC_INTERRUPTED : 0;
 }
 
@@ -12751,7 +12766,7 @@ static int server_session_sync_multimodal(server *s, server_slot *slot,
                                             images, image_count);
     pthread_mutex_unlock(&s->inference_mu);
     bool called = false;
-    while (!g_stop_requested && !slot_job_cancelled(slot) &&
+    while (!server_stop_requested() && !slot_job_cancelled(slot) &&
            (!called || done < prompt->len)) {
         int quantum = server_prefill_quantum(s);
         int target = done + quantum;
@@ -12788,7 +12803,7 @@ static int server_session_sync_multimodal(server *s, server_slot *slot,
             return 1;
         }
     }
-    return (g_stop_requested || slot_job_cancelled(slot)) ?
+    return (server_stop_requested() || slot_job_cancelled(slot)) ?
            DS4_SESSION_SYNC_INTERRUPTED : 0;
 }
 
@@ -13419,9 +13434,9 @@ static int server_eval_tokens(server *s, server_slot *slot, int token,
     *n_accepted = 0;
     if (!s || !slot) return 1;
     if (!s->batched_mode) {
-        if (g_stop_requested || slot_job_cancelled(slot)) {
+        if (server_stop_requested() || slot_job_cancelled(slot)) {
             if (err && errlen) snprintf(err, errlen, "%s",
-                                        g_stop_requested ? "shutdown requested" :
+                                        server_stop_requested() ? "shutdown requested" :
                                                            "client disconnected");
             return DS4_SESSION_SYNC_INTERRUPTED;
         }
@@ -13433,10 +13448,10 @@ static int server_eval_tokens(server *s, server_slot *slot, int token,
     }
 
     pthread_mutex_lock(&s->model_mu);
-    if (g_stop_requested || slot_job_cancelled(slot)) {
+    if (server_stop_requested() || slot_job_cancelled(slot)) {
         pthread_mutex_unlock(&s->model_mu);
         if (err && errlen) snprintf(err, errlen, "%s",
-                                    g_stop_requested ? "shutdown requested" :
+                                    server_stop_requested() ? "shutdown requested" :
                                                        "client disconnected");
         return DS4_SESSION_SYNC_INTERRUPTED;
     }
@@ -13456,7 +13471,7 @@ static int server_eval_tokens(server *s, server_slot *slot, int token,
     pthread_cond_broadcast(&s->model_cv);
     while (!slot->decode_done) {
         const bool client_cancelled = slot_job_cancelled(slot);
-        if ((client_cancelled || g_stop_requested) &&
+        if ((client_cancelled || server_stop_requested()) &&
             server_cancel_pending_decode_locked(s, slot)) {
             if (!client_cancelled) {
                 snprintf(slot->decode_err, sizeof(slot->decode_err),
@@ -13470,10 +13485,10 @@ static int server_eval_tokens(server *s, server_slot *slot, int token,
         pthread_cond_wait(&s->model_cv, &s->model_mu);
     }
     int rc = slot->decode_rc;
-    if (g_stop_requested && rc == 0) rc = DS4_SESSION_SYNC_INTERRUPTED;
+    if (server_stop_requested() && rc == 0) rc = DS4_SESSION_SYNC_INTERRUPTED;
     if (rc != 0 && err && errlen) {
         snprintf(err, errlen, "%s",
-                 g_stop_requested ? "shutdown requested" :
+                 server_stop_requested() ? "shutdown requested" :
                  (slot->decode_err[0] ? slot->decode_err : "decode interrupted"));
     }
     slot->decode_done = false;
@@ -14356,7 +14371,7 @@ decode_again:
     dsml_tracker.model_syntax = j->req.model_syntax;
 
     server_generation_enter(s);
-    while (!g_stop_requested && !job_cancelled(j) && completion < max_tokens &&
+    while (!server_stop_requested() && !job_cancelled(j) && completion < max_tokens &&
            ds4_session_pos(slot->session) < ds4_session_ctx(slot->session)) {
         dsml_decode_state dsml_state = j->req.kind == REQ_CHAT && j->req.has_tools ?
             dsml_tracker.decode : DSML_DECODE_OUTSIDE;
@@ -14750,7 +14765,7 @@ decode_again:
         return;
     }
 
-    if (g_stop_requested && strcmp(finish, "error") != 0) {
+    if (server_stop_requested() && strcmp(finish, "error") != 0) {
         finish = "error";
         snprintf(err, sizeof(err), "shutdown requested");
     }
@@ -17065,11 +17080,11 @@ static bool ria_server_policy(server *s, server_config *cfg, char host[256],
   size_t length = 0;
   if (!ria_json_string(d, ria_json_get(d, api, "bind_address"), &bind, &length,
                        e) ||
-      length >= 256 ||
+      !length || length >= 256 || strlen(bind) != length ||
       !ria_json_string(d, ria_json_get(d, api, "bearer_token_file"),
                        &token_path, &length, e) ||
-      !length || token_path[0] != '/')
-    return false;
+      !length || token_path[0] != '/' || strlen(token_path) != length)
+    return ria_fail(e, RIA_INVALID_REQUEST, "invalid complete API address/credential path");
   struct sockaddr_storage address;
   socklen_t address_length;
   if (!ria_address(bind, true, &address, &address_length, e)) return false;
@@ -17089,33 +17104,24 @@ static bool ria_server_policy(server *s, server_config *cfg, char host[256],
     return ria_fail(e, RIA_INTERNAL_ERROR, "cannot render validated API address");
   cfg->host = host;
   cfg->port = port;
-  FILE *f = fopen(token_path, "rb");
-  if (!f)
-    return ria_fail(e, RIA_UNAUTHORIZED,
-                    "cannot read provisioned API bearer token");
-  size_t n = fread(s->ria_bearer, 1, sizeof s->ria_bearer, f);
-  bool ok = !ferror(f) && n < sizeof s->ria_bearer;
-  if (fclose(f))
-    ok = false;
-  if (n && s->ria_bearer[n - 1] == '\n') {
-    n--;
-    if (n && s->ria_bearer[n - 1] == '\r')
-      n--;
-  }
-  if (!n || n > 4096)
-    ok = false;
-  for (size_t i = 0; ok && i < n; i++)
-    if ((unsigned char)s->ria_bearer[i] <= 32 ||
-        (unsigned char)s->ria_bearer[i] >= 127)
-      ok = false;
-  if (!ok)
-    return ria_fail(e, RIA_UNAUTHORIZED,
-                    "invalid provisioned API bearer token");
-  s->ria_bearer[n] = 0;
-  s->ria_bearer_length = n;
+  if (!ria_api_bearer_read(token_path, s->ria_bearer, sizeof s->ria_bearer,
+                           &s->ria_bearer_length, e))
+    return false;
   s->ria_connections = values[14];
   return true;
 }
+#endif
+#ifdef DS4_RIA
+static bool ria_client_health(void *context, bool *ready, bool *active, ria_error *error) {
+    server *s = context;
+    (void)error;
+    pthread_mutex_lock(&s->mu);
+    *ready = s->ria_ready && !s->stopping && !server_stop_requested();
+    *active = s->ria_generation_reserved;
+    pthread_mutex_unlock(&s->mu);
+    return true;
+}
+
 #endif
 #ifndef DS4_SERVER_TEST
 static void server_request_worker_stop(server *s) {
@@ -17135,15 +17141,6 @@ static void server_request_decode_stop(server *s) {
 }
 
 #ifdef DS4_RIA
-static bool ria_client_health(void *context, bool *ready, bool *active, ria_error *error) {
-    server *s = context;
-    (void)error;
-    pthread_mutex_lock(&s->mu);
-    *ready = s->ria_ready && !s->stopping;
-    *active = s->ria_generation_reserved;
-    pthread_mutex_unlock(&s->mu);
-    return true;
-}
 
 static bool ria_client_drain(void *context, uint64_t deadline, ria_error *error) {
     server *s = context;
@@ -17194,6 +17191,10 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &sa, NULL);
 
     server_config cfg = parse_options(argc, argv);
+#ifdef DS4_RIA
+    __atomic_store_n(&g_ria_signal_mode, cfg.engine.ria_service_path != NULL,
+                     __ATOMIC_RELAXED);
+#endif
     if (cfg.chdir_path && chdir(cfg.chdir_path) != 0) {
         server_log(DS4_LOG_DEFAULT, "ds4-server: failed to chdir to %s: %s",
                    cfg.chdir_path, strerror(errno));
@@ -17205,6 +17206,12 @@ int main(int argc, char **argv) {
     cfg.engine.placement_session_count_hint =
         cfg.batched_sessions > 0 ? cfg.batched_sessions : 1;
     cfg.engine.share_session_prefill_workspace = cfg.batched_sessions > 0;
+#ifdef DS4_RIA
+    if (cfg.engine.ria_service_path) {
+        cfg.engine.ria_startup_cancel = ria_startup_cancelled;
+        cfg.engine.ria_startup_cancel_context = NULL;
+    }
+#endif
     ds4_engine *engine = NULL;
     if (cfg.gpu_vram_arg || cfg.gpu_devices_arg) {
         ds4_gpu_config gpu_cfg = {0};
@@ -17235,6 +17242,12 @@ int main(int argc, char **argv) {
     } else if (ds4_engine_open(&engine, &cfg.engine) != 0) {
         return 1;
     }
+#ifdef DS4_RIA
+    if (cfg.engine.ria_service_path && ria_startup_cancelled(NULL)) {
+        ds4_engine_close(engine);
+        return 1;
+    }
+#endif
 
     if (cfg.engine.distributed.role == DS4_DISTRIBUTED_WORKER) {
         ds4_dist_generation_options gen = {
@@ -17508,7 +17521,6 @@ int main(int argc, char **argv) {
     int exit_status = 0;
 #ifdef DS4_RIA
     if (s.ria_service) {
-        g_ria_signal_mode = 1;
         int flags = fcntl(lfd, F_GETFL, 0);
         if (flags < 0 || fcntl(lfd, F_SETFL, flags | O_NONBLOCK) < 0) {
             server_log(DS4_LOG_DEFAULT, "ds4-server: cannot establish bounded RIA listener: %s", strerror(errno));
@@ -17516,11 +17528,14 @@ int main(int argc, char **argv) {
         }
     }
 #endif
-    g_listen_fd = lfd;
+    __atomic_store_n(&g_listen_fd, lfd, __ATOMIC_RELAXED);
 #ifdef DS4_RIA
     if (s.ria_service) {
         s.ria_listener = lfd;
-        s.ria_ready = true;
+        if (ria_startup_cancelled(NULL)) exit_status = 1;
+        pthread_mutex_lock(&s.mu);
+        s.ria_ready = !exit_status && !server_stop_requested();
+        pthread_mutex_unlock(&s.mu);
         ria_error error = {0};
         if (!ria_admin_start(s.ria_service->admin_socket, 10001,
                              s.ria_service->limits.operation_timeout_ms,
@@ -17528,13 +17543,15 @@ int main(int argc, char **argv) {
                              &s.ria_admin, &error)) {
             fprintf(stderr, "ds4-server: admin startup %d: %s\n", error.code, error.message);
             exit_status = 1;
+            pthread_mutex_lock(&s.mu);
             s.ria_ready = false;
+            pthread_mutex_unlock(&s.mu);
         }
     }
 #endif
     server_log(DS4_LOG_DEFAULT, "ds4-server: listening on http://%s:%d", cfg.host, cfg.port);
 
-    while (!g_stop_requested && !exit_status) {
+    while (!server_stop_requested() && !exit_status) {
         pthread_mutex_lock(&s.mu);
         bool admission_stopped = s.stopping;
         pthread_mutex_unlock(&s.mu);
@@ -17549,7 +17566,7 @@ int main(int argc, char **argv) {
                 pthread_mutex_lock(&s.mu);
                 admission_stopped = s.stopping;
                 pthread_mutex_unlock(&s.mu);
-                if (!admission_stopped && !g_stop_requested) exit_status = 1;
+                if (!admission_stopped && !server_stop_requested()) exit_status = 1;
                 break;
             }
         }
@@ -17559,12 +17576,12 @@ int main(int argc, char **argv) {
             pthread_mutex_lock(&s.mu);
             admission_stopped = s.stopping;
             pthread_mutex_unlock(&s.mu);
-            if (g_stop_requested || admission_stopped) break;
+            if (server_stop_requested() || admission_stopped) break;
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             server_log(DS4_LOG_DEFAULT, "ds4-server: accept failed: %s", strerror(errno));
             continue;
         }
-        if (g_stop_requested) {
+        if (server_stop_requested()) {
             close(fd);
             break;
         }
@@ -17658,13 +17675,13 @@ int main(int argc, char **argv) {
 #endif
             pthread_detach(th);
     }
-    if (g_listen_fd >= 0) {
+    int close_listener = (int)__atomic_exchange_n(&g_listen_fd, -1, __ATOMIC_RELAXED);
+    if (close_listener >= 0) {
 #ifdef DS4_RIA
         pthread_mutex_lock(&s.mu);
         s.ria_listener = -1;
 #endif
-        close(lfd);
-        g_listen_fd = -1;
+        close(close_listener);
 #ifdef DS4_RIA
         pthread_mutex_unlock(&s.mu);
 #endif

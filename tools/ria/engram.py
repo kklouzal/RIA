@@ -7,7 +7,7 @@ import struct
 from pathlib import Path
 
 from .identity import (ArtifactError, atomic_bytes, atomic_json, canonical, loads,
-                       read_verified_bytes, seal)
+                       read_verified_bytes, seal, prepare_output_directory)
 
 NUMPY_VERSION = "2.5.3"
 TOKENIZERS_VERSION = "0.23.2"
@@ -97,7 +97,7 @@ def prepare_metadata(config_path, tokenizer_path, output_dir, *, configuration_s
         data.extend(values)
     encoded = canonical(header)
     encoded += b" " * ((-len(encoded)) % 8)
-    output.mkdir(parents=True, exist_ok=True)
+    prepare_output_directory(output)
     path = output / "engram-metadata.safetensors"
     atomic_bytes(path, struct.pack("<Q", len(encoded)) + encoded + data)
     provenance = seal({"schema_revision": 1, "algorithm": "pinned_deepseek_normalization_pcg64_and_unique_ascending_primes",

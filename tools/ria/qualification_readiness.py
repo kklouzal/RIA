@@ -257,6 +257,7 @@ def qualification_readiness():
             {"command": "tools/qualify_ria.py compare-logits", "scope": "supplied_corpus",
              "observes": ["same_realization_or_native_source_saved_logit_comparison"],
              "missing": ["reference_and_candidate_logit_execution_producer",
+                         "full_model_oracle_corpus_positions_profile_and_determinism_registration",
                          "all_state_operator_fault_capacity_and_container_cases"]}],
         "gates": [_gate_readiness(row) for row in catalog["gates"]],
         "matrix": {"required_cells": 540, "status": "blocked_missing_software",

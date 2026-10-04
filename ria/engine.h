@@ -29,8 +29,15 @@ typedef struct {
 bool ria_api_header(const char *bytes, size_t length, const char *bearer,
                     size_t bearer_length, uint64_t maximum_body,
                     ria_http_header *, ria_error *);
+/* Provisioned credentials are bounded regular files, opened without following
+ * a final symlink or blocking on a FIFO/device. Accept 1..4096 printable ASCII
+ * token bytes with an optional LF/CRLF terminator. Output needs 4097 bytes;
+ * failure clears it and length, without exposing credential contents. */
+bool ria_api_bearer_read(const char *path, char *bearer, size_t capacity,
+                         size_t *length, ria_error *);
 uint64_t ria_engine_frontend_budget(const ria_engine *);
 bool ria_engine_open(const char *service_path, uint64_t frontend_owner_bytes,
+                     ds4_startup_cancel_fn startup_cancel, void *cancel_context,
                      ria_engine **, ria_error *);
 /* Failure may retain a graph with unproved CUDA completion and its borrowed
  * TensorStore/backing. The serving owner must terminate the process; it must

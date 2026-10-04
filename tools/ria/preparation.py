@@ -5,15 +5,14 @@ import os
 import shutil
 import stat
 import struct
-import tempfile
 import math
 import re
 import sys
 from pathlib import Path
 
-from .identity import (ArtifactError, atomic_json, canonical, checked_product, digest,
-                       hash_file, loads, open_regular, read_json, read_verified_bytes, seal, sync_directory,
-                       u64, verify_identity, within)
+from .identity import (ArtifactError, atomic_json, atomic_output, canonical, checked_product, digest,
+                       hash_file, loads, open_regular, read_json, read_verified_bytes, seal,
+                       u64, verify_identity, within, prepare_output_directory)
 from .numeric import (decode_matrix_rows, encode_bf16, encode_fp8_block32)
 from .safetensors import (DTYPE_BYTES, chunk_index, exact_read, inspect, tensor_blocks,
                          validate_source_snapshot)
@@ -238,6 +237,8 @@ def _validate_recipe(root, recipe):
     verify_identity(operator)
     if operator["profile"] != recipe["profile"]:
         raise ArtifactError("operator and preparation profile mismatch")
+    if operator["source_revision"] != recipe["source_revision"]:
+        raise ArtifactError("operator and preparation native source revision mismatch")
     seen = {}
     source_bytes = 0
     for source in recipe["sources"]:
@@ -458,37 +459,22 @@ def _bundle_header(path, tasks, chunk_size, max_shard_bytes):
 def _write_bundle(path, tasks, chunk_size, max_shard_bytes):
     """One immutable coarse shard; authorization groups start at chunk boundaries."""
     encoded, ordered, _ = _bundle_header(path, tasks, chunk_size, max_shard_bytes)
-    fd, temporary = tempfile.mkstemp(prefix=".ria-data-", dir=path.parent)
     records = []
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            os.fchmod(stream.fileno(), 0o644)
-            stream.write(struct.pack("<Q", len(encoded)))
-            stream.write(encoded)
-            for task, offset in ordered:
-                result, written = hashlib.sha256(), 0
-                for block in task["blocks"]():
-                    written += len(block)
-                    if written > task["length"]:
-                        raise ArtifactError("prepared tensor overrun")
-                    result.update(block)
-                    stream.write(block)
-                if written != task["length"]:
-                    raise ArtifactError("prepared tensor truncated")
-                records.append((task, offset, result.hexdigest()))
-            stream.flush()
-            os.fsync(stream.fileno())
-        if path.exists():
-            if hash_file(path) != hash_file(temporary):
-                raise ArtifactError("existing immutable bundle differs")
-            os.unlink(temporary)
-        else:
-            os.rename(temporary, path)
-        sync_directory(path.parent)
-        return records, len(encoded) + 8
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    with atomic_output(path, immutable=True) as stream:
+        stream.write(struct.pack("<Q", len(encoded)))
+        stream.write(encoded)
+        for task, offset in ordered:
+            result, written = hashlib.sha256(), 0
+            for block in task["blocks"]():
+                written += len(block)
+                if written > task["length"]:
+                    raise ArtifactError("prepared tensor overrun")
+                result.update(block)
+                stream.write(block)
+            if written != task["length"]:
+                raise ArtifactError("prepared tensor truncated")
+            records.append((task, offset, result.hexdigest()))
+    return records, len(encoded) + 8
 
 
 def prepare(root, recipe, output, *, role="server", selected_names=None):
@@ -511,9 +497,7 @@ def prepare(root, recipe, output, *, role="server", selected_names=None):
     selected = {name for name in selected if rules[name]["operation"] != "inactive"}
     if not selected:
         raise ArtifactError("empty role package")
-    output.mkdir(parents=True, exist_ok=True)
-    if output.is_symlink():
-        raise ArtifactError("output root must not be a symlink")
+    prepare_output_directory(output, ("tensors", ".prepare-resume", "index", "provenance", "metadata"))
     selection_digest = digest({"names": sorted(selected)})
     state_path = output / ".prepare-state.json"
     converter_digest = digest({path.name: hash_file(path) for path in Path(__file__).parent.glob("*.py")})
@@ -531,8 +515,6 @@ def prepare(root, recipe, output, *, role="server", selected_names=None):
         existing = verify_package(output)
         _validate_sources(tensors)
         return existing
-    data_dir = output / "tensors"
-    data_dir.mkdir(exist_ok=True)
     tasks = []
     for name in sorted(selected):
         rule, source = rules[name], tensors[name]

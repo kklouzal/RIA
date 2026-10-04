@@ -5,7 +5,7 @@ in [the implementation specification](docs/ria-specification.md). Start with the
 The RIA path uses prepared safetensors, a CUDA client, and a RAM-resident CPU or
 CUDA expert service. Hardware and model qualification remain required.
 The [independent review](docs/ria-implementation-review.md) found and corrected
-several defects. [Expert-grouped prompt prefill](docs/ria-prompt-prefill.md) is now
+several defects. [The full implementation once-over](docs/ria-once-over.md) records the latest corrections and verification. [Expert-grouped prompt prefill](docs/ria-prompt-prefill.md) is now
 implemented. Complete semantic physical qualification producers remain missing
 software; this is not a complete implementation yet.
 

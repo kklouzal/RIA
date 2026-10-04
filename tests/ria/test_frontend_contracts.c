@@ -174,6 +174,21 @@ int main(int argc, char **argv) {
     ok = ria_api_header(bytes, n, "fixture-token", 13, 4096, &h, &e);
     if (ok)
       printf("%s %s %" PRIu64 "\n", h.method, h.path, h.body_bytes);
+  } else if (argc == 3 && !strcmp(argv[1], "bearer")) {
+    char token[4097];
+    size_t token_length = 99;
+    memset(token, 'X', sizeof token);
+    ok = ria_api_bearer_read(argv[2], token, sizeof token, &token_length, &e);
+    if (ok)
+      printf("%zu\n", token_length);
+    else {
+      if (token_length)
+        abort();
+      for (size_t i = 0; i < sizeof token; i++)
+        if (token[i])
+          abort();
+    }
+    memset(token, 0, sizeof token);
   } else if (argc == 2 && !strcmp(argv[1], "measurements")) {
     ria_json_doc doc = {0};
     bool enabled = false;

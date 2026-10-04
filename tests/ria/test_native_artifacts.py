@@ -59,6 +59,32 @@ def test_actual_python_package_loads_native_with_authenticated_chunks(tmp_path):
     assert b'"tensors":1' in result.stdout
 
 
+def test_official_recipe_identity_keeps_native_and_publisher_revisions_distinct(tmp_path):
+    from ria.identity import digest
+    from ria.target import _recipe_identity, SOURCE_REVISION, NVIDIA_REVISION, MODEL
+    recipe = fixture_recipe(tmp_path)
+    operator = seal({**read_json(tmp_path / "operator.json"), "source_revision": SOURCE_REVISION})
+    atomic_json(tmp_path / "operator.json", operator)
+    index_sha, config_sha, engram = "c" * 64, "d" * 64, {"digest": "e" * 64}
+    fields = _recipe_identity("bf16", operator, index_sha, config_sha, engram)
+    assert fields["source_revision"] == operator["source_revision"] == SOURCE_REVISION
+    assert fields["logical_model_digest"] == digest({"model_id": MODEL, "source_revision": SOURCE_REVISION,
+        "artifact_revision": NVIDIA_REVISION, "source_index_sha256": index_sha,
+        "configuration_sha256": config_sha, "profile": "bf16", "operator_contract_digest": operator["digest"],
+        "engram_metadata_digest": engram["digest"]})
+    recipe = seal({**recipe, **fields})
+    root = tmp_path / "prepared"
+    manifest = prepare(tmp_path, recipe, root)
+    result = run_loader(root, manifest["digest"])
+    assert result.returncode == 0, result.stderr.decode()
+    # The former converter assigned this independent publisher revision to the
+    # graph root; native consistency must continue to reject that mismatch.
+    bad = seal({**manifest, "source_revision": NVIDIA_REVISION})
+    atomic_json(root / "manifest.json", bad)
+    result = run_loader(root, bad["digest"])
+    assert result.returncode == 1 and b"operator/physical-layout contract" in result.stderr
+
+
 @pytest.mark.parametrize("malformation", ["header_shape_same_product", "physical_rank", "offset_overflow",
     "unknown_dtype", "invalid_stride", "self_alias", "chunk_count", "oversized_resident",
     "shard_traversal", "undeclared_field"])
@@ -111,4 +137,18 @@ def test_native_artifact_file_and_identity_failures(tmp_path, malformation):
     else:
         digest = "0" * 64
     result = run_loader(root, digest)
+    assert result.returncode == 1 and result.stderr
+
+
+@pytest.mark.parametrize("boundary", ["manifest", "index", "shard"])
+def test_native_artifact_fifo_rejected_without_waiting_for_a_writer(tmp_path, boundary):
+    root, manifest, page = fixture(tmp_path)
+    relative = {"manifest": "manifest.json", "index": manifest["tensor_pages"][0]["path"],
+                "shard": page["shards"][0]["path"]}[boundary]
+    path = root / relative
+    path.unlink()
+    os.mkfifo(path, 0o600)
+    executable = Path(os.environ.get("RIA_TENSOR_FIXTURE", ROOT / "build/ria/tests/test_tensor"))
+    result = subprocess.run([str(executable), str(root / "manifest.json"), manifest["digest"], "--validate-only"],
+        capture_output=True, timeout=2, check=False)
     assert result.returncode == 1 and result.stderr

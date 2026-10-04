@@ -84,6 +84,8 @@ bool ria_expert_cuda_evaluate(ria_expert_cuda *context,const ria_expert *expert,
  * weight tile once for the complete row group. Quantizers remain per-row.
  * Logical strided host input, coefficients and output spans must be disjoint,
  * including padding between rows; overlap is rejected before any CUDA call.
+ * Used extents exclude final-row padding; a one-row stride is unused except
+ * for the minimum logical width, exactly as on the CPU boundary.
  * On failure, output is unspecified and must not be published. */
 bool ria_expert_cuda_evaluate_resident(ria_expert_cuda *,const ria_expert *,const ria_expert_cuda_resident *,
                                       const float *input,uint64_t rows,uint64_t input_stride,

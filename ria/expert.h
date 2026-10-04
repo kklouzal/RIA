@@ -54,6 +54,11 @@ void ria_expert_cpu_destroy(ria_expert_cpu *context);
 const char *ria_expert_cpu_kernel(const ria_expert_cpu *context);
 uint64_t ria_expert_cpu_workspace_bytes(const ria_expert_cpu *context);
 uint64_t ria_expert_cpu_metadata_bytes(void);
+/* Exact used host byte extent: ((rows-1)*stride+width)*sizeof(float).
+ * Strides count floats and include padding between rows, with no padding
+ * after the final row. A one-row stride is unused except for stride>=width.
+ * Returns false for empty/invalid or unrepresentable extents; no memory access. */
+bool ria_expert_float_span_bytes(uint64_t rows,uint64_t stride,uint64_t width,uint64_t *bytes);
 /* Pure nonempty byte-span predicate shared by host expert boundaries. Returns
  * false for overlap or unrepresentable address arithmetic; never accesses the
  * pointed-to storage. Callers prove each logical strided extent first. */

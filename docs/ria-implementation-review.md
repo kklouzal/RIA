@@ -1,5 +1,7 @@
 # Independent implementation review
 
+The latest [full implementation once-over](ria-once-over.md) corrected additional boundary/startup/lifecycle defects and passed492 Python tests,36 static checks, ASan/UBSan/leaks, five TSan fixtures and CPU/SM120a build gates. Complete semantic qualification software remains incomplete. Earlier checkpoints below retain their historical scopes.
+
 The second review found correctness defects and mandatory software gaps despite
 the earlier successful offline checks. The prior claim of complete software
 implementation is withdrawn. Hardware qualification remains unexecuted, and

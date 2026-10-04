@@ -7,7 +7,7 @@ import struct
 from pathlib import Path
 
 from .identity import (ArtifactError, atomic_json, canonical, digest, hash_file, loads, read_json,
-                       read_verified_bytes, seal, within)
+                       read_verified_bytes, seal, within, prepare_output_directory, verify_identity)
 from .preparation import _validate_sources, target_operation
 from .safetensors import exact_read, inspect, validate_source_snapshot
 from .identity import open_regular
@@ -16,6 +16,18 @@ SOURCE_REVISION = "2cba9e42aa026125f3ed06c6d98c1db82f7ca027"
 NVIDIA_REVISION = "3431dde3247c13b5957f682b1e3c6fcae2566079"
 MODEL = "deepseek-ai/DeepSeek-V4.1-Flash"
 NVIDIA = "nvidia/DeepSeek-V4.1-Flash-NVFP4"
+
+
+def _recipe_identity(profile, operator, index_sha256, config_sha256, engram_metadata):
+    """Bind the native graph and independent publisher conversion identities."""
+    verify_identity(operator)
+    if operator["source_revision"] != SOURCE_REVISION or operator["profile"] != profile:
+        raise ArtifactError("recipe operator differs from the pinned native source/profile")
+    return {"model_id": MODEL, "source_revision": SOURCE_REVISION, "profile": profile,
+        "logical_model_digest": digest({"model_id": MODEL, "source_revision": SOURCE_REVISION,
+            "artifact_revision": NVIDIA_REVISION, "source_index_sha256": index_sha256,
+            "configuration_sha256": config_sha256, "profile": profile,
+            "operator_contract_digest": operator["digest"], "engram_metadata_digest": engram_metadata["digest"]})}
 
 
 def _locked_metadata(repository, revision, name):
@@ -118,7 +130,7 @@ def create_recipe(source_dir, profile, *, chunk_size=4 << 20, max_shard_bytes=12
         "source_index_sha256": index_sha256, "groups": calibration_groups,
         "qualification": "source-derived calibration identity; numerical/target qualification is separate"})
     directory = root / ".ria-recipes" / calibration["digest"] / profile
-    directory.mkdir(parents=True, exist_ok=True)
+    prepare_output_directory(directory)
     atomic_json(directory / "calibration.json", calibration)
     operator = seal({"schema_revision": 1, "profile": profile, "source_revision": SOURCE_REVISION,
         "graph": "deepseek_v41_flash", "weight_format": "nvfp4" if profile == "nvfp4" else ("fp8_block32" if profile == "fp8" else "bf16"),
@@ -203,11 +215,11 @@ def create_recipe(source_dir, profile, *, chunk_size=4 << 20, max_shard_bytes=12
     encoding_sha256 = hashlib.sha256(encoding_data).hexdigest()
     atomic_bytes(directory / "encoding.py", encoding_data)
     metadata.append({"path": str((directory / "encoding.py").relative_to(root)), "sha256": encoding_sha256})
-    logical_model_digest = digest({"model_id": MODEL, "source_revision": SOURCE_REVISION, "artifact_revision": NVIDIA_REVISION,
-        "source_index_sha256": index_sha256, "configuration_sha256": config_sha256, "profile": profile,
-        "operator_contract_digest": operator["digest"], "engram_metadata_digest": engram_metadata["digest"]})
-    recipe = seal({"schema_revision": 1, "model_id": MODEL, "source_revision": NVIDIA_REVISION, "profile": profile,
-        "logical_model_digest": logical_model_digest, "tokenizer_digest": tokenizer_sha256,
+    # The root and operator identify the native graph revision. The independent
+    # publisher revision stays in calibration provenance and logical identity.
+    recipe = seal({"schema_revision": 1,
+        **_recipe_identity(profile, operator, index_sha256, config_sha256, engram_metadata),
+        "tokenizer_digest": tokenizer_sha256,
         "encoding_digest": encoding_sha256, "operator_contract": str((directory / "operator.json").relative_to(root)),
         "sources": sources, "tensors": rules, "metadata": metadata,
         "feature_exclusions": ["DSpark/MTP target-only omission; no backbone, Engram or vision pruning",

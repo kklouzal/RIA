@@ -25,6 +25,10 @@ index includes all 259 vision tensors; a hybrid checkpoint is unnecessary and
 is not accepted by the automatic path. Compact original reference and tokenizer
 metadata are pinned separately under `locks/metadata`, including the DeepSeek
 commit `2cba9e42aa026125f3ed06c6d98c1db82f7ca027`.
+The recipe, prepared root and operator contract use that native graph revision
+as `source_revision`. The independent NVIDIA artifact revision remains bound
+in calibration provenance and the logical model digest; it is not substituted
+for the graph revision. Preparation rejects a mismatching operator/root revision.
 
 Choose `nvfp4`, `fp8` or `bf16` explicitly. FP8 and BF16 conversion decode the
 publisher's NVFP4 routed weights; widening does not recover unquantized master
@@ -68,6 +72,12 @@ published. Recipe and Engram provenance retain those byte identities rather
 than rehashing potentially changed paths after using their contents.
 Resume verifies completed outputs and publishes the root
 manifest last. Reusing a completed output verifies its exact identity.
+Existing output subdirectories and every ancestor must be real directories.
+Preparation rejects directory symlinks before emitting shards or metadata;
+publication holds directory descriptors so a later path swap cannot redirect
+writes. New directory entries, completed file bytes and parent publication are
+synchronized. Immutable shard publication never replaces a different existing
+file, and comparison checks its bounded size and unchanged descriptor identity.
 
 Extract a compact client package using the independently provisioned server
 manifest digest, not an identity obtained from an unauthenticated peer:
@@ -115,6 +125,9 @@ the session; decode consumes one row. An earlier package without an explicit
 microbatch is rejected. Regenerate the placement/planning documents, inventory,
 bootstrap/probe/calibration evidence, memory plan and deployment lock whenever
 the selected microbatch changes, then recreate the containers.
+Native metadata loading also reserves separate input/DOM/duplicate-key and
+retained-DOM/canonical-hash peaks. A sufficient final metadata size alone does
+not admit a larger temporary parsing or hashing allocation.
 
 On each actual native Linux x86-64 host, first record the real rootful Engine,
 cgroup-v2 topology and intended host parent hierarchy:

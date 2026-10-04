@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 import hashlib
 import itertools
 import math
+import os
 from pathlib import Path
 import struct
 
-from .identity import ArtifactError, atomic_json, canonical, check_json, hash_file, open_regular, read_json, seal, verify_identity, within
+from .identity import ArtifactError, atomic_json, canonical, check_json, open_regular, read_json, seal, verify_identity, within
 from .qualification_schema import CALIBRATION_EVIDENCE, COMPONENT, COMPONENT_NAMES, LOGITS_COMPARISON, MATRIX_AXES, POLICY, RELEASE_MATRIX
 
 
@@ -31,9 +32,9 @@ def policy_validate(value, *, frozen=True):
 
 
 def freeze_policy(value, output):
+    policy_validate(value, frozen=False)
     if "digest" in value or "registered_at" in value:
         raise ArtifactError("freeze accepts a new unsealed policy only")
-    policy_validate(value, frozen=False)
     result = seal({**value, "registered_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
     atomic_json(output, result)
     return result
@@ -64,7 +65,7 @@ def _header(stream, document):
 
 
 def _input(document):
-    if set(document) not in ({"schema_revision", "tokens"}, {"schema_revision", "tokens", "label_mask"}):
+    if not isinstance(document, dict) or set(document) not in ({"schema_revision", "tokens"}, {"schema_revision", "tokens", "label_mask"}):
         raise ArtifactError("unknown or missing teacher-forced input field")
     tokens = document["tokens"]
     if type(document["schema_revision"]) is not int or document["schema_revision"] != 1:
@@ -79,8 +80,23 @@ def _input(document):
     return tokens, mask
 
 
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _unchanged_logits(path, identity, stream=None):
+    if (_file_identity(os.stat(path, follow_symlinks=False)) != identity or
+            (stream is not None and _file_identity(os.fstat(stream.fileno())) != identity)):
+        raise ArtifactError("logits artifacts changed during comparison")
+
+
 def compare_logits(reference, candidate, input_document, policy, axis):
-    """Bound memory to two FP32 vocabulary rows, with no model dependency."""
+    """Hash the consumed bytes and bound scratch to vocabulary rows; no model dependency.
+
+    Input files must remain immutable through comparison. Descriptor and pathname
+    identities reject replacement or mutation; digests identify the exact bytes
+    used for the metrics even if a pathname is restored to its earlier contents.
+    """
     import numpy as np
 
     policy_validate(policy)
@@ -89,12 +105,17 @@ def compare_logits(reference, candidate, input_document, policy, axis):
     tokens, mask = _input(input_document)
     limits = policy["thresholds"][axis]
     reference, candidate = Path(reference), Path(candidate)
-    before = (hash_file(reference), hash_file(candidate))
     absolute = relative = squares = reference_loss = candidate_loss = 0.0
     elements = 0
     with open_regular(reference) as left, open_regular(candidate) as right:
+        identities = (_file_identity(os.fstat(left.fileno())), _file_identity(os.fstat(right.fileno())))
+        _unchanged_logits(reference, identities[0], left)
+        _unchanged_logits(candidate, identities[1], right)
         lh, vocab, positions = _header(left, input_document)
         rh, _, _ = _header(right, input_document)
+        if any(identity[2] != 128 + positions * vocab * 4 for identity in identities):
+            raise ArtifactError("logits file size differs from complete artifact dimensions")
+        hashes = (hashlib.sha256(lh), hashlib.sha256(rh))
         if lh[32:64] != rh[32:64] or lh[32:64].hex() != policy["logical_model_digest"]:
             raise ArtifactError("logical model identity differs from accepted policy")
         if axis == "same_realization" and lh[64:96] != rh[64:96]:
@@ -103,6 +124,8 @@ def compare_logits(reference, candidate, input_document, policy, axis):
             a, b = left.read(vocab * 4), right.read(vocab * 4)
             if len(a) != vocab * 4 or len(b) != vocab * 4:
                 raise ArtifactError("truncated logits row")
+            hashes[0].update(a)
+            hashes[1].update(b)
             av, bv = np.frombuffer(a, dtype="<f4").astype(np.float64), np.frombuffer(b, dtype="<f4").astype(np.float64)
             if not np.isfinite(av).all() or not np.isfinite(bv).all():
                 raise ArtifactError("nonfinite logits")
@@ -122,9 +145,10 @@ def compare_logits(reference, candidate, input_document, policy, axis):
                         reference_loss += loss
         if left.read(1) or right.read(1):
             raise ArtifactError("unexpected bytes after complete logits artifact")
-    after = (hash_file(reference), hash_file(candidate))
-    if before != after:
-        raise ArtifactError("logits artifacts changed during comparison")
+        _unchanged_logits(reference, identities[0], left)
+        _unchanged_logits(candidate, identities[1], right)
+    _unchanged_logits(reference, identities[0])
+    _unchanged_logits(candidate, identities[1])
     label_count = sum(mask)
     metrics = {"max_abs_error": absolute, "max_relative_error": relative,
                "max_rms_error": math.sqrt(squares / elements),
@@ -134,7 +158,7 @@ def compare_logits(reference, candidate, input_document, policy, axis):
     return seal({"schema_revision": 1, "kind": "teacher_forced_comparison", "axis": axis,
         "policy_digest": policy["digest"], "logical_model_digest": lh[32:64].hex(),
         "reference_operator_digest": lh[64:96].hex(), "candidate_operator_digest": rh[64:96].hex(),
-        "input_digest": lh[96:128].hex(), "reference_sha256": after[0], "candidate_sha256": after[1],
+        "input_digest": lh[96:128].hex(), "reference_sha256": hashes[0].hexdigest(), "candidate_sha256": hashes[1].hexdigest(),
         "positions": positions, "labels": label_count, "metrics": metrics,
         "reference_nll": reference_loss / label_count, "candidate_nll": candidate_loss / label_count,
         "passed": all(value <= limits[name] for name, value in metrics.items()),
