@@ -21,25 +21,25 @@ The updated sources passed local and hosted frozen offline gates.
 [Expert-grouped prefill](ria-prompt-prefill.md) is implemented; full semantic
 physical qualification producers remain missing.
 
-The preceding published implementation commit is
-`3614e21aad6465c1af41a2fbeccad2991a6243d2`; later documentation-only commits leave its
+The latest corrected implementation commit is
+`37756b57c885b46f16d431d3cf112518b4c4cf59`; later documentation-only commits leave its
 runtime sources unchanged. Read the [full implementation once-over](ria-once-over.md).
-The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37215164710) passed all
+The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37223845971) passed all
 three jobs and published these Linux amd64 images:
 
 ```text
-ghcr.io/kklouzal/ria-cpu@sha256:54d515c2c0249b81b6f575317bd20287b3b34a888bea8d8082cead0f31c8c4be
-ghcr.io/kklouzal/ria-cuda@sha256:7a6f2185e70315d2c740916d153490d591c60ebd55b96bbbd752a1b7e6a4e45a
+ghcr.io/kklouzal/ria-cpu@sha256:7756430e78ab4e0a21525d81e73cad87ba530b7d14b74a32f2ca98b8d595b4d8
+ghcr.io/kklouzal/ria-cuda@sha256:52684111a91e41d802fe63e18b4df53f7927b34059ec828a98af816980affccd
 ```
 
 Their immutable index/manifest/config hashes, source revision, UID 10001, SPDX/SLSA
 descriptors and anonymous manifest access were verified without downloading filesystem
 or attestation layers. The [publication
-record](../locks/verification/once-over-publication.json) binds the source, jobs, images
+record](../locks/verification/optional-transport-publication.json) binds the source, jobs, images
 and downloaded verification logs. Attestation contents/signatures were not verified.
-These preceding images contain grouped prompt prefill and artifact/startup/lifecycle
-corrections but support mutual TLS only. Optional trusted-network TCP requires the
-new source build; verified replacement pins follow its successful publication. They are build-verified and remain unqualified for model/physical release.
+These images contain grouped prompt prefill, artifact/startup/lifecycle corrections
+and optional certificate-free trusted-network TCP. Default mutual TLS remains
+available for existing configurations. They are build-verified and remain unqualified for model/physical release.
 
 Read the [updated specification](ria-specification.md) and
 [implementation plan](../IMPLEMENTATION_PLAN.md). The user's canonical-base

@@ -29,14 +29,14 @@ This is the deployment runbook for **RIA safetensors containers**. The [original
 
 The client always uses CUDA, including when the expert uses CPU. CUDA binaries contain `sm_120a` AOT code, with no PTX fallback. Do not substitute ARM64, another GPU architecture, MIG identities or an arbitrary device ordinal. The selected physical UUID becomes the sole visible device, addressed as container device index `0`. Use the `GPU-` prefix and lowercase hexadecimal UUID consistently in preflight, requests and registration; the native fixture schema requires that spelling.
 
-These preceding immutable `linux/amd64` images support mutual TLS only. Trusted-network TCP requires a fresh build from this branch; verified replacement pins will be recorded after the optional-transport publication completes. Their runtime source is `3614e21aad6465c1af41a2fbeccad2991a6243d2`:
+Use these immutable, published `linux/amd64` images with optional certificates. Their runtime source is `37756b57c885b46f16d431d3cf112518b4c4cf59`:
 
 ```bash
-CPU_IMAGE='ghcr.io/kklouzal/ria-cpu@sha256:54d515c2c0249b81b6f575317bd20287b3b34a888bea8d8082cead0f31c8c4be'
-CUDA_IMAGE='ghcr.io/kklouzal/ria-cuda@sha256:7a6f2185e70315d2c740916d153490d591c60ebd55b96bbbd752a1b7e6a4e45a'
+CPU_IMAGE='ghcr.io/kklouzal/ria-cpu@sha256:7756430e78ab4e0a21525d81e73cad87ba530b7d14b74a32f2ca98b8d595b4d8'
+CUDA_IMAGE='ghcr.io/kklouzal/ria-cuda@sha256:52684111a91e41d802fe63e18b4df53f7927b34059ec828a98af816980affccd'
 ```
 
-Both are publicly pullable. [The successful build/check run](https://github.com/kklouzal/RIA/actions/runs/37215164710), [publication identities](locks/verification/once-over-publication.json) and [handoff](docs/ria-handoff.md) record the verification scope. GHCR images include build metadata and published SBOM/provenance descriptors; descriptor presence does not establish verified attestation contents or signatures. Tags such as `latest` are not accepted deployment identities. Future images need their own build identities and fresh admission evidence.
+Both are publicly pullable. [The successful build/check run](https://github.com/kklouzal/RIA/actions/runs/37223845971), [publication identities](locks/verification/optional-transport-publication.json) and [handoff](docs/ria-handoff.md) record the verification scope. GHCR images include build metadata and published SBOM/provenance descriptors; descriptor presence does not establish verified attestation contents or signatures. Tags such as `latest` are not accepted deployment identities. Future images need their own build identities and fresh admission evidence.
 
 Install a **rootful Docker Engine**, its **Compose v2 plugin**, and a host with **cgroup v2** using the [official Docker installation instructions](https://docs.docker.com/engine/install/). This orchestration uses the local `/var/run/docker.sock`; rootless, remote Docker contexts and Swarm are outside this path. Record actual Engine/Compose/kernel versions, rather than supplying example version strings.
 
@@ -66,7 +66,7 @@ set -euo pipefail
 umask 077
 git clone --branch codex/ria-implementation https://github.com/kklouzal/RIA.git /opt/RIA
 cd /opt/RIA
-git checkout 3614e21aad6465c1af41a2fbeccad2991a6243d2
+git checkout 37756b57c885b46f16d431d3cf112518b4c4cf59
 python3.12 -m venv /opt/ria-venv
 RIA_PYTHON=/opt/ria-venv/bin/python
 "$RIA_PYTHON" -m pip install --require-hashes -r requirements-ria.txt
