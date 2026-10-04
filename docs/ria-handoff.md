@@ -22,23 +22,27 @@ The updated sources passed local and hosted frozen offline gates.
 physical qualification producers remain missing.
 
 The latest corrected implementation commit is
-`37756b57c885b46f16d431d3cf112518b4c4cf59`; later documentation-only commits leave its
+`d9d0b6e1692c005772358abdd5ed01e1fc03cb4a`; later documentation-only commits leave its
 runtime sources unchanged. Read the [full implementation once-over](ria-once-over.md).
-The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37223845971) passed all
+The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37227441606) passed all
 three jobs and published these Linux amd64 images:
 
 ```text
-ghcr.io/kklouzal/ria-cpu@sha256:7756430e78ab4e0a21525d81e73cad87ba530b7d14b74a32f2ca98b8d595b4d8
-ghcr.io/kklouzal/ria-cuda@sha256:52684111a91e41d802fe63e18b4df53f7927b34059ec828a98af816980affccd
+ghcr.io/kklouzal/ria-cpu@sha256:11e89db1681fadb9aa092ec94078d42e850b4b5c5b3c5e879d89f1059c7160a4
+ghcr.io/kklouzal/ria-cuda@sha256:dceb8971fa01fcdf474624cbafe87e3eec617c4ef78b35dc1e73f71445e47a09
 ```
 
 Their immutable index/manifest/config hashes, source revision, UID 10001, SPDX/SLSA
 descriptors and anonymous manifest access were verified without downloading filesystem
 or attestation layers. The [publication
-record](../locks/verification/optional-transport-publication.json) binds the source, jobs, images
+record](../locks/verification/ngc-cuda-publication.json) binds the source, jobs, images
 and downloaded verification logs. Attestation contents/signatures were not verified.
 These images contain grouped prompt prefill, artifact/startup/lifecycle corrections
-and optional certificate-free trusted-network TCP. Default mutual TLS remains
+and optional certificate-free trusted-network TCP. CUDA roles now use matching
+NVIDIA NGC CUDA 13.4.2 builder/final bases, selected compiler/header/static-cudart
+provenance and verified final-image ELF library closure. The
+[toolchain guide](ria-cuda-toolchain.md) explains version pins and fresh admission
+requirements. Default mutual TLS remains
 available for existing configurations. They are build-verified and remain unqualified for model/physical release.
 
 Read the [updated specification](ria-specification.md) and

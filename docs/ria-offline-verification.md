@@ -1,6 +1,20 @@
 # Offline implementation verification
 
-The optional-certificate implementation passed 560 Python fixtures, Ruff, all36
+The NVIDIA NGC CUDA migration passed 608 Python fixtures/Ruff, 37 static checks
+and 27 zero-finding Clang analyses, all 45 unchanged schemas, and CPU/CUDA AOT
+build gates. All three jobs in the [hosted NGC build](https://github.com/kklouzal/RIA/actions/runs/37227441606)
+passed for `d9d0b6e1692c005772358abdd5ed01e1fc03cb4a`, repeating full
+ASan/UBSan/leaks and five TSan fixtures on Linux amd64. The actual CUDA 13.4.2
+builder exported compiler/header/static-runtime/SDK identities, six SM120a-only
+binaries with no PTX/shared CUDA linkage, 25 raw inspection logs and successful
+final-image ELF dependency resolution without main/GPU execution. The local
+installed CUDA 13.1 compilation is recorded separately and does not prove the
+new SDK build. See [local evidence](../locks/verification/ngc-cuda.json),
+[publication evidence](../locks/verification/ngc-cuda-publication.json) and the
+[toolchain guide](ria-cuda-toolchain.md). Images are build-verified; hardware,
+model numerical/performance and full release qualification remain unrun.
+
+The preceding optional-certificate implementation passed 560 Python fixtures, Ruff, all36
 static checks/27 zero-finding Clang analyses, full ASan/UBSan/leak checking,
 five Clang18 TSan fixtures, all45 unchanged generated schemas, three CPU and
 six SM120a CUDA builds. Default mTLS and explicit certificate-free TCP both
