@@ -1,0 +1,67 @@
+{
+  "classification": "planning artifact checks only; no runtime qualification",
+  "source_sha256": "14224cdb33476944111e14f69a5679f0597c192a44d67b48f048910f326f3f6e",
+  "checks": {
+    "source_original_unchanged": true,
+    "specification_snapshot_exact": true,
+    "work_packages_W00_to_W12": true,
+    "all_locked_requirements_mapped": true,
+    "all_23_sections_mapped": true,
+    "exact_FP8_contract": true,
+    "explicit_large_address_gates": true,
+    "dependency_diagram_acyclic": true,
+    "early_calibration_before_initial_admission": true,
+    "final_requalification_after_optimization": true,
+    "fences_and_local_links": true,
+    "development_evidence_json_parse": true,
+    "inherited_tracked_sources_unchanged": true
+  },
+  "files": {
+    "IMPLEMENTATION_PLAN.md": {
+      "bytes": 54367,
+      "lines": 392,
+      "sha256": "f2f54f7abcef94edbdf42357696f0f903d4d41fee3f7e759369287ed28bb62ab"
+    },
+    "TASK_LEDGER.md": {
+      "bytes": 7986,
+      "lines": 56,
+      "sha256": "b6c142bf573649ef3124ad9ffee20dba99361a9a02c6151523e80cbcee614c8e"
+    },
+    "docs/ria-specification.md": {
+      "bytes": 245262,
+      "lines": 2133,
+      "sha256": "14224cdb33476944111e14f69a5679f0597c192a44d67b48f048910f326f3f6e"
+    },
+    "planning/model-review.md": {
+      "bytes": 24506,
+      "lines": 105,
+      "sha256": "bb1c1957760fd42ebe88eea437818b99ff82e3d541be3609509aeec19d220775"
+    },
+    "planning/protocol-review.md": {
+      "bytes": 28694,
+      "lines": 96,
+      "sha256": "2a75f09403f9e8939668119a78b6dfa363037090ba3477ad21557538b921281a"
+    },
+    "planning/delivery-review.md": {
+      "bytes": 47954,
+      "lines": 246,
+      "sha256": "a5c1fe94bc2a233db808b214b5fe86343c3d2e671503e830c213ebef0c16460e"
+    }
+  },
+  "errors": [],
+  "all_checks_pass": true,
+  "whitespace_review": {
+    "full_staged_check_exit_code": 2,
+    "reason": "Seven existing two-space Markdown hard breaks in exact historical specification snapshot, lines 5\u201311; preserving source integrity",
+    "newly_authored_documentation_check_exit_code": 0,
+    "historical_snapshot_trailing_lines": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ]
+  }
+}

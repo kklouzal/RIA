@@ -1,0 +1,76 @@
+{
+  "recorded_date": "2026-10-03",
+  "classification": "read-only development-host metadata; not production probe or qualification",
+  "architecture": "aarch64",
+  "system": "Linux",
+  "memory": {
+    "MemTotal": "127533268 kB",
+    "MemAvailable": "90292132 kB",
+    "SwapTotal": "33554428 kB"
+  },
+  "tool_versions": {
+    "git": {
+      "path": "/usr/bin/git",
+      "exit": 0,
+      "version": "git version 2.43.0"
+    },
+    "gcc": {
+      "path": "/usr/bin/gcc",
+      "exit": 0,
+      "version": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "g++": {
+      "path": "/usr/bin/g++",
+      "exit": 0,
+      "version": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "make": {
+      "path": "/usr/bin/make",
+      "exit": 0,
+      "version": "GNU Make 4.3"
+    },
+    "cmake": {
+      "path": "/usr/bin/cmake",
+      "exit": 0,
+      "version": "cmake version 3.28.3"
+    },
+    "python3": {
+      "path": "/usr/bin/python3",
+      "exit": 0,
+      "version": "Python 3.12.3"
+    }
+  },
+  "absent_from_path": [
+    "nvcc"
+  ],
+  "gpu": {
+    "exit": 0,
+    "output": "NVIDIA GB10, GPU-51db75b3-8be0-5cfd-f46c-19e1f2e1c2d0, [N/A], 12.1",
+    "error": ""
+  },
+  "docker_engine": {
+    "exit": 0,
+    "output": {
+      "Client": {
+        "Version": "29.6.2",
+        "Os": "linux",
+        "Arch": "arm64",
+        "GitCommit": "dfc4efb",
+        "BuildTime": "Thu Jul 16 16:13:09 2026"
+      },
+      "Server": {
+        "Version": "29.6.2",
+        "Os": "linux",
+        "Arch": "arm64",
+        "GitCommit": "3d80467",
+        "BuildTime": "2026-07-16T16:13:09.000000000+00:00"
+      }
+    },
+    "error": ""
+  },
+  "docker_compose": {
+    "exit": 0,
+    "output": "5.2.0",
+    "error": ""
+  }
+}
