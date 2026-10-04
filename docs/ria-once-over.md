@@ -15,7 +15,7 @@ No further actionable defect remained in those scoped source reviews.
 | Tensor metadata underestimated transient JSON allocations | Shared parser/duplicate-key/canonical equations and retained-DOM accounting; actual native allocation-boundary fixtures |
 | Manifest, index, shard, tokenizer and bearer FIFOs could stall before type checks | Nonblocking no-follow opens, bounded regular-file validation and stable reads; bounded FIFO and mutation regressions |
 | Frontend accepted embedded-NUL configuration strings | Reject incomplete C string representations before use; actual frontend policy fixtures |
-| Startup ignored cancellation during population | Explicit construction callback, phase and at-most4MiB TensorStore progress checks, typed cancellation and cleanup; actual constructor with explicit model/runtime boundary shims |
+| Startup ignored cancellation during population | Explicit construction callback, phase and at most 4 MiB TensorStore progress checks, typed cancellation and cleanup; actual constructor with explicit model/runtime boundary shims |
 | Expired channels left closed descriptors in poll snapshots | Discard the snapshot before polling/accepting; three actual-loop regressions plus existing real TLS/socket cases |
 | Health remained ready after SIGTERM and signal words lacked a concurrency contract | Lock-free compiler atomics, unique listener-close ownership, synchronized readiness and cancellation-aware health; actual frontend cross-thread/second-signal fixtures |
 | CPU/CUDA expert stride boundaries disagreed | One exact-span equation; normalize unused one-row CUDA pitches; production CUDA validation prefix with no device operation |
@@ -30,23 +30,35 @@ The [graph review](../planning/once-over-graph-review.md),
 [qualification review](../planning/once-over-qualification-review.md) retain
 scope, contracts, focused regressions and limitations.
 
-Final frozen local gates passed:492 Python tests,42 actual socket lifecycle
-cases, Ruff,36 static checks including27 zero-finding Clang C analyses,
+Final frozen local gates passed: 492 Python tests, 42 actual socket lifecycle
+cases, Ruff, 36 static checks including 27 zero-finding Clang C analyses,
 ASan/UBSan/leak detection and all five Clang18 TSan fixtures. Three CPU and six
 SM120a CUDA executables built; production HMMA/QMMA/OMMA were present and PTX
-was absent. All45 generated schemas were unchanged. All frozen source bytes
+was absent. All 45 generated schemas were unchanged. All frozen source bytes
 matched across these gates. The [local checkpoint](../locks/verification/once-over.json)
 records exact commands, source/log identities and the preserved failed runs
 that led to the printf and worker-fixture corrections. The Pillow warning
 comes from the intentional palette-transparency reference case; it passes.
 
-Hosted amd64 publication is recorded separately after its jobs complete. Local
-ARM64/compiler/fixture results do not establish physical target readiness.
+All three [hosted jobs](https://github.com/kklouzal/RIA/actions/runs/37215164710) passed
+for implementation commit `3614e21aad6465c1af41a2fbeccad2991a6243d2`, repeating 492
+Python tests, 36 static checks/27 zero-finding Clang analyses, ASan/UBSan/leaks, five
+TSan fixtures, unchanged schemas and both Linux amd64 container builds. Downloaded
+evidence matches all 3,739 tracked source files and all 35 locally validated changed
+runtime inputs. Anonymous bounded registry metadata verified immutable
+index/image/config hashes, source revision, UID 10001 and SPDX/SLSA descriptors.
+Filesystem and attestation layers were not downloaded; attestation contents/signatures
+were not verified. The [publication
+checkpoint](../locks/verification/once-over-publication.json) retains actual job URLs,
+image identities and downloaded evidence hashes. These images remain unqualified for
+model/physical release.
+
+Local ARM64/compiler/fixture results do not establish physical target readiness.
 No checkpoint download, GPU query/initialization/kernel, live model execution,
 physical probe, controlled performance comparison or soak was performed.
 There is no claim of target performance superiority or cross-platform bit identity.
 
-Complete semantic540-cell matrix and fault/gate producers and validators
+Complete semantic 540-cell matrix and fault/gate producers and validators
 remain missing software. Full-model preregistration still needs an explicit
 oracle, corpus, selected positions, profile and determinism contract plus the
 corresponding execution producers. The existing threshold/identity/objective

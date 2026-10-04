@@ -1,6 +1,15 @@
 # Independent implementation review
 
-The latest [full implementation once-over](ria-once-over.md) corrected additional boundary/startup/lifecycle defects and passed492 Python tests,36 static checks, ASan/UBSan/leaks, five TSan fixtures and CPU/SM120a build gates. Complete semantic qualification software remains incomplete. Earlier checkpoints below retain their historical scopes.
+The latest [full implementation once-over](ria-once-over.md) corrected additional
+boundary/startup/lifecycle defects and passed 492 Python tests, 36 static checks,
+ASan/UBSan/leaks, five TSan fixtures and CPU/SM120a build gates. Complete semantic
+qualification software remains incomplete. Earlier checkpoints below retain their
+historical scopes.
+
+The [once-over hosted run](https://github.com/kklouzal/RIA/actions/runs/37215164710)
+passed all three jobs for `3614e21aad6465c1af41a2fbeccad2991a6243d2`; [its publication
+record](../locks/verification/once-over-publication.json) binds the current verified
+amd64 images and immutable source/evidence identities.
 
 The second review found correctness defects and mandatory software gaps despite
 the earlier successful offline checks. The prior claim of complete software
@@ -54,7 +63,7 @@ records 430 Python tests, 36 static checks, sanitizers, all four ThreadSanitizer
 fixtures and CPU/SM120a builds. Target execution remains unrun.
 All three [prefill hosted jobs](https://github.com/kklouzal/RIA/actions/runs/37208400490)
 passed. The [prefill publication record](../locks/verification/prompt-prefill-publication.json)
-binds the verified source, logs and current amd64 images.
+binds the then-published source, logs and amd64 images.
 
 The full540-cell matrix and complete semantic fault/gate producers and
 validators remain missing. Existing numerical, TLS, HTTP replay, soak and

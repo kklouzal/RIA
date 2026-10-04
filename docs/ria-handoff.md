@@ -21,22 +21,24 @@ The updated sources passed local and hosted frozen offline gates.
 [Expert-grouped prefill](ria-prompt-prefill.md) is implemented; full semantic
 physical qualification producers remain missing.
 
-The grouped-prefill implementation commit is
-`97310cd58ebe3b7079c4bdc6acaa2413d701dea6`; later documentation-only commits
-leave those runtime sources unchanged. The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37208400490)
-passed all three jobs and published these Linux amd64 images:
+The latest corrected implementation commit is
+`3614e21aad6465c1af41a2fbeccad2991a6243d2`; later documentation-only commits leave its
+runtime sources unchanged. Read the [full implementation once-over](ria-once-over.md).
+The [hosted build](https://github.com/kklouzal/RIA/actions/runs/37215164710) passed all
+three jobs and published these Linux amd64 images:
 
 ```text
-ghcr.io/kklouzal/ria-cpu@sha256:138bc2a1f96c6a4fcb0f72b3e4c1b49b3cd7623b99e883b7d2accd1260081e70
-ghcr.io/kklouzal/ria-cuda@sha256:b37c7074311546f9518c2b013defad197b1168e852f14c8179fa2177d171018b
+ghcr.io/kklouzal/ria-cpu@sha256:54d515c2c0249b81b6f575317bd20287b3b34a888bea8d8082cead0f31c8c4be
+ghcr.io/kklouzal/ria-cuda@sha256:7a6f2185e70315d2c740916d153490d591c60ebd55b96bbbd752a1b7e6a4e45a
 ```
 
-Their immutable index/manifest/config hashes, source revision, UID10001,
-SBOM/provenance descriptors and anonymous manifest access were verified without
-downloading filesystem layers. The [publication record](../locks/verification/prompt-prefill-publication.json)
-binds the source, jobs, images and downloaded verification logs.
-These images contain grouped prompt prefill. They are build-verified and remain
-unqualified for model/physical release.
+Their immutable index/manifest/config hashes, source revision, UID 10001, SPDX/SLSA
+descriptors and anonymous manifest access were verified without downloading filesystem
+or attestation layers. The [publication
+record](../locks/verification/once-over-publication.json) binds the source, jobs, images
+and downloaded verification logs. Attestation contents/signatures were not verified.
+These images contain grouped prompt prefill and the latest artifact/startup/lifecycle
+corrections. They are build-verified and remain unqualified for model/physical release.
 
 Read the [unchanged specification](ria-specification.md) and
 [implementation plan](../IMPLEMENTATION_PLAN.md). The user's canonical-base
@@ -98,7 +100,7 @@ in an image, command argument or evidence record.
    calibration evidence. Only then launch the full model/bank. There is no
    full-model or one-hour-soak dependency before initial admission.
 
-Provision mount ownership explicitly: the runtime UID10001 must be able to
+Provision mount ownership explicitly: the runtime UID 10001 must be able to
 read the immutable model/config/credential files and write only its report
 directory. General atomic host-tool files default to 0644; deployment staging
 directories are 0700 and explicitly private checkpoints/credentials have stricter

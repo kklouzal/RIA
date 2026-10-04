@@ -1,6 +1,15 @@
 # Offline implementation verification
 
-The latest [full implementation once-over](ria-once-over.md) corrected additional boundary/startup/lifecycle defects and passed492 Python tests,36 static checks, ASan/UBSan/leaks, five TSan fixtures and CPU/SM120a build gates. Complete semantic qualification software remains incomplete. Earlier checkpoints below retain their historical scopes.
+The latest [full implementation once-over](ria-once-over.md) corrected additional
+boundary/startup/lifecycle defects and passed 492 Python tests, 36 static checks,
+ASan/UBSan/leaks, five TSan fixtures and CPU/SM120a build gates. Complete semantic
+qualification software remains incomplete. Earlier checkpoints below retain their
+historical scopes.
+
+The [once-over hosted run](https://github.com/kklouzal/RIA/actions/runs/37215164710)
+passed all three jobs for `3614e21aad6465c1af41a2fbeccad2991a6243d2`; [its publication
+record](../locks/verification/once-over-publication.json) binds the current verified
+amd64 images and immutable source/evidence identities.
 
 Verified 2026-10-04 UTC on the development ARM64 Linux host. The declared release
 target remains Linux x86-64 with the specified physical client/server hardware.
